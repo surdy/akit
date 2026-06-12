@@ -108,7 +108,54 @@ skill  deploy-helper  symlink  .github/skills/deploy-helper           ok
 agent  reviewer       symlink  .github/agents/reviewer.agent.md       ok
 ```
 
+### `search` — search the collection
+
+```bash
+ckit search [<query>]
+```
+
+- Scans `<collection>/skills/<name>/SKILL.md` and `<collection>/agents/<name>.agent.md`.
+- Reads leading YAML-style frontmatter fields: `name`, `description`, and `category`.
+- If `name` is missing, uses the skill directory or agent file name.
+- Fuzzy-matches `<query>` against `name` first and `description` second; best scores print first.
+- An omitted or empty query lists every collection item.
+- Missing or malformed frontmatter emits a warning to stderr and falls back to available fields.
+- Supports the global `--json` flag. The global `--project` flag is accepted but `search` reads
+  only the collection.
+
+Human output is one hit per line:
+
+```text
+type  name  — description (category)
+```
+
+If `description` or `category` is empty, that part is omitted.
+
+Example:
+
+```bash
+$ ckit search deploy
+skill  Deploy Helper  — Ship apps safely (ops)
+```
+
 Use `--json` with any command to emit machine-readable JSON.
+
+For `search`, `--json` emits a stable array of objects:
+
+```json
+[
+  {
+    "type": "skill",
+    "name": "Deploy Helper",
+    "description": "Ship apps safely",
+    "category": "ops",
+    "score": 10087
+  }
+]
+```
+
+`type` is `"skill"` or `"agent"`. Missing `description` and `category` serialize as empty
+strings. Empty-query results use score `0`.
 
 ## How it stays out of your repo
 

@@ -1,0 +1,85 @@
+use std::fs;
+use std::path::Path;
+
+use ckit::collection::Collection;
+use ckit::lockfile::ItemType;
+use ckit::search;
+
+fn make_skill(collection_root: &Path, dir_name: &str, body: &str) {
+    let dir = collection_root.join("skills").join(dir_name);
+    fs::create_dir_all(&dir).unwrap();
+    fs::write(dir.join("SKILL.md"), body).unwrap();
+}
+
+fn make_agent(collection_root: &Path, file_name: &str, body: &str) {
+    let dir = collection_root.join("agents");
+    fs::create_dir_all(&dir).unwrap();
+    fs::write(dir.join(format!("{file_name}.agent.md")), body).unwrap();
+}
+
+#[test]
+fn partial_query_ranks_matching_item_first() {
+    let tmp = tempfile::tempdir().unwrap();
+    let collection_root = tmp.path().join("collection");
+    make_skill(
+        &collection_root,
+        "deploy-helper",
+        "---\nname: Deploy Helper\ndescription: Ship apps safely\ncategory: ops\n---\nbody\n",
+    );
+    make_skill(
+        &collection_root,
+        "docs-helper",
+        "---\nname: Docs Helper\ndescription: Write project docs\ncategory: writing\n---\nbody\n",
+    );
+
+    let collection = Collection::with_root(&collection_root);
+    let hits = search::search(&collection, "depl").unwrap();
+
+    assert!(!hits.is_empty());
+    assert_eq!(hits[0].item_type, ItemType::Skill);
+    assert_eq!(hits[0].name, "Deploy Helper");
+    assert!(hits[0].score > 0);
+}
+
+#[test]
+fn empty_query_returns_all_items() {
+    let tmp = tempfile::tempdir().unwrap();
+    let collection_root = tmp.path().join("collection");
+    make_skill(
+        &collection_root,
+        "deploy-helper",
+        "---\nname: Deploy Helper\ndescription: Ship apps safely\ncategory: ops\n---\nbody\n",
+    );
+    make_agent(
+        &collection_root,
+        "reviewer",
+        "---\nname: Reviewer\ndescription: Review code\ncategory: quality\n---\nbody\n",
+    );
+
+    let collection = Collection::with_root(&collection_root);
+    let hits = search::search(&collection, "").unwrap();
+
+    assert_eq!(hits.len(), 2);
+    assert!(hits.iter().all(|hit| hit.score == 0));
+    assert!(hits.iter().any(|hit| hit.name == "Deploy Helper"));
+    assert!(hits.iter().any(|hit| hit.name == "Reviewer"));
+}
+
+#[test]
+fn missing_or_malformed_frontmatter_is_included_without_panicking() {
+    let tmp = tempfile::tempdir().unwrap();
+    let collection_root = tmp.path().join("collection");
+    make_skill(&collection_root, "plain", "body without frontmatter\n");
+    make_agent(
+        &collection_root,
+        "broken",
+        "---\nname: Broken Agent\ndescription: unterminated frontmatter\n",
+    );
+
+    let collection = Collection::with_root(&collection_root);
+    let hits = search::search(&collection, "").unwrap();
+
+    assert_eq!(hits.len(), 2);
+    assert!(hits.iter().any(|hit| hit.name == "plain"));
+    assert!(hits.iter().any(|hit| hit.name == "broken"));
+}

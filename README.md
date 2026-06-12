@@ -41,4 +41,5 @@ See [`docs/design.md`](docs/design.md) for the full design, decisions, and Phase
 - **Lockfile:** `<project>/.copilot/kit.lock.json` (gitignored):
   `{ "version": 1, "items": [ { "id", "type", "source", "ref", "mode", "target", "bundle"? } ] }`.
 - **fs helpers:** `materialize(item, mode)`, `addExclude`/`removeExclude` on `.git/info/exclude`.
-- **CLI scaffold:** `ckit <cmd> [--project <dir>] [--json]`.
+- **CLI scaffold:** `ckit <cmd> [--project <dir>] [--json]`; commands include `add`, `rm`,
+  `ls`/`status`, and `search`.

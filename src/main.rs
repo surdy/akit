@@ -9,6 +9,7 @@ use ckit::lockfile::{ItemType, Mode};
 use ckit::ops;
 use ckit::ops::{HealthStatus, ListItem};
 use ckit::project::Project;
+use ckit::search::{self, SearchHit};
 
 #[derive(Parser)]
 #[command(
@@ -50,6 +51,11 @@ enum Commands {
     /// List installed items and their health.
     #[command(alias = "status")]
     Ls,
+    /// Search your collection by skill/agent frontmatter.
+    Search {
+        /// Query to fuzzy-match against name and description (empty lists everything).
+        query: Option<String>,
+    },
 }
 
 fn main() {
@@ -61,10 +67,10 @@ fn main() {
 
 fn run() -> Result<()> {
     let cli = Cli::parse();
-    let project = Project::locate(cli.project.clone())?;
 
     match &cli.command {
         Commands::Add { agent, name } => {
+            let project = Project::locate(cli.project.clone())?;
             let collection = Collection::locate()?;
             let item_type = item_type(*agent);
             let report = ops::add_item(&project, &collection, item_type, name)?;
@@ -91,6 +97,7 @@ fn run() -> Result<()> {
             }
         }
         Commands::Rm { agent, name } => {
+            let project = Project::locate(cli.project.clone())?;
             let report = ops::remove_item(&project, item_type(*agent), name)?;
             if cli.json {
                 println!("{}", serde_json::to_string(&report)?);
@@ -115,11 +122,21 @@ fn run() -> Result<()> {
             }
         }
         Commands::Ls => {
+            let project = Project::locate(cli.project.clone())?;
             let items = ops::list_items(&project)?;
             if cli.json {
                 println!("{}", serde_json::to_string(&items)?);
             } else {
                 print_table(&items);
+            }
+        }
+        Commands::Search { query } => {
+            let collection = Collection::locate()?;
+            let hits = search::search(&collection, query.as_deref().unwrap_or_default())?;
+            if cli.json {
+                println!("{}", serde_json::to_string(&hits)?);
+            } else {
+                print_search_hits(&hits);
             }
         }
     }
@@ -190,5 +207,25 @@ fn print_table(items: &[ListItem]) {
             item.target,
             status_name(item.status)
         );
+    }
+}
+
+fn print_search_hits(hits: &[SearchHit]) {
+    for hit in hits {
+        let mut details = hit.description.clone();
+        if !hit.category.is_empty() {
+            if !details.is_empty() {
+                details.push(' ');
+            }
+            details.push('(');
+            details.push_str(&hit.category);
+            details.push(')');
+        }
+
+        if details.is_empty() {
+            println!("{}  {}", type_name(hit.item_type), hit.name);
+        } else {
+            println!("{}  {}  — {}", type_name(hit.item_type), hit.name, details);
+        }
     }
 }
