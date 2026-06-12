@@ -7,6 +7,7 @@
 //! This crate is the harness-agnostic engine; the CLI in `main.rs` and any GUI (pterm) are
 //! thin wrappers over the operations in [`ops`].
 
+pub mod bundle;
 pub mod collection;
 pub mod fsops;
 pub mod gitexclude;

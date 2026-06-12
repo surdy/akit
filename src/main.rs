@@ -1,6 +1,6 @@
 //! ckit CLI — a thin wrapper over the `ckit` engine.
 
-use anyhow::Result;
+use anyhow::{Result, bail};
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 
@@ -40,16 +40,22 @@ enum Commands {
         /// Copy files instead of symlinking them.
         #[arg(long)]
         copy: bool,
+        /// Add every item listed by `bundles/<name>.yml`.
+        #[arg(long)]
+        bundle: Option<String>,
         /// Name of the item to add.
-        name: String,
+        name: Option<String>,
     },
     /// Remove a skill or agent from this project.
     Rm {
         /// Remove an agent (`agents/<name>.agent.md`) instead of a skill.
         #[arg(long)]
         agent: bool,
+        /// Remove every installed item tagged with this bundle.
+        #[arg(long)]
+        bundle: Option<String>,
         /// Name of the item to remove.
-        name: String,
+        name: Option<String>,
     },
     /// List installed items and their health.
     #[command(alias = "status")]
@@ -72,59 +78,103 @@ fn run() -> Result<()> {
     let cli = Cli::parse();
 
     match &cli.command {
-        Commands::Add { agent, copy, name } => {
-            let project = Project::locate(cli.project.clone())?;
-            let collection = Collection::locate()?;
-            let item_type = item_type(*agent);
+        Commands::Add {
+            agent,
+            copy,
+            bundle,
+            name,
+        } => {
             let mode = if *copy { Mode::Copy } else { Mode::Symlink };
-            let report = ops::add_item(&project, &collection, item_type, name, mode)?;
-            if cli.json {
-                println!("{}", serde_json::to_string(&report)?);
-            } else {
-                if report.not_a_git_repo {
-                    eprintln!(
-                        "warning: {} is not a git repository; pulled files will NOT be git-ignored",
-                        project.root.display()
-                    );
+            match (bundle.as_deref(), name.as_deref()) {
+                (Some(_), Some(_)) => {
+                    bail!("add accepts either <name> or --bundle <name>, not both")
                 }
-                let action = if report.link_created {
-                    created_name(report.mode)
-                } else {
-                    already_present_name(report.mode)
-                };
-                println!(
-                    "Added {} '{}' -> {} ({action})",
-                    type_name(report.item_type),
-                    report.id,
-                    report.target
-                );
+                (None, None) => bail!("add requires <name> or --bundle <name>"),
+                (Some(bundle), None) => {
+                    if *agent {
+                        bail!("add --bundle cannot be combined with --agent");
+                    }
+                    let project = Project::locate(cli.project.clone())?;
+                    let collection = Collection::locate()?;
+                    let report = ops::add_bundle(&project, &collection, bundle, mode)?;
+                    if cli.json {
+                        println!("{}", serde_json::to_string(&report)?);
+                    } else {
+                        if report.items.iter().any(|item| item.not_a_git_repo) {
+                            warn_not_git(&project);
+                        }
+                        println!(
+                            "Added bundle '{}' ({} items)",
+                            report.bundle,
+                            report.items.len()
+                        );
+                        for item in &report.items {
+                            println!("  {}", add_report_line(item));
+                        }
+                    }
+                }
+                (None, Some(name)) => {
+                    let project = Project::locate(cli.project.clone())?;
+                    let collection = Collection::locate()?;
+                    let report =
+                        ops::add_item(&project, &collection, item_type(*agent), name, mode, None)?;
+                    if cli.json {
+                        println!("{}", serde_json::to_string(&report)?);
+                    } else {
+                        if report.not_a_git_repo {
+                            warn_not_git(&project);
+                        }
+                        println!("{}", add_report_line(&report));
+                    }
+                }
             }
         }
-        Commands::Rm { agent, name } => {
-            let project = Project::locate(cli.project.clone())?;
-            let report = ops::remove_item(&project, item_type(*agent), name)?;
-            if cli.json {
-                println!("{}", serde_json::to_string(&report)?);
-            } else if report.not_installed {
-                println!(
-                    "{} '{}' is not installed",
-                    title_case(type_name(report.item_type)),
-                    report.id
-                );
-            } else {
-                let removed = if report.target_removed {
-                    "removed"
-                } else {
-                    "target already missing"
-                };
-                println!(
-                    "Removed {} '{}' -> {} ({removed})",
-                    type_name(report.item_type),
-                    report.id,
-                    report.target
-                );
+        Commands::Rm {
+            agent,
+            bundle,
+            name,
+        } => match (bundle.as_deref(), name.as_deref()) {
+            (Some(_), Some(_)) => {
+                bail!("rm accepts either <name> or --bundle <name>, not both")
             }
-        }
+            (None, None) => bail!("rm requires <name> or --bundle <name>"),
+            (Some(bundle), None) => {
+                if *agent {
+                    bail!("rm --bundle cannot be combined with --agent");
+                }
+                let project = Project::locate(cli.project.clone())?;
+                let report = ops::remove_bundle(&project, bundle)?;
+                if cli.json {
+                    println!("{}", serde_json::to_string(&report)?);
+                } else if report.items.is_empty() {
+                    println!("Bundle '{}' is not installed", report.bundle);
+                } else {
+                    println!(
+                        "Removed bundle '{}' ({} items)",
+                        report.bundle,
+                        report.items.len()
+                    );
+                    for item in &report.items {
+                        println!("  {}", remove_report_line(item));
+                    }
+                }
+            }
+            (None, Some(name)) => {
+                let project = Project::locate(cli.project.clone())?;
+                let report = ops::remove_item(&project, item_type(*agent), name)?;
+                if cli.json {
+                    println!("{}", serde_json::to_string(&report)?);
+                } else if report.not_installed {
+                    println!(
+                        "{} '{}' is not installed",
+                        title_case(type_name(report.item_type)),
+                        report.id
+                    );
+                } else {
+                    println!("{}", remove_report_line(&report));
+                }
+            }
+        },
         Commands::Ls => {
             let project = Project::locate(cli.project.clone())?;
             let items = ops::list_items(&project)?;
@@ -200,13 +250,50 @@ fn title_case(s: &str) -> String {
     }
 }
 
+fn warn_not_git(project: &Project) {
+    eprintln!(
+        "warning: {} is not a git repository; pulled files will NOT be git-ignored",
+        project.root.display()
+    );
+}
+
+fn add_report_line(report: &ops::AddReport) -> String {
+    let action = if report.link_created {
+        created_name(report.mode)
+    } else {
+        already_present_name(report.mode)
+    };
+    format!(
+        "Added {} '{}' -> {} ({action})",
+        type_name(report.item_type),
+        report.id,
+        report.target
+    )
+}
+
+fn remove_report_line(report: &ops::RemoveReport) -> String {
+    let removed = if report.target_removed {
+        "removed"
+    } else {
+        "target already missing"
+    };
+    format!(
+        "Removed {} '{}' -> {} ({removed})",
+        type_name(report.item_type),
+        report.id,
+        report.target
+    )
+}
+
 fn print_table(items: &[ListItem]) {
+    let mut bundle_width = "BUNDLE".len();
     let mut type_width = "TYPE".len();
     let mut id_width = "ID".len();
     let mut mode_width = "MODE".len();
     let mut target_width = "TARGET".len();
 
     for item in items {
+        bundle_width = bundle_width.max(item.bundle.as_deref().unwrap_or("-").len());
         type_width = type_width.max(type_name(item.item_type).len());
         id_width = id_width.max(item.id.len());
         mode_width = mode_width.max(mode_name(item.mode).len());
@@ -214,12 +301,20 @@ fn print_table(items: &[ListItem]) {
     }
 
     println!(
-        "{:<type_width$}  {:<id_width$}  {:<mode_width$}  {:<target_width$}  STATUS",
-        "TYPE", "ID", "MODE", "TARGET"
+        "{:<bundle_width$}  {:<type_width$}  {:<id_width$}  {:<mode_width$}  {:<target_width$}  STATUS",
+        "BUNDLE", "TYPE", "ID", "MODE", "TARGET"
     );
-    for item in items {
+    let mut ordered: Vec<&ListItem> = items.iter().collect();
+    ordered.sort_by(|a, b| match (a.bundle.as_deref(), b.bundle.as_deref()) {
+        (Some(a_bundle), Some(b_bundle)) => a_bundle.cmp(b_bundle),
+        (Some(_), None) => std::cmp::Ordering::Less,
+        (None, Some(_)) => std::cmp::Ordering::Greater,
+        (None, None) => std::cmp::Ordering::Equal,
+    });
+    for item in ordered {
         println!(
-            "{:<type_width$}  {:<id_width$}  {:<mode_width$}  {:<target_width$}  {}",
+            "{:<bundle_width$}  {:<type_width$}  {:<id_width$}  {:<mode_width$}  {:<target_width$}  {}",
+            item.bundle.as_deref().unwrap_or("-"),
             type_name(item.item_type),
             item.id,
             mode_name(item.mode),

@@ -43,7 +43,15 @@ fn add_copy_creates_real_files_and_records_copy() {
     let collection = Collection::with_root(&collection_root);
     let (proj, project) = init_project(base);
 
-    let report = ops::add_item(&project, &collection, ItemType::Skill, "demo", Mode::Copy).unwrap();
+    let report = ops::add_item(
+        &project,
+        &collection,
+        ItemType::Skill,
+        "demo",
+        Mode::Copy,
+        None,
+    )
+    .unwrap();
 
     assert!(report.link_created);
     assert_eq!(report.mode, Mode::Copy);
@@ -68,7 +76,15 @@ fn rm_copy_mode_removes_target_exclude_and_lockfile_entry() {
     let collection = Collection::with_root(&collection_root);
     let (proj, project) = init_project(base);
 
-    ops::add_item(&project, &collection, ItemType::Skill, "demo", Mode::Copy).unwrap();
+    ops::add_item(
+        &project,
+        &collection,
+        ItemType::Skill,
+        "demo",
+        Mode::Copy,
+        None,
+    )
+    .unwrap();
     let target = proj.join(".github/skills/demo");
     assert!(target.is_dir());
 
@@ -117,12 +133,10 @@ fn symlink_failure_falls_back_to_copy_with_warning() {
     assert_eq!(json["mode"], "copy");
 
     let target = proj.join(".github/skills/demo");
-    assert!(
-        !fs::symlink_metadata(&target)
-            .unwrap()
-            .file_type()
-            .is_symlink()
-    );
+    assert!(!fs::symlink_metadata(&target)
+        .unwrap()
+        .file_type()
+        .is_symlink());
 
     let lf = Lockfile::load(&project.lockfile_path()).unwrap();
     assert_eq!(lf.items.len(), 1);
@@ -138,7 +152,15 @@ fn list_reports_copy_drift_after_materialized_file_changes() {
     let collection = Collection::with_root(&collection_root);
     let (proj, project) = init_project(base);
 
-    ops::add_item(&project, &collection, ItemType::Skill, "demo", Mode::Copy).unwrap();
+    ops::add_item(
+        &project,
+        &collection,
+        ItemType::Skill,
+        "demo",
+        Mode::Copy,
+        None,
+    )
+    .unwrap();
 
     let items = ops::list_items_with_collection(&project, &collection).unwrap();
     assert_eq!(items.len(), 1);

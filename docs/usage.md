@@ -23,12 +23,23 @@ cargo build --release
   <collection>/
     skills/<name>/SKILL.md
     agents/<name>.agent.md
+    bundles/<name>.yml
   ```
 
 Move your personal skills/agents here (out of `~/.copilot/`, which is auto-loaded in *every*
 project). Skills are directories containing `SKILL.md`; agents are single
 `agents/<name>.agent.md` files. `ckit` then materializes only the ones you select into a given
 project.
+
+Bundles are named YAML manifests that install a set of skills and agents together:
+
+```yaml
+skills: [deploy-to-vercel, lint-fix]
+agents: [code-reviewer]
+```
+
+Either key may be omitted and is treated as an empty list. Bundle adds validate every referenced
+skill and agent before materializing anything; if an id is missing, the whole bundle add fails.
 
 ## Global flags
 
@@ -43,6 +54,7 @@ project.
 
 ```bash
 ckit add [--agent] [--copy] <name>
+ckit add [--copy] --bundle <name>
 ```
 
 - By default, symlinks `<collection>/skills/<name>` into `<project>/.github/skills/<name>`
@@ -51,11 +63,15 @@ ckit add [--agent] [--copy] <name>
   `<project>/.github/agents/<name>.agent.md`.
 - With `--copy`, copies the source files instead of symlinking them and records `"mode": "copy"`
   in the lockfile and `--json` add report.
+- With `--bundle <name>`, reads `<collection>/bundles/<name>.yml` and adds every listed skill and
+  agent through the same add pipeline. `--copy` applies to every item. `--agent` is not used with
+  bundles because the manifest already distinguishes item types.
 - If symlink creation fails at runtime (for example, Windows without symlink privilege), `ckit`
   warns on stderr, falls back to copying, and records the effective `"mode": "copy"`.
 - Appends the pull and the lockfile to `.git/info/exclude`, so nothing is committed and your
   teammates are unaffected.
-- Records the item in `<project>/.copilot/kit.lock.json`.
+- Records the item in `<project>/.copilot/kit.lock.json`. Bundle-installed entries carry
+  `"bundle": "<name>"`.
 - Idempotent: re-running is a safe no-op.
 
 Example:
@@ -69,17 +85,26 @@ Added agent 'reviewer' -> .github/agents/reviewer.agent.md (linked)
 
 $ ckit add --copy deploy-helper
 Added skill 'deploy-helper' -> .github/skills/deploy-helper (copied)
+
+$ ckit add --bundle web
+Added bundle 'web' (3 items)
+  Added skill 'deploy-to-vercel' -> .github/skills/deploy-to-vercel (linked)
+  Added skill 'lint-fix' -> .github/skills/lint-fix (linked)
+  Added agent 'code-reviewer' -> .github/agents/code-reviewer.agent.md (linked)
 ```
 
 ### `rm` — remove a skill or agent from the project
 
 ```bash
 ckit rm [--agent] <name>
+ckit rm --bundle <name>
 ```
 
 - Removes the materialized target from `.github/skills/` or `.github/agents/`.
 - Removes that target's `.git/info/exclude` line.
 - Removes the lockfile entry.
+- With `--bundle <name>`, removes exactly the installed lockfile entries tagged with that bundle.
+  The current manifest is not consulted, so removal stays precise even if the manifest changed.
 - Idempotent: removing an item that is not installed exits successfully.
 
 Example:
@@ -90,6 +115,12 @@ Removed skill 'deploy-helper' -> .github/skills/deploy-helper (removed)
 
 $ ckit rm --agent reviewer
 Removed agent 'reviewer' -> .github/agents/reviewer.agent.md (removed)
+
+$ ckit rm --bundle web
+Removed bundle 'web' (3 items)
+  Removed skill 'deploy-to-vercel' -> .github/skills/deploy-to-vercel (removed)
+  Removed skill 'lint-fix' -> .github/skills/lint-fix (removed)
+  Removed agent 'code-reviewer' -> .github/agents/code-reviewer.agent.md (removed)
 ```
 
 ### `ls` / `status` — list installed items
@@ -100,7 +131,8 @@ ckit ls
 ckit status
 ```
 
-Lists lockfile entries with health:
+Lists lockfile entries grouped by bundle and labeled in the `BUNDLE` column. Standalone entries
+show `-`. Health values:
 
 - `ok`: target exists and, for symlinks, resolves to an existing source.
 - `orphaned`: target is a symlink whose source no longer exists.
@@ -111,13 +143,15 @@ Example:
 
 ```bash
 $ ckit ls
-TYPE   ID             MODE     TARGET                                  STATUS
-skill  deploy-helper  symlink  .github/skills/deploy-helper           ok
-agent  reviewer       symlink  .github/agents/reviewer.agent.md       ok
+BUNDLE  TYPE   ID                MODE     TARGET                                      STATUS
+web     skill  deploy-to-vercel  symlink  .github/skills/deploy-to-vercel             ok
+web     agent  code-reviewer     symlink  .github/agents/code-reviewer.agent.md       ok
+-       skill  deploy-helper     symlink  .github/skills/deploy-helper                ok
 ```
 
 With `--json`, `status` is serialized as lowercase (`"ok"`, `"orphaned"`, `"missing"`, or
-`"drifted"`), and `mode` is `"symlink"` or `"copy"`.
+`"drifted"`), `mode` is `"symlink"` or `"copy"`, and every item includes `bundle` (`null` for
+standalone items).
 
 ### `search` — search the collection
 

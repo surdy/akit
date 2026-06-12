@@ -5,6 +5,7 @@ use anyhow::{Context, Result};
 use serde::Serialize;
 use std::io::ErrorKind;
 
+use crate::bundle;
 use crate::collection::Collection;
 use crate::fsops;
 use crate::gitexclude;
@@ -23,6 +24,9 @@ pub struct AddReport {
     pub mode: Mode,
     /// Project-relative materialized path.
     pub target: String,
+    /// Bundle this item was installed as part of, if any.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bundle: Option<String>,
     /// Whether the link/copy was created (vs already present).
     pub link_created: bool,
     /// Whether a new line was added to `.git/info/exclude`.
@@ -31,6 +35,13 @@ pub struct AddReport {
     pub lock_added: bool,
     /// True if the project is not a git repo (pulls cannot be auto-ignored).
     pub not_a_git_repo: bool,
+}
+
+/// Outcome of an `add --bundle` operation.
+#[derive(Debug, Serialize)]
+pub struct BundleAddReport {
+    pub bundle: String,
+    pub items: Vec<AddReport>,
 }
 
 /// Outcome of an `rm` operation.
@@ -53,6 +64,13 @@ pub struct RemoveReport {
     pub not_a_git_repo: bool,
 }
 
+/// Outcome of an `rm --bundle` operation.
+#[derive(Debug, Serialize)]
+pub struct BundleRemoveReport {
+    pub bundle: String,
+    pub items: Vec<RemoveReport>,
+}
+
 /// Health status for an installed lockfile item.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
@@ -71,6 +89,7 @@ pub struct ListItem {
     pub item_type: ItemType,
     pub mode: Mode,
     pub target: String,
+    pub bundle: Option<String>,
     pub status: HealthStatus,
 }
 
@@ -81,6 +100,7 @@ pub fn add_item(
     item_type: ItemType,
     name: &str,
     mode: Mode,
+    bundle_name: Option<&str>,
 ) -> Result<AddReport> {
     let src = match item_type {
         ItemType::Skill => collection.resolve_skill(name)?,
@@ -107,7 +127,7 @@ pub fn add_item(
         git_ref: None,
         mode: materialized.mode,
         target: target_rel.clone(),
-        bundle: None,
+        bundle: bundle_name.map(str::to_string),
     });
     lockfile.save(&lf_path)?;
 
@@ -116,6 +136,7 @@ pub fn add_item(
         item_type,
         mode: materialized.mode,
         target: target_rel,
+        bundle: bundle_name.map(str::to_string),
         link_created: materialized.outcome.created(),
         exclude_added,
         lock_added,
@@ -125,13 +146,93 @@ pub fn add_item(
 
 /// Pull a skill from the collection into the project (symlink, gitignore, record).
 pub fn add_skill(project: &Project, collection: &Collection, name: &str) -> Result<AddReport> {
-    add_item(project, collection, ItemType::Skill, name, Mode::Symlink)
+    add_item(
+        project,
+        collection,
+        ItemType::Skill,
+        name,
+        Mode::Symlink,
+        None,
+    )
+}
+
+/// Pull every item in a named collection bundle into the project.
+pub fn add_bundle(
+    project: &Project,
+    collection: &Collection,
+    name: &str,
+    mode: Mode,
+) -> Result<BundleAddReport> {
+    let bundle = bundle::load(collection, name)?;
+    let mut items = Vec::with_capacity(bundle.items.len());
+    for item in &bundle.items {
+        items.push(add_item(
+            project,
+            collection,
+            item.item_type,
+            &item.id,
+            mode,
+            Some(&bundle.name),
+        )?);
+    }
+    Ok(BundleAddReport {
+        bundle: bundle.name,
+        items,
+    })
 }
 
 /// Remove an installed item from the project.
 pub fn remove_item(project: &Project, item_type: ItemType, name: &str) -> Result<RemoveReport> {
     let lf_path = project.lockfile_path();
     let mut lockfile = Lockfile::load(&lf_path)?;
+    let report = remove_item_from_lockfile(project, &mut lockfile, item_type, name)?;
+    if report.lock_removed {
+        lockfile.save(&lf_path)?;
+    }
+    Ok(report)
+}
+
+/// Remove an installed skill from the project.
+pub fn remove_skill(project: &Project, name: &str) -> Result<RemoveReport> {
+    remove_item(project, ItemType::Skill, name)
+}
+
+/// Remove every installed item tagged with a named bundle.
+pub fn remove_bundle(project: &Project, name: &str) -> Result<BundleRemoveReport> {
+    let lf_path = project.lockfile_path();
+    let mut lockfile = Lockfile::load(&lf_path)?;
+    let bundle_items: Vec<(ItemType, String)> = lockfile
+        .items
+        .iter()
+        .filter(|item| item.bundle.as_deref() == Some(name))
+        .map(|item| (item.item_type, item.id.clone()))
+        .collect();
+
+    let mut items = Vec::with_capacity(bundle_items.len());
+    for (item_type, id) in bundle_items {
+        items.push(remove_item_from_lockfile(
+            project,
+            &mut lockfile,
+            item_type,
+            &id,
+        )?);
+    }
+    if items.iter().any(|item| item.lock_removed) {
+        lockfile.save(&lf_path)?;
+    }
+
+    Ok(BundleRemoveReport {
+        bundle: name.to_string(),
+        items,
+    })
+}
+
+fn remove_item_from_lockfile(
+    project: &Project,
+    lockfile: &mut Lockfile,
+    item_type: ItemType,
+    name: &str,
+) -> Result<RemoveReport> {
     let removed_item = lockfile.remove(item_type, name);
     let lock_removed = removed_item.is_some();
     let target = removed_item
@@ -147,11 +248,8 @@ pub fn remove_item(project: &Project, item_type: ItemType, name: &str) -> Result
 
     let mut exclude_removed = false;
     let not_a_git_repo = project.git_dir.is_none();
-    if lock_removed {
-        if let Some(excl) = project.git_info_exclude_path() {
-            exclude_removed = gitexclude::remove_line(&excl, &format!("/{target}"))?;
-        }
-        lockfile.save(&lf_path)?;
+    if lock_removed && let Some(excl) = project.git_info_exclude_path() {
+        exclude_removed = gitexclude::remove_line(&excl, &format!("/{target}"))?;
     }
 
     Ok(RemoveReport {
@@ -164,11 +262,6 @@ pub fn remove_item(project: &Project, item_type: ItemType, name: &str) -> Result
         not_installed: !lock_removed,
         not_a_git_repo,
     })
-}
-
-/// Remove an installed skill from the project.
-pub fn remove_skill(project: &Project, name: &str) -> Result<RemoveReport> {
-    remove_item(project, ItemType::Skill, name)
 }
 
 /// List lockfile items with their on-disk health.
@@ -207,6 +300,7 @@ fn list_items_with_optional_collection(
                 item_type: item.item_type,
                 mode: item.mode,
                 target: item.target,
+                bundle: item.bundle,
                 status,
             })
         })

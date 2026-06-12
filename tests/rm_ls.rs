@@ -112,6 +112,7 @@ fn agent_add_appears_as_symlink_and_lists_type_agent() {
         ItemType::Agent,
         "helper",
         Mode::Symlink,
+        None,
     )
     .unwrap();
     assert_eq!(report.item_type, ItemType::Agent);
