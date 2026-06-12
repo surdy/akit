@@ -7,7 +7,7 @@ need into a project on demand — materialized into `.github/{skills,agents}` vi
 (copy fallback), kept **personal + gitignored** (`.git/info/exclude`), and tracked by a
 per-project **lockfile**. Remove them just as easily.
 
-> Status: pre-implementation. Design + plan in [`docs/design.md`](docs/design.md).
+> Status/Usage: see [`docs/usage.md`](docs/usage.md). Design + plan in [`docs/design.md`](docs/design.md).
 > GUI integration lives separately in [pterm](https://github.com/surdy/pterm) (Phase 2).
 
 ## Why

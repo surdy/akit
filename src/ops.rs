@@ -1,8 +1,9 @@
 //! High-level engine operations. The CLI and any GUI call these; they own the end-to-end
-//! pipeline (resolve → materialize → gitignore → record in lockfile).
+//! pipeline (resolve → materialize/remove → gitignore → record in lockfile).
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use serde::Serialize;
+use std::io::ErrorKind;
 
 use crate::collection::Collection;
 use crate::fsops;
@@ -11,7 +12,7 @@ use crate::lockfile::{ItemType, LockItem, Lockfile, Mode};
 use crate::project::Project;
 
 /// Project-relative path of the lockfile, used for the git-exclude entry.
-const LOCKFILE_REL: &str = ".copilot/kit.lock.json";
+pub const LOCKFILE_REL: &str = ".copilot/kit.lock.json";
 
 /// Outcome of an `add` operation.
 #[derive(Debug, Serialize)]
@@ -32,10 +33,50 @@ pub struct AddReport {
     pub not_a_git_repo: bool,
 }
 
+/// Outcome of an `rm` operation.
+#[derive(Debug, Serialize)]
+pub struct RemoveReport {
+    pub id: String,
+    #[serde(rename = "type")]
+    pub item_type: ItemType,
+    /// Project-relative materialized path.
+    pub target: String,
+    /// Whether a materialized target was removed.
+    pub target_removed: bool,
+    /// Whether the target line was removed from `.git/info/exclude`.
+    pub exclude_removed: bool,
+    /// Whether a lockfile entry was removed.
+    pub lock_removed: bool,
+    /// True when the item was not recorded as installed.
+    pub not_installed: bool,
+    /// True if the project is not a git repo.
+    pub not_a_git_repo: bool,
+}
+
+/// Health status for an installed lockfile item.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum HealthStatus {
+    Ok,
+    Orphaned,
+    Missing,
+}
+
+/// One row returned by `ls`.
+#[derive(Debug, Serialize)]
+pub struct ListItem {
+    pub id: String,
+    #[serde(rename = "type")]
+    pub item_type: ItemType,
+    pub mode: Mode,
+    pub target: String,
+    pub status: HealthStatus,
+}
+
 /// Pull a skill from the collection into the project (symlink, gitignore, record).
 pub fn add_skill(project: &Project, collection: &Collection, name: &str) -> Result<AddReport> {
     let src = collection.resolve_skill(name)?;
-    let target_rel = format!(".github/skills/{name}");
+    let target_rel = skill_target(name);
     let dst = project.root.join(&target_rel);
 
     let outcome = fsops::materialize(Mode::Symlink, &src, &dst)?;
@@ -70,4 +111,81 @@ pub fn add_skill(project: &Project, collection: &Collection, name: &str) -> Resu
         lock_added,
         not_a_git_repo,
     })
+}
+
+/// Remove an installed skill from the project.
+pub fn remove_skill(project: &Project, name: &str) -> Result<RemoveReport> {
+    let lf_path = project.lockfile_path();
+    let mut lockfile = Lockfile::load(&lf_path)?;
+    let removed_item = lockfile.remove(ItemType::Skill, name);
+    let lock_removed = removed_item.is_some();
+    let target = removed_item
+        .as_ref()
+        .map(|item| item.target.clone())
+        .unwrap_or_else(|| skill_target(name));
+
+    let target_removed = if lock_removed {
+        fsops::remove(&project.root.join(&target))?
+    } else {
+        false
+    };
+
+    let mut exclude_removed = false;
+    let not_a_git_repo = project.git_dir.is_none();
+    if lock_removed {
+        if let Some(excl) = project.git_info_exclude_path() {
+            exclude_removed = gitexclude::remove_line(&excl, &format!("/{target}"))?;
+        }
+        lockfile.save(&lf_path)?;
+    }
+
+    Ok(RemoveReport {
+        id: name.to_string(),
+        item_type: ItemType::Skill,
+        target,
+        target_removed,
+        exclude_removed,
+        lock_removed,
+        not_installed: !lock_removed,
+        not_a_git_repo,
+    })
+}
+
+/// List lockfile items with their on-disk health.
+pub fn list_items(project: &Project) -> Result<Vec<ListItem>> {
+    let lockfile = Lockfile::load(&project.lockfile_path())?;
+    lockfile
+        .items
+        .into_iter()
+        .map(|item| {
+            let status = health(project, &item)?;
+            Ok(ListItem {
+                id: item.id,
+                item_type: item.item_type,
+                mode: item.mode,
+                target: item.target,
+                status,
+            })
+        })
+        .collect()
+}
+
+fn skill_target(name: &str) -> String {
+    format!(".github/skills/{name}")
+}
+
+fn health(project: &Project, item: &LockItem) -> Result<HealthStatus> {
+    let dst = project.root.join(&item.target);
+    match std::fs::symlink_metadata(&dst) {
+        Ok(meta) if meta.file_type().is_symlink() => {
+            if dst.canonicalize().is_ok() {
+                Ok(HealthStatus::Ok)
+            } else {
+                Ok(HealthStatus::Orphaned)
+            }
+        }
+        Ok(_) => Ok(HealthStatus::Ok),
+        Err(e) if e.kind() == ErrorKind::NotFound => Ok(HealthStatus::Missing),
+        Err(e) => Err(e).with_context(|| format!("reading {}", dst.display())),
+    }
 }

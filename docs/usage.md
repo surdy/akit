@@ -57,7 +57,47 @@ $ ckit add deploy-helper
 Added skill 'deploy-helper' -> .github/skills/deploy-helper (linked)
 ```
 
-> Removing a pull is a clean `unlink` — see `ckit rm` (issue #2).
+### `rm` — remove a skill from the project
+
+```bash
+ckit rm <skill>
+```
+
+- Removes the materialized target from `.github/skills/`.
+- Removes that target's `.git/info/exclude` line.
+- Removes the lockfile entry.
+- Idempotent: removing an item that is not installed exits successfully.
+
+Example:
+
+```bash
+$ ckit rm deploy-helper
+Removed skill 'deploy-helper' -> .github/skills/deploy-helper (removed)
+```
+
+### `ls` / `status` — list installed items
+
+```bash
+ckit ls
+# alias:
+ckit status
+```
+
+Lists lockfile entries with health:
+
+- `ok`: target exists and, for symlinks, resolves to an existing source.
+- `orphaned`: target is a symlink whose source no longer exists.
+- `missing`: lockfile entry exists but the target is gone.
+
+Example:
+
+```bash
+$ ckit ls
+TYPE   ID             MODE     TARGET                                  STATUS
+skill  deploy-helper  symlink  .github/skills/deploy-helper           ok
+```
+
+Use `--json` with any command to emit machine-readable JSON.
 
 ## How it stays out of your repo
 
