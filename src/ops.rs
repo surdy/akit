@@ -73,10 +73,18 @@ pub struct ListItem {
     pub status: HealthStatus,
 }
 
-/// Pull a skill from the collection into the project (symlink, gitignore, record).
-pub fn add_skill(project: &Project, collection: &Collection, name: &str) -> Result<AddReport> {
-    let src = collection.resolve_skill(name)?;
-    let target_rel = skill_target(name);
+/// Pull an item from the collection into the project (symlink, gitignore, record).
+pub fn add_item(
+    project: &Project,
+    collection: &Collection,
+    item_type: ItemType,
+    name: &str,
+) -> Result<AddReport> {
+    let src = match item_type {
+        ItemType::Skill => collection.resolve_skill(name)?,
+        ItemType::Agent => collection.resolve_agent(name)?,
+    };
+    let target_rel = target_for(item_type, name);
     let dst = project.root.join(&target_rel);
 
     let outcome = fsops::materialize(Mode::Symlink, &src, &dst)?;
@@ -92,7 +100,7 @@ pub fn add_skill(project: &Project, collection: &Collection, name: &str) -> Resu
     let mut lockfile = Lockfile::load(&lf_path)?;
     let lock_added = lockfile.upsert(LockItem {
         id: name.to_string(),
-        item_type: ItemType::Skill,
+        item_type,
         source: "local".to_string(),
         git_ref: None,
         mode: Mode::Symlink,
@@ -103,7 +111,7 @@ pub fn add_skill(project: &Project, collection: &Collection, name: &str) -> Resu
 
     Ok(AddReport {
         id: name.to_string(),
-        item_type: ItemType::Skill,
+        item_type,
         mode: Mode::Symlink,
         target: target_rel,
         link_created: outcome.created(),
@@ -113,16 +121,21 @@ pub fn add_skill(project: &Project, collection: &Collection, name: &str) -> Resu
     })
 }
 
-/// Remove an installed skill from the project.
-pub fn remove_skill(project: &Project, name: &str) -> Result<RemoveReport> {
+/// Pull a skill from the collection into the project (symlink, gitignore, record).
+pub fn add_skill(project: &Project, collection: &Collection, name: &str) -> Result<AddReport> {
+    add_item(project, collection, ItemType::Skill, name)
+}
+
+/// Remove an installed item from the project.
+pub fn remove_item(project: &Project, item_type: ItemType, name: &str) -> Result<RemoveReport> {
     let lf_path = project.lockfile_path();
     let mut lockfile = Lockfile::load(&lf_path)?;
-    let removed_item = lockfile.remove(ItemType::Skill, name);
+    let removed_item = lockfile.remove(item_type, name);
     let lock_removed = removed_item.is_some();
     let target = removed_item
         .as_ref()
         .map(|item| item.target.clone())
-        .unwrap_or_else(|| skill_target(name));
+        .unwrap_or_else(|| target_for(item_type, name));
 
     let target_removed = if lock_removed {
         fsops::remove(&project.root.join(&target))?
@@ -141,7 +154,7 @@ pub fn remove_skill(project: &Project, name: &str) -> Result<RemoveReport> {
 
     Ok(RemoveReport {
         id: name.to_string(),
-        item_type: ItemType::Skill,
+        item_type,
         target,
         target_removed,
         exclude_removed,
@@ -149,6 +162,11 @@ pub fn remove_skill(project: &Project, name: &str) -> Result<RemoveReport> {
         not_installed: !lock_removed,
         not_a_git_repo,
     })
+}
+
+/// Remove an installed skill from the project.
+pub fn remove_skill(project: &Project, name: &str) -> Result<RemoveReport> {
+    remove_item(project, ItemType::Skill, name)
 }
 
 /// List lockfile items with their on-disk health.
@@ -170,8 +188,11 @@ pub fn list_items(project: &Project) -> Result<Vec<ListItem>> {
         .collect()
 }
 
-fn skill_target(name: &str) -> String {
-    format!(".github/skills/{name}")
+fn target_for(item_type: ItemType, name: &str) -> String {
+    match item_type {
+        ItemType::Skill => format!(".github/skills/{name}"),
+        ItemType::Agent => format!(".github/agents/{name}.agent.md"),
+    }
 }
 
 fn health(project: &Project, item: &LockItem) -> Result<HealthStatus> {

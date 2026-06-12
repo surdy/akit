@@ -31,14 +31,20 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Pull a skill from your collection into this project.
+    /// Pull a skill or agent from your collection into this project.
     Add {
-        /// Name of the skill to add.
+        /// Add an agent (`agents/<name>.agent.md`) instead of a skill.
+        #[arg(long)]
+        agent: bool,
+        /// Name of the item to add.
         name: String,
     },
-    /// Remove a skill from this project.
+    /// Remove a skill or agent from this project.
     Rm {
-        /// Name of the skill to remove.
+        /// Remove an agent (`agents/<name>.agent.md`) instead of a skill.
+        #[arg(long)]
+        agent: bool,
+        /// Name of the item to remove.
         name: String,
     },
     /// List installed items and their health.
@@ -58,9 +64,10 @@ fn run() -> Result<()> {
     let project = Project::locate(cli.project.clone())?;
 
     match &cli.command {
-        Commands::Add { name } => {
+        Commands::Add { agent, name } => {
             let collection = Collection::locate()?;
-            let report = ops::add_skill(&project, &collection, name)?;
+            let item_type = item_type(*agent);
+            let report = ops::add_item(&project, &collection, item_type, name)?;
             if cli.json {
                 println!("{}", serde_json::to_string(&report)?);
             } else {
@@ -83,8 +90,8 @@ fn run() -> Result<()> {
                 );
             }
         }
-        Commands::Rm { name } => {
-            let report = ops::remove_skill(&project, name)?;
+        Commands::Rm { agent, name } => {
+            let report = ops::remove_item(&project, item_type(*agent), name)?;
             if cli.json {
                 println!("{}", serde_json::to_string(&report)?);
             } else if report.not_installed {
@@ -117,6 +124,14 @@ fn run() -> Result<()> {
         }
     }
     Ok(())
+}
+
+fn item_type(agent: bool) -> ItemType {
+    if agent {
+        ItemType::Agent
+    } else {
+        ItemType::Skill
+    }
 }
 
 fn type_name(item_type: ItemType) -> &'static str {

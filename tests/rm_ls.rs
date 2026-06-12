@@ -33,6 +33,16 @@ fn make_skill(collection_root: &Path, name: &str) {
     .unwrap();
 }
 
+fn make_agent(collection_root: &Path, name: &str) {
+    let dir = collection_root.join("agents");
+    fs::create_dir_all(&dir).unwrap();
+    fs::write(
+        dir.join(format!("{name}.agent.md")),
+        format!("---\nname: {name}\ndescription: a test agent\n---\nbody\n"),
+    )
+    .unwrap();
+}
+
 #[test]
 fn rm_closes_loop_for_skill_and_is_idempotent() {
     let tmp = tempfile::tempdir().unwrap();
@@ -85,6 +95,39 @@ fn rm_closes_loop_for_skill_and_is_idempotent() {
         "git status not clean after no-op rm: {}",
         String::from_utf8_lossy(&status2.stdout)
     );
+}
+
+#[test]
+fn agent_add_appears_as_symlink_and_lists_type_agent() {
+    let tmp = tempfile::tempdir().unwrap();
+    let base = tmp.path();
+    let collection_root = base.join("collection");
+    make_agent(&collection_root, "helper");
+    let collection = Collection::with_root(&collection_root);
+    let (proj, project) = init_project(base);
+
+    let report = ops::add_item(&project, &collection, ItemType::Agent, "helper").unwrap();
+    assert_eq!(report.item_type, ItemType::Agent);
+    assert_eq!(report.target, ".github/agents/helper.agent.md");
+    assert!(report.link_created);
+
+    let link = proj.join(".github/agents/helper.agent.md");
+    let meta = fs::symlink_metadata(&link).unwrap();
+    assert!(meta.file_type().is_symlink(), "agent should be a symlink");
+    assert_eq!(
+        link.canonicalize().unwrap(),
+        collection_root
+            .join("agents/helper.agent.md")
+            .canonicalize()
+            .unwrap()
+    );
+
+    let items = ops::list_items(&project).unwrap();
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0].item_type, ItemType::Agent);
+    assert_eq!(items[0].mode, Mode::Symlink);
+    assert_eq!(items[0].target, ".github/agents/helper.agent.md");
+    assert_eq!(items[0].status, HealthStatus::Ok);
 }
 
 #[test]

@@ -65,4 +65,16 @@ impl Collection {
         }
         Ok(dir)
     }
+
+    /// Resolve an agent by name, validating `<name>.agent.md` exists.
+    pub fn resolve_agent(&self, name: &str) -> Result<PathBuf> {
+        let file = self.agent_source(name);
+        if !file.is_file() {
+            bail!(
+                "agent '{name}' not found in collection (looked in {})",
+                file.display()
+            );
+        }
+        Ok(file)
+    }
 }

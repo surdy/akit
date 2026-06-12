@@ -26,7 +26,9 @@ cargo build --release
   ```
 
 Move your personal skills/agents here (out of `~/.copilot/`, which is auto-loaded in *every*
-project). `ckit` then materializes only the ones you select into a given project.
+project). Skills are directories containing `SKILL.md`; agents are single
+`agents/<name>.agent.md` files. `ckit` then materializes only the ones you select into a given
+project.
 
 ## Global flags
 
@@ -37,14 +39,16 @@ project). `ckit` then materializes only the ones you select into a given project
 
 ## Commands
 
-### `add` — pull a skill into the project
+### `add` — pull a skill or agent into the project
 
 ```bash
-ckit add <skill>
+ckit add [--agent] <name>
 ```
 
-- Symlinks `<collection>/skills/<skill>` into `<project>/.github/skills/<skill>` (Copilot loads
-  it as a **project-scope** skill).
+- By default, symlinks `<collection>/skills/<name>` into `<project>/.github/skills/<name>`
+  (Copilot loads it as a **project-scope** skill).
+- With `--agent`, symlinks `<collection>/agents/<name>.agent.md` into
+  `<project>/.github/agents/<name>.agent.md`.
 - Appends the pull and the lockfile to `.git/info/exclude`, so nothing is committed and your
   teammates are unaffected.
 - Records the item in `<project>/.copilot/kit.lock.json`.
@@ -55,15 +59,18 @@ Example:
 ```bash
 $ ckit add deploy-helper
 Added skill 'deploy-helper' -> .github/skills/deploy-helper (linked)
+
+$ ckit add --agent reviewer
+Added agent 'reviewer' -> .github/agents/reviewer.agent.md (linked)
 ```
 
-### `rm` — remove a skill from the project
+### `rm` — remove a skill or agent from the project
 
 ```bash
-ckit rm <skill>
+ckit rm [--agent] <name>
 ```
 
-- Removes the materialized target from `.github/skills/`.
+- Removes the materialized target from `.github/skills/` or `.github/agents/`.
 - Removes that target's `.git/info/exclude` line.
 - Removes the lockfile entry.
 - Idempotent: removing an item that is not installed exits successfully.
@@ -73,6 +80,9 @@ Example:
 ```bash
 $ ckit rm deploy-helper
 Removed skill 'deploy-helper' -> .github/skills/deploy-helper (removed)
+
+$ ckit rm --agent reviewer
+Removed agent 'reviewer' -> .github/agents/reviewer.agent.md (removed)
 ```
 
 ### `ls` / `status` — list installed items
@@ -95,6 +105,7 @@ Example:
 $ ckit ls
 TYPE   ID             MODE     TARGET                                  STATUS
 skill  deploy-helper  symlink  .github/skills/deploy-helper           ok
+agent  reviewer       symlink  .github/agents/reviewer.agent.md       ok
 ```
 
 Use `--json` with any command to emit machine-readable JSON.
