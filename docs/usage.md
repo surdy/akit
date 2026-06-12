@@ -1,0 +1,66 @@
+# ckit usage
+
+`ckit` pulls personal Copilot customizations (skills and custom agents) from a central
+**collection** into a project on demand, kept personal and gitignored, tracked by a lockfile.
+
+## Install / build
+
+```bash
+git clone https://github.com/surdy/ckit.git
+cd ckit
+cargo build --release
+# binary at target/release/ckit
+```
+
+## Your collection
+
+`ckit` reads from a single local collection directory:
+
+- Location: `$KIT_COLLECTION_DIR`, or `~/.copilot-kit/collection` by default.
+- Layout:
+
+  ```text
+  <collection>/
+    skills/<name>/SKILL.md
+    agents/<name>.agent.md
+  ```
+
+Move your personal skills/agents here (out of `~/.copilot/`, which is auto-loaded in *every*
+project). `ckit` then materializes only the ones you select into a given project.
+
+## Global flags
+
+| Flag | Meaning |
+|---|---|
+| `--project <dir>` | Target project (defaults to the enclosing git repo root, else the current dir). |
+| `--json` | Emit machine-readable JSON instead of human text. |
+
+## Commands
+
+### `add` — pull a skill into the project
+
+```bash
+ckit add <skill>
+```
+
+- Symlinks `<collection>/skills/<skill>` into `<project>/.github/skills/<skill>` (Copilot loads
+  it as a **project-scope** skill).
+- Appends the pull and the lockfile to `.git/info/exclude`, so nothing is committed and your
+  teammates are unaffected.
+- Records the item in `<project>/.copilot/kit.lock.json`.
+- Idempotent: re-running is a safe no-op.
+
+Example:
+
+```bash
+$ ckit add deploy-helper
+Added skill 'deploy-helper' -> .github/skills/deploy-helper (linked)
+```
+
+> Removing a pull is a clean `unlink` — see `ckit rm` (issue #2).
+
+## How it stays out of your repo
+
+Pulls live under `.github/skills/`, `.github/agents/`, and `.copilot/kit.lock.json`, all added to
+`.git/info/exclude` (a local, untracked ignore list). Your tracked `.gitignore` is never touched,
+and `git status` stays clean.
