@@ -136,6 +136,8 @@ _Questions 1–4 are now resolved — see "Resolved decisions" below._
 
 ## Phase 1 — tracer-bullet issues (vertical slices)
 
+> **Filed:** these are live at **`surdy/ckit`** (private) — issues **#1–#8** (slices) + **#9** (epic). Repo: https://github.com/surdy/ckit · Epic: https://github.com/surdy/ckit/issues/9. GitHub issue numbers intentionally match the slice numbers below.
+
 Working name for the standalone core engine: **`ckit`** (Copilot Kit CLI). Phase 1 = a manually-usable CLI that pulls/removes items from a **single local collection** into a project, gitignored, tracked by a lockfile.
 
 **Slicing principle:** each issue is a *vertical* slice that runs the whole pipeline end-to-end —
