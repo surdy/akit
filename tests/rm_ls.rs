@@ -106,7 +106,14 @@ fn agent_add_appears_as_symlink_and_lists_type_agent() {
     let collection = Collection::with_root(&collection_root);
     let (proj, project) = init_project(base);
 
-    let report = ops::add_item(&project, &collection, ItemType::Agent, "helper").unwrap();
+    let report = ops::add_item(
+        &project,
+        &collection,
+        ItemType::Agent,
+        "helper",
+        Mode::Symlink,
+    )
+    .unwrap();
     assert_eq!(report.item_type, ItemType::Agent);
     assert_eq!(report.target, ".github/agents/helper.agent.md");
     assert!(report.link_created);

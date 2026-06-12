@@ -37,6 +37,9 @@ enum Commands {
         /// Add an agent (`agents/<name>.agent.md`) instead of a skill.
         #[arg(long)]
         agent: bool,
+        /// Copy files instead of symlinking them.
+        #[arg(long)]
+        copy: bool,
         /// Name of the item to add.
         name: String,
     },
@@ -69,11 +72,12 @@ fn run() -> Result<()> {
     let cli = Cli::parse();
 
     match &cli.command {
-        Commands::Add { agent, name } => {
+        Commands::Add { agent, copy, name } => {
             let project = Project::locate(cli.project.clone())?;
             let collection = Collection::locate()?;
             let item_type = item_type(*agent);
-            let report = ops::add_item(&project, &collection, item_type, name)?;
+            let mode = if *copy { Mode::Copy } else { Mode::Symlink };
+            let report = ops::add_item(&project, &collection, item_type, name, mode)?;
             if cli.json {
                 println!("{}", serde_json::to_string(&report)?);
             } else {
@@ -83,13 +87,13 @@ fn run() -> Result<()> {
                         project.root.display()
                     );
                 }
-                let link = if report.link_created {
-                    "linked"
+                let action = if report.link_created {
+                    created_name(report.mode)
                 } else {
-                    "already linked"
+                    already_present_name(report.mode)
                 };
                 println!(
-                    "Added {} '{}' -> {} ({link})",
+                    "Added {} '{}' -> {} ({action})",
                     type_name(report.item_type),
                     report.id,
                     report.target
@@ -170,6 +174,21 @@ fn status_name(status: HealthStatus) -> &'static str {
         HealthStatus::Ok => "ok",
         HealthStatus::Orphaned => "orphaned",
         HealthStatus::Missing => "missing",
+        HealthStatus::Drifted => "drifted",
+    }
+}
+
+fn created_name(mode: Mode) -> &'static str {
+    match mode {
+        Mode::Symlink => "linked",
+        Mode::Copy => "copied",
+    }
+}
+
+fn already_present_name(mode: Mode) -> &'static str {
+    match mode {
+        Mode::Symlink => "already linked",
+        Mode::Copy => "already present",
     }
 }
 

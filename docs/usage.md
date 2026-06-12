@@ -42,13 +42,17 @@ project.
 ### `add` — pull a skill or agent into the project
 
 ```bash
-ckit add [--agent] <name>
+ckit add [--agent] [--copy] <name>
 ```
 
 - By default, symlinks `<collection>/skills/<name>` into `<project>/.github/skills/<name>`
   (Copilot loads it as a **project-scope** skill).
 - With `--agent`, symlinks `<collection>/agents/<name>.agent.md` into
   `<project>/.github/agents/<name>.agent.md`.
+- With `--copy`, copies the source files instead of symlinking them and records `"mode": "copy"`
+  in the lockfile and `--json` add report.
+- If symlink creation fails at runtime (for example, Windows without symlink privilege), `ckit`
+  warns on stderr, falls back to copying, and records the effective `"mode": "copy"`.
 - Appends the pull and the lockfile to `.git/info/exclude`, so nothing is committed and your
   teammates are unaffected.
 - Records the item in `<project>/.copilot/kit.lock.json`.
@@ -62,6 +66,9 @@ Added skill 'deploy-helper' -> .github/skills/deploy-helper (linked)
 
 $ ckit add --agent reviewer
 Added agent 'reviewer' -> .github/agents/reviewer.agent.md (linked)
+
+$ ckit add --copy deploy-helper
+Added skill 'deploy-helper' -> .github/skills/deploy-helper (copied)
 ```
 
 ### `rm` — remove a skill or agent from the project
@@ -98,6 +105,7 @@ Lists lockfile entries with health:
 - `ok`: target exists and, for symlinks, resolves to an existing source.
 - `orphaned`: target is a symlink whose source no longer exists.
 - `missing`: lockfile entry exists but the target is gone.
+- `drifted`: copy-mode target exists, but its content differs from the current collection source.
 
 Example:
 
@@ -107,6 +115,9 @@ TYPE   ID             MODE     TARGET                                  STATUS
 skill  deploy-helper  symlink  .github/skills/deploy-helper           ok
 agent  reviewer       symlink  .github/agents/reviewer.agent.md       ok
 ```
+
+With `--json`, `status` is serialized as lowercase (`"ok"`, `"orphaned"`, `"missing"`, or
+`"drifted"`), and `mode` is `"symlink"` or `"copy"`.
 
 ### `search` — search the collection
 

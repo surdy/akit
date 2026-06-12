@@ -60,6 +60,7 @@ pub enum HealthStatus {
     Ok,
     Orphaned,
     Missing,
+    Drifted,
 }
 
 /// One row returned by `ls`.
@@ -79,6 +80,7 @@ pub fn add_item(
     collection: &Collection,
     item_type: ItemType,
     name: &str,
+    mode: Mode,
 ) -> Result<AddReport> {
     let src = match item_type {
         ItemType::Skill => collection.resolve_skill(name)?,
@@ -87,7 +89,7 @@ pub fn add_item(
     let target_rel = target_for(item_type, name);
     let dst = project.root.join(&target_rel);
 
-    let outcome = fsops::materialize(Mode::Symlink, &src, &dst)?;
+    let materialized = fsops::materialize_with_fallback(mode, &src, &dst)?;
 
     let mut exclude_added = false;
     let not_a_git_repo = project.git_dir.is_none();
@@ -103,7 +105,7 @@ pub fn add_item(
         item_type,
         source: "local".to_string(),
         git_ref: None,
-        mode: Mode::Symlink,
+        mode: materialized.mode,
         target: target_rel.clone(),
         bundle: None,
     });
@@ -112,9 +114,9 @@ pub fn add_item(
     Ok(AddReport {
         id: name.to_string(),
         item_type,
-        mode: Mode::Symlink,
+        mode: materialized.mode,
         target: target_rel,
-        link_created: outcome.created(),
+        link_created: materialized.outcome.created(),
         exclude_added,
         lock_added,
         not_a_git_repo,
@@ -123,7 +125,7 @@ pub fn add_item(
 
 /// Pull a skill from the collection into the project (symlink, gitignore, record).
 pub fn add_skill(project: &Project, collection: &Collection, name: &str) -> Result<AddReport> {
-    add_item(project, collection, ItemType::Skill, name)
+    add_item(project, collection, ItemType::Skill, name, Mode::Symlink)
 }
 
 /// Remove an installed item from the project.
@@ -171,12 +173,35 @@ pub fn remove_skill(project: &Project, name: &str) -> Result<RemoveReport> {
 
 /// List lockfile items with their on-disk health.
 pub fn list_items(project: &Project) -> Result<Vec<ListItem>> {
+    list_items_with_optional_collection(project, None)
+}
+
+/// List lockfile items using an explicit collection root for copy drift checks.
+pub fn list_items_with_collection(
+    project: &Project,
+    collection: &Collection,
+) -> Result<Vec<ListItem>> {
+    list_items_with_optional_collection(project, Some(collection))
+}
+
+fn list_items_with_optional_collection(
+    project: &Project,
+    collection: Option<&Collection>,
+) -> Result<Vec<ListItem>> {
     let lockfile = Lockfile::load(&project.lockfile_path())?;
+    let needs_collection = lockfile.items.iter().any(|item| item.mode == Mode::Copy);
+    let located_collection = if collection.is_none() && needs_collection {
+        Some(Collection::locate()?)
+    } else {
+        None
+    };
+    let collection = collection.or(located_collection.as_ref());
+
     lockfile
         .items
         .into_iter()
         .map(|item| {
-            let status = health(project, &item)?;
+            let status = health(project, &item, collection)?;
             Ok(ListItem {
                 id: item.id,
                 item_type: item.item_type,
@@ -195,9 +220,25 @@ fn target_for(item_type: ItemType, name: &str) -> String {
     }
 }
 
-fn health(project: &Project, item: &LockItem) -> Result<HealthStatus> {
+fn health(
+    project: &Project,
+    item: &LockItem,
+    collection: Option<&Collection>,
+) -> Result<HealthStatus> {
     let dst = project.root.join(&item.target);
     match std::fs::symlink_metadata(&dst) {
+        Ok(_) if item.mode == Mode::Copy => {
+            let collection = collection.context("collection is required to check copy drift")?;
+            let src = source_for(collection, item.item_type, &item.id);
+            if !src.exists() {
+                return Ok(HealthStatus::Orphaned);
+            }
+            if fsops::drifted(&src, &dst)? {
+                Ok(HealthStatus::Drifted)
+            } else {
+                Ok(HealthStatus::Ok)
+            }
+        }
         Ok(meta) if meta.file_type().is_symlink() => {
             if dst.canonicalize().is_ok() {
                 Ok(HealthStatus::Ok)
@@ -208,5 +249,12 @@ fn health(project: &Project, item: &LockItem) -> Result<HealthStatus> {
         Ok(_) => Ok(HealthStatus::Ok),
         Err(e) if e.kind() == ErrorKind::NotFound => Ok(HealthStatus::Missing),
         Err(e) => Err(e).with_context(|| format!("reading {}", dst.display())),
+    }
+}
+
+fn source_for(collection: &Collection, item_type: ItemType, id: &str) -> std::path::PathBuf {
+    match item_type {
+        ItemType::Skill => collection.skill_source(id),
+        ItemType::Agent => collection.agent_source(id),
     }
 }

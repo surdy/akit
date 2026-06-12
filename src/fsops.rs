@@ -2,15 +2,24 @@
 
 use crate::lockfile::Mode;
 use anyhow::{Context, Result, bail};
-use std::path::Path;
+use std::collections::BTreeSet;
+use std::io;
+use std::path::{Path, PathBuf};
 
 /// Result of a materialization attempt.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MaterializeOutcome {
     /// The link/copy was created during this call.
     Created,
     /// An equivalent link/copy was already present (idempotent no-op).
     AlreadyPresent,
+}
+
+/// Result of materialization with the effective mode that was actually used.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MaterializeReport {
+    pub outcome: MaterializeOutcome,
+    pub mode: Mode,
 }
 
 impl MaterializeOutcome {
@@ -24,6 +33,39 @@ pub fn materialize(mode: Mode, src: &Path, dst: &Path) -> Result<MaterializeOutc
     match mode {
         Mode::Symlink => symlink(src, dst),
         Mode::Copy => copy(src, dst),
+    }
+}
+
+/// Materialize `src` at `dst`, falling back from symlink to copy if symlinking fails.
+pub fn materialize_with_fallback(
+    requested_mode: Mode,
+    src: &Path,
+    dst: &Path,
+) -> Result<MaterializeReport> {
+    match requested_mode {
+        Mode::Copy => Ok(MaterializeReport {
+            outcome: copy(src, dst)?,
+            mode: Mode::Copy,
+        }),
+        Mode::Symlink => match symlink(src, dst) {
+            Ok(outcome) => Ok(MaterializeReport {
+                outcome,
+                mode: Mode::Symlink,
+            }),
+            Err(err) => {
+                eprintln!(
+                    "warning: symlink failed for {} -> {}; falling back to copy: {err:#}",
+                    dst.display(),
+                    src.display()
+                );
+                Ok(MaterializeReport {
+                    outcome: copy(src, dst).with_context(|| {
+                        format!("copy fallback after symlink failure for {}", dst.display())
+                    })?,
+                    mode: Mode::Copy,
+                })
+            }
+        },
     }
 }
 
@@ -59,13 +101,20 @@ fn symlink(src: &Path, dst: &Path) -> Result<MaterializeOutcome> {
     Ok(MaterializeOutcome::Created)
 }
 
-#[cfg(unix)]
 fn create_symlink(src: &Path, dst: &Path) -> std::io::Result<()> {
+    if std::env::var_os("CKIT_TEST_FORCE_SYMLINK_FAILURE").is_some() {
+        return Err(io::Error::other("forced symlink failure"));
+    }
+    create_symlink_platform(src, dst)
+}
+
+#[cfg(unix)]
+fn create_symlink_platform(src: &Path, dst: &Path) -> std::io::Result<()> {
     std::os::unix::fs::symlink(src, dst)
 }
 
 #[cfg(windows)]
-fn create_symlink(src: &Path, dst: &Path) -> std::io::Result<()> {
+fn create_symlink_platform(src: &Path, dst: &Path) -> std::io::Result<()> {
     if src.is_dir() {
         std::os::windows::fs::symlink_dir(src, dst)
     } else {
@@ -73,11 +122,21 @@ fn create_symlink(src: &Path, dst: &Path) -> std::io::Result<()> {
     }
 }
 
-/// Copy `src` to `dst`. Basic implementation to freeze the contract; drift handling and the
-/// Windows auto-fallback are refined in issue #5.
+/// Copy `src` to `dst`.
 fn copy(src: &Path, dst: &Path) -> Result<MaterializeOutcome> {
-    if dst.exists() {
-        return Ok(MaterializeOutcome::AlreadyPresent);
+    match std::fs::symlink_metadata(dst) {
+        Ok(_) => {
+            if drifted(src, dst)? {
+                bail!(
+                    "{} already exists and differs from {}; refusing to overwrite",
+                    dst.display(),
+                    src.display()
+                );
+            }
+            return Ok(MaterializeOutcome::AlreadyPresent);
+        }
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+        Err(e) => return Err(e).with_context(|| format!("reading {}", dst.display())),
     }
     if let Some(parent) = dst.parent() {
         std::fs::create_dir_all(parent)
@@ -106,6 +165,49 @@ fn copy_dir_all(src: &Path, dst: &Path) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// Return `true` when the copied materialization differs from the collection source.
+pub fn drifted(src: &Path, dst: &Path) -> Result<bool> {
+    let src_meta = std::fs::metadata(src).with_context(|| format!("reading {}", src.display()))?;
+    let dst_meta = std::fs::metadata(dst).with_context(|| format!("reading {}", dst.display()))?;
+
+    if src_meta.is_file() && dst_meta.is_file() {
+        return files_differ(src, dst);
+    }
+    if src_meta.is_dir() && dst_meta.is_dir() {
+        return dirs_differ(src, dst);
+    }
+    Ok(true)
+}
+
+fn files_differ(src: &Path, dst: &Path) -> Result<bool> {
+    let src_bytes = std::fs::read(src).with_context(|| format!("reading {}", src.display()))?;
+    let dst_bytes = std::fs::read(dst).with_context(|| format!("reading {}", dst.display()))?;
+    Ok(src_bytes != dst_bytes)
+}
+
+fn dirs_differ(src: &Path, dst: &Path) -> Result<bool> {
+    let src_entries = entry_names(src)?;
+    let dst_entries = entry_names(dst)?;
+    if src_entries != dst_entries {
+        return Ok(true);
+    }
+    for entry in src_entries {
+        if drifted(&src.join(&entry), &dst.join(&entry))? {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+fn entry_names(dir: &Path) -> Result<BTreeSet<PathBuf>> {
+    let mut entries = BTreeSet::new();
+    for entry in std::fs::read_dir(dir).with_context(|| format!("reading {}", dir.display()))? {
+        let entry = entry?;
+        entries.insert(PathBuf::from(entry.file_name()));
+    }
+    Ok(entries)
 }
 
 /// Remove a materialized target (symlink or copied dir/file). Returns `true` if something

@@ -4,8 +4,9 @@ A standalone, harness-agnostic CLI for **on-demand personal Copilot customizatio
 
 Keep your skills and custom agents in one central collection, then pull only the ones you
 need into a project on demand — materialized into `.github/{skills,agents}` via **symlink**
-(copy fallback), kept **personal + gitignored** (`.git/info/exclude`), and tracked by a
-per-project **lockfile**. Remove them just as easily.
+or `ckit add --copy` (with auto copy fallback on symlink failure), kept **personal +
+gitignored** (`.git/info/exclude`), and tracked by a per-project **lockfile**. Remove them just
+as easily.
 
 > Status/Usage: see [`docs/usage.md`](docs/usage.md). Design + plan in [`docs/design.md`](docs/design.md).
 > GUI integration lives separately in [pterm](https://github.com/surdy/pterm) (Phase 2).
@@ -41,5 +42,5 @@ See [`docs/design.md`](docs/design.md) for the full design, decisions, and Phase
 - **Lockfile:** `<project>/.copilot/kit.lock.json` (gitignored):
   `{ "version": 1, "items": [ { "id", "type", "source", "ref", "mode", "target", "bundle"? } ] }`.
 - **fs helpers:** `materialize(item, mode)`, `addExclude`/`removeExclude` on `.git/info/exclude`.
-- **CLI scaffold:** `ckit <cmd> [--project <dir>] [--json]`; commands include `add`, `rm`,
+- **CLI scaffold:** `ckit <cmd> [--project <dir>] [--json]`; commands include `add [--copy]`, `rm`,
   `ls`/`status`, and `search`.
