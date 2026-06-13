@@ -9,6 +9,7 @@
 
 pub mod bundle;
 pub mod collection;
+pub mod doctor;
 pub mod fsops;
 pub mod gitexclude;
 pub mod lockfile;

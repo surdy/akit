@@ -314,7 +314,7 @@ fn target_for(item_type: ItemType, name: &str) -> String {
     }
 }
 
-fn health(
+pub(crate) fn health(
     project: &Project,
     item: &LockItem,
     collection: Option<&Collection>,
@@ -346,7 +346,11 @@ fn health(
     }
 }
 
-fn source_for(collection: &Collection, item_type: ItemType, id: &str) -> std::path::PathBuf {
+pub(crate) fn source_for(
+    collection: &Collection,
+    item_type: ItemType,
+    id: &str,
+) -> std::path::PathBuf {
     match item_type {
         ItemType::Skill => collection.skill_source(id),
         ItemType::Agent => collection.agent_source(id),

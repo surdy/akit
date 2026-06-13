@@ -153,6 +153,143 @@ With `--json`, `status` is serialized as lowercase (`"ok"`, `"orphaned"`, `"miss
 `"drifted"`), `mode` is `"symlink"` or `"copy"`, and every item includes `bundle` (`null` for
 standalone items).
 
+### `doctor` — read-only reconcile report
+
+```bash
+ckit doctor
+```
+
+Checks the lockfile against the project filesystem, the current collection, and
+`.git/info/exclude` without modifying anything.
+
+- Reports each lockfile item as `ok`, `orphaned`, `missing`, or `drifted`.
+- Shows whether the collection source exists, the project target exists, and the target's
+  `/.github/...` exclude line is present.
+- Reports missing managed exclude lines, including `/.copilot/kit.lock.json`.
+- Flags stale managed exclude lines (for example, a `/.github/skills/...` line with no matching
+  lockfile entry) but does not remove them.
+
+Example:
+
+```bash
+$ ckit doctor
+BUNDLE  TYPE   ID             MODE     TARGET                                STATUS    EXCLUDE
+-       skill  deploy-helper  symlink  .github/skills/deploy-helper          ok        present
+Exclude: ok
+Health: ok
+```
+
+With `--json`, `doctor` emits:
+
+```json
+{
+  "items": [
+    {
+      "id": "deploy-helper",
+      "type": "skill",
+      "mode": "symlink",
+      "target": ".github/skills/deploy-helper",
+      "bundle": null,
+      "status": "ok",
+      "source_present": true,
+      "target_present": true,
+      "exclude_present": true
+    }
+  ],
+  "exclude": {
+    "checked": true,
+    "path": "<project>/.git/info/exclude",
+    "lockfile_present": true,
+    "missing": [],
+    "stale": []
+  },
+  "summary": {
+    "total": 1,
+    "ok": 1,
+    "orphaned": 0,
+    "missing": 0,
+    "drifted": 0,
+    "missing_exclude_lines": 0,
+    "stale_exclude_lines": 0,
+    "not_a_git_repo": false,
+    "healthy": true
+  }
+}
+```
+
+### `sync` — repair safe lockfile/filesystem/exclude drift
+
+```bash
+ckit sync
+```
+
+Reconciles the project from the lockfile. It is idempotent: running it again after a clean sync is a
+no-op.
+
+Repairs:
+
+- Missing materialized targets, using the recorded `mode` (`symlink` or `copy`) and the current
+  collection source.
+- Missing `.git/info/exclude` lines for locked targets.
+- The lockfile's own `/.copilot/kit.lock.json` exclude line.
+
+Does **not** silently delete or overwrite user data:
+
+- Orphaned items whose collection source is gone are reported and skipped.
+- Drifted copy-mode targets are reported and not overwritten.
+- Stale exclude lines are reported and not removed.
+
+Example:
+
+```bash
+$ ckit sync
+Restored skill 'deploy-helper' -> .github/skills/deploy-helper (symlink)
+Added exclude /.copilot/kit.lock.json
+```
+
+With `--json`, `sync` emits:
+
+```json
+{
+  "items": [
+    {
+      "id": "deploy-helper",
+      "type": "skill",
+      "mode": "symlink",
+      "target": ".github/skills/deploy-helper",
+      "bundle": null,
+      "status_before": "missing",
+      "status_after": "ok",
+      "source_present": true,
+      "restored": true,
+      "exclude_added": false,
+      "skipped_orphan": false,
+      "drifted": false
+    }
+  ],
+  "exclude": {
+    "checked": true,
+    "path": "<project>/.git/info/exclude",
+    "lockfile_added": true,
+    "target_lines_added": [],
+    "missing_after": [],
+    "stale": []
+  },
+  "summary": {
+    "total": 1,
+    "restored": 1,
+    "exclude_added": 1,
+    "skipped_orphan": 0,
+    "drifted": 0,
+    "missing_after": 0,
+    "missing_exclude_lines": 0,
+    "stale_exclude_lines": 0,
+    "not_a_git_repo": false,
+    "healthy": true
+  }
+}
+```
+
 ### `search` — search the collection
 
 ```bash

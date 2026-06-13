@@ -30,7 +30,7 @@ See [`docs/design.md`](docs/design.md) for the full design, decisions, and Phase
 ## Roadmap
 
 - **Phase 1 — core engine MVP** (this repo): single local collection; `add`/`rm`/`ls`/`search`/
-  `sync`; symlink-default/copy-fallback; auto-gitignore; lockfile. Scoped into tracer-bullet
+  `sync`/`doctor`; symlink-default/copy-fallback; auto-gitignore; lockfile. Scoped into tracer-bullet
   issues — see the [issues](../../issues).
 - **Phase 2 — pterm GUI**: search palette, per-project "active kits" panel, launch-dialog hook.
 - **Phase 3 — multiple sources / APM backend**: `owner/repo/path[#ref]` manifests.
@@ -44,4 +44,4 @@ See [`docs/design.md`](docs/design.md) for the full design, decisions, and Phase
   `{ "version": 1, "items": [ { "id", "type", "source", "ref", "mode", "target", "bundle"? } ] }`.
 - **fs helpers:** `materialize(item, mode)`, `addExclude`/`removeExclude` on `.git/info/exclude`.
 - **CLI scaffold:** `ckit <cmd> [--project <dir>] [--json]`; commands include `add [--copy]`, `rm`,
-  `add --bundle`, `rm --bundle`, `ls`/`status`, and `search`.
+  `add --bundle`, `rm --bundle`, `ls`/`status`, `search`, `sync`, and `doctor`.
