@@ -196,7 +196,7 @@ fn doctor_item(
     item: &LockItem,
     exclude_lines: Option<&BTreeSet<String>>,
 ) -> Result<DoctorItem> {
-    let source_present = ops::source_for(collection, item.item_type, &item.id).exists();
+    let source_present = ops::source_for_item(collection, item).exists();
     let target_present = std::fs::symlink_metadata(project.root.join(&item.target)).is_ok();
     let status = item_health(project, collection, item, source_present, target_present)?;
     let exclude_present =
@@ -221,7 +221,7 @@ fn sync_item(
     item: &LockItem,
     exclude_added: bool,
 ) -> Result<SyncItem> {
-    let src = ops::source_for(collection, item.item_type, &item.id);
+    let src = ops::source_for_item(collection, item);
     let source_present = src.exists();
     let target_present = std::fs::symlink_metadata(project.root.join(&item.target)).is_ok();
     let status_before = item_health(project, collection, item, source_present, target_present)?;

@@ -2,8 +2,9 @@
 
 A standalone, harness-agnostic CLI for **on-demand personal Copilot customizations**.
 
-Keep your skills and custom agents in one central collection, then pull only the ones you
-need into a project on demand — one at a time or as named bundles — materialized into
+Keep your skills and custom agents in one central collection, or pull a remote
+`owner/repo/path[#ref]` source through the git-fetch cache, then activate only the ones you
+need in a project on demand — one at a time or as named bundles — materialized into
 `.github/{skills,agents}` via **symlink** or `ckit add --copy` (with auto copy fallback on
 symlink failure), kept **personal +
 gitignored** (`.git/info/exclude`), and tracked by a per-project **lockfile**. Remove them just
@@ -33,7 +34,8 @@ See [`docs/design.md`](docs/design.md) for the full design, decisions, and Phase
   `sync`/`doctor`; symlink-default/copy-fallback; auto-gitignore; lockfile. Scoped into tracer-bullet
   issues — see the [issues](../../issues).
 - **Phase 2 — pterm GUI**: search palette, per-project "active kits" panel, launch-dialog hook.
-- **Phase 3 — multiple sources / APM backend**: `owner/repo/path[#ref]` manifests.
+- **Phase 3 — multiple sources / APM backend**: `owner/repo/path[#ref]` manifests. The current
+  stretch implementation proves that source shape with a git-fetch cache, pending APM.
 - **Phase 4 — cross-harness**: Codex / Claude targets.
 
 ## Shared contracts (frozen by issue #1, the walking skeleton)

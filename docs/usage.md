@@ -54,6 +54,7 @@ skill and agent before materializing anything; if an id is missing, the whole bu
 
 ```bash
 ckit add [--agent] [--copy] <name>
+ckit add [--agent] [--copy] owner/repo/path[#ref]
 ckit add [--copy] --bundle <name>
 ```
 
@@ -63,13 +64,28 @@ ckit add [--copy] --bundle <name>
   `<project>/.github/agents/<name>.agent.md`.
 - With `--copy`, copies the source files instead of symlinking them and records `"mode": "copy"`
   in the lockfile and `--json` add report.
+- If `<name>` contains `/`, `ckit` treats it as a remote source spec instead of a local collection
+  name. The syntax is `owner/repo/path[#ref]`; `path` points at a skill directory containing
+  `SKILL.md` (or, with `--agent`, a `.agent.md` file). For skill repositories with a top-level
+  `skills/` directory, a single-segment path like `deploy-to-vercel` also resolves to
+  `skills/deploy-to-vercel`. The installed id/target comes from the last path segment, so
+  `vercel-labs/agent-skills/deploy-to-vercel#main` lands at `.github/skills/deploy-to-vercel`.
+- Remote sources are fetched with `git` into a local cache, then materialized through the same
+  symlink/copy pipeline as local items. The default cache is
+  `~/.cache/ckit/sources/<owner>/<repo>@<ref-or-default>`; `$XDG_CACHE_HOME` changes the cache base
+  to `$XDG_CACHE_HOME/ckit`, and `$KIT_CACHE_DIR` overrides it entirely. The CLI fetches from
+  `https://github.com/<owner>/<repo>` by default; `$KIT_REMOTE_BASE_URL` can point at another git
+  URL base (for example, a local `file://` mirror).
+- Remote lockfile entries record `"source": "owner/repo/path"` and `"ref": "<ref>"` when a ref was
+  supplied. The future intended backend is APM; the current git-fetch cache is the equivalent
+  offline-friendly mechanism used today.
 - With `--bundle <name>`, reads `<collection>/bundles/<name>.yml` and adds every listed skill and
   agent through the same add pipeline. `--copy` applies to every item. `--agent` is not used with
   bundles because the manifest already distinguishes item types.
 - If symlink creation fails at runtime (for example, Windows without symlink privilege), `ckit`
   warns on stderr, falls back to copying, and records the effective `"mode": "copy"`.
 - Appends the pull and the lockfile to `.git/info/exclude`, so nothing is committed and your
-  teammates are unaffected.
+  teammates are unaffected. This applies to both local and remote pulls.
 - Records the item in `<project>/.copilot/kit.lock.json`. Bundle-installed entries carry
   `"bundle": "<name>"`.
 - Idempotent: re-running is a safe no-op.
@@ -85,6 +101,9 @@ Added agent 'reviewer' -> .github/agents/reviewer.agent.md (linked)
 
 $ ckit add --copy deploy-helper
 Added skill 'deploy-helper' -> .github/skills/deploy-helper (copied)
+
+$ ckit add vercel-labs/agent-skills/deploy-to-vercel#main
+Added skill 'deploy-to-vercel' -> .github/skills/deploy-to-vercel (linked)
 
 $ ckit add --bundle web
 Added bundle 'web' (3 items)
@@ -103,6 +122,8 @@ ckit rm --bundle <name>
 - Removes the materialized target from `.github/skills/` or `.github/agents/`.
 - Removes that target's `.git/info/exclude` line.
 - Removes the lockfile entry.
+- Remote items are removed by their installed id (the source path leaf), so a remote add of
+  `owner/repo/deploy-to-vercel#main` is reversed with `ckit rm deploy-to-vercel`.
 - With `--bundle <name>`, removes exactly the installed lockfile entries tagged with that bundle.
   The current manifest is not consulted, so removal stays precise even if the manifest changed.
 - Idempotent: removing an item that is not installed exits successfully.

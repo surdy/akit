@@ -11,6 +11,7 @@ use crate::fsops;
 use crate::gitexclude;
 use crate::lockfile::{ItemType, LockItem, Lockfile, Mode};
 use crate::project::Project;
+use crate::remote::{self, SourceSpec};
 
 /// Project-relative path of the lockfile, used for the git-exclude entry.
 pub const LOCKFILE_REL: &str = ".copilot/kit.lock.json";
@@ -24,6 +25,11 @@ pub struct AddReport {
     pub mode: Mode,
     /// Project-relative materialized path.
     pub target: String,
+    /// `local` for collection items, or `owner/repo/path` for remote items.
+    pub source: String,
+    /// Source ref, when applicable.
+    #[serde(rename = "ref", skip_serializing_if = "Option::is_none")]
+    pub git_ref: Option<String>,
     /// Bundle this item was installed as part of, if any.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub bundle: Option<String>,
@@ -107,9 +113,73 @@ pub fn add_item(
         ItemType::Agent => collection.resolve_agent(name)?,
     };
     let target_rel = target_for(item_type, name);
+    record_materialized(
+        project,
+        MaterializeRecord {
+            item_type,
+            id: name,
+            target_rel,
+            src: &src,
+            mode,
+            source: "local".to_string(),
+            git_ref: None,
+            bundle_name,
+        },
+    )
+}
+
+/// Pull a remote item into the project through the same materialize/gitignore/lockfile pipeline.
+pub fn add_remote(
+    project: &Project,
+    spec: &SourceSpec,
+    item_type: ItemType,
+    mode: Mode,
+    base_url: &str,
+) -> Result<AddReport> {
+    let src = remote::fetch(spec, base_url)?;
+    let id = remote_id(item_type, spec);
+    validate_remote_source(item_type, &id, &src)?;
+    let target_rel = target_for(item_type, &id);
+    record_materialized(
+        project,
+        MaterializeRecord {
+            item_type,
+            id: &id,
+            target_rel,
+            src: &src,
+            mode,
+            source: spec.source(),
+            git_ref: spec.ref_.clone(),
+            bundle_name: None,
+        },
+    )
+}
+
+struct MaterializeRecord<'a> {
+    item_type: ItemType,
+    id: &'a str,
+    target_rel: String,
+    src: &'a std::path::Path,
+    mode: Mode,
+    source: String,
+    git_ref: Option<String>,
+    bundle_name: Option<&'a str>,
+}
+
+fn record_materialized(project: &Project, input: MaterializeRecord<'_>) -> Result<AddReport> {
+    let MaterializeRecord {
+        item_type,
+        id,
+        target_rel,
+        src,
+        mode,
+        source,
+        git_ref,
+        bundle_name,
+    } = input;
     let dst = project.root.join(&target_rel);
 
-    let materialized = fsops::materialize_with_fallback(mode, &src, &dst)?;
+    let materialized = fsops::materialize_with_fallback(mode, src, &dst)?;
 
     let mut exclude_added = false;
     let not_a_git_repo = project.git_dir.is_none();
@@ -120,28 +190,68 @@ pub fn add_item(
 
     let lf_path = project.lockfile_path();
     let mut lockfile = Lockfile::load(&lf_path)?;
+    let bundle = bundle_name.map(str::to_string);
     let lock_added = lockfile.upsert(LockItem {
-        id: name.to_string(),
+        id: id.to_string(),
         item_type,
-        source: "local".to_string(),
-        git_ref: None,
+        source: source.clone(),
+        git_ref: git_ref.clone(),
         mode: materialized.mode,
         target: target_rel.clone(),
-        bundle: bundle_name.map(str::to_string),
+        bundle: bundle.clone(),
     });
     lockfile.save(&lf_path)?;
 
     Ok(AddReport {
-        id: name.to_string(),
+        id: id.to_string(),
         item_type,
         mode: materialized.mode,
         target: target_rel,
-        bundle: bundle_name.map(str::to_string),
+        source,
+        git_ref,
+        bundle,
         link_created: materialized.outcome.created(),
         exclude_added,
         lock_added,
         not_a_git_repo,
     })
+}
+
+fn validate_remote_source(item_type: ItemType, id: &str, src: &std::path::Path) -> Result<()> {
+    match item_type {
+        ItemType::Skill => {
+            if !src.is_dir() {
+                anyhow::bail!(
+                    "remote skill '{id}' must be a directory (resolved {})",
+                    src.display()
+                );
+            }
+            let skill_md = src.join("SKILL.md");
+            if !skill_md.is_file() {
+                anyhow::bail!(
+                    "remote skill '{id}' is missing SKILL.md ({})",
+                    skill_md.display()
+                );
+            }
+        }
+        ItemType::Agent => {
+            if !src.is_file() {
+                anyhow::bail!(
+                    "remote agent '{id}' must be a .agent.md file (resolved {})",
+                    src.display()
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+fn remote_id(item_type: ItemType, spec: &SourceSpec) -> String {
+    let leaf = spec.leaf();
+    match item_type {
+        ItemType::Skill => leaf.to_string(),
+        ItemType::Agent => leaf.strip_suffix(".agent.md").unwrap_or(leaf).to_string(),
+    }
 }
 
 /// Pull a skill from the collection into the project (symlink, gitignore, record).
@@ -323,7 +433,7 @@ pub(crate) fn health(
     match std::fs::symlink_metadata(&dst) {
         Ok(_) if item.mode == Mode::Copy => {
             let collection = collection.context("collection is required to check copy drift")?;
-            let src = source_for(collection, item.item_type, &item.id);
+            let src = source_for_item(collection, item);
             if !src.exists() {
                 return Ok(HealthStatus::Orphaned);
             }
@@ -355,4 +465,13 @@ pub(crate) fn source_for(
         ItemType::Skill => collection.skill_source(id),
         ItemType::Agent => collection.agent_source(id),
     }
+}
+
+pub(crate) fn source_for_item(collection: &Collection, item: &LockItem) -> std::path::PathBuf {
+    if item.source == "local" {
+        return source_for(collection, item.item_type, &item.id);
+    }
+    SourceSpec::from_source_and_ref(&item.source, item.git_ref.clone())
+        .map(|spec| remote::cached_item_path(&spec))
+        .unwrap_or_else(|| source_for(collection, item.item_type, &item.id))
 }

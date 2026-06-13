@@ -15,4 +15,5 @@ pub mod gitexclude;
 pub mod lockfile;
 pub mod ops;
 pub mod project;
+pub mod remote;
 pub mod search;

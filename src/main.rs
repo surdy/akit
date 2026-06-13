@@ -11,6 +11,7 @@ use ckit::lockfile::{ItemType, Mode};
 use ckit::ops;
 use ckit::ops::{HealthStatus, ListItem};
 use ckit::project::Project;
+use ckit::remote::{self, SourceSpec};
 use ckit::search::{self, SearchHit};
 
 #[derive(Parser)]
@@ -34,7 +35,7 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Pull a skill or agent from your collection into this project.
+    /// Pull a skill or agent from your collection, or owner/repo/path[#ref], into this project.
     Add {
         /// Add an agent (`agents/<name>.agent.md`) instead of a skill.
         #[arg(long)]
@@ -45,7 +46,7 @@ enum Commands {
         /// Add every item listed by `bundles/<name>.yml`.
         #[arg(long)]
         bundle: Option<String>,
-        /// Name of the item to add.
+        /// Local item name, or remote owner/repo/path[#ref].
         name: Option<String>,
     },
     /// Remove a skill or agent from this project.
@@ -121,9 +122,20 @@ fn run() -> Result<()> {
                 }
                 (None, Some(name)) => {
                     let project = Project::locate(cli.project.clone())?;
-                    let collection = Collection::locate()?;
-                    let report =
-                        ops::add_item(&project, &collection, item_type(*agent), name, mode, None)?;
+                    let report = if let Some(spec) = SourceSpec::parse(name) {
+                        ops::add_remote(
+                            &project,
+                            &spec,
+                            item_type(*agent),
+                            mode,
+                            &remote_base_url(),
+                        )?
+                    } else if name.contains('/') {
+                        bail!("invalid remote source spec '{name}'; expected owner/repo/path[#ref]")
+                    } else {
+                        let collection = Collection::locate()?;
+                        ops::add_item(&project, &collection, item_type(*agent), name, mode, None)?
+                    };
                     if cli.json {
                         println!("{}", serde_json::to_string(&report)?);
                     } else {
@@ -229,6 +241,13 @@ fn item_type(agent: bool) -> ItemType {
     } else {
         ItemType::Skill
     }
+}
+
+fn remote_base_url() -> String {
+    std::env::var(remote::ENV_REMOTE_BASE_URL)
+        .ok()
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| remote::DEFAULT_BASE_URL.to_string())
 }
 
 fn type_name(item_type: ItemType) -> &'static str {
