@@ -11,6 +11,7 @@ gitignored** (`.git/info/exclude`), and tracked by a per-project **lockfile**. R
 as easily.
 
 > Status/Usage: see [`docs/usage.md`](docs/usage.md). Design + plan in [`docs/design.md`](docs/design.md).
+> Embedding ckit as a library: see [`docs/embedding.md`](docs/embedding.md).
 > GUI integration lives separately in [pterm](https://github.com/surdy/pterm) (Phase 2).
 
 ## Why
