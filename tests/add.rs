@@ -5,7 +5,7 @@ use std::fs;
 use std::path::Path;
 use std::process::Command;
 
-use akit::collection::Collection;
+use akit::catalog::Catalog;
 use akit::lockfile::{ItemType, Lockfile, Mode};
 use akit::ops;
 use akit::project::Project;
@@ -18,8 +18,8 @@ fn git(args: &[&str], cwd: &Path) -> std::process::Output {
         .expect("git should be available")
 }
 
-fn make_skill(collection_root: &Path, name: &str) {
-    let dir = collection_root.join("skills").join(name);
+fn make_skill(catalog_root: &Path, name: &str) {
+    let dir = catalog_root.join("skills").join(name);
     fs::create_dir_all(&dir).unwrap();
     fs::write(
         dir.join("SKILL.md"),
@@ -33,10 +33,10 @@ fn add_skill_end_to_end_and_idempotent() {
     let tmp = tempfile::tempdir().unwrap();
     let base = tmp.path();
 
-    // Collection with one skill.
-    let collection_root = base.join("collection");
-    make_skill(&collection_root, "demo");
-    let collection = Collection::with_root(&collection_root);
+    // Catalog with one skill.
+    let catalog_root = base.join("catalog");
+    make_skill(&catalog_root, "demo");
+    let catalog = Catalog::with_root(&catalog_root);
 
     // A real git project so `.git/info/exclude` exists.
     let proj = base.join("project");
@@ -45,19 +45,19 @@ fn add_skill_end_to_end_and_idempotent() {
     let project = Project::locate(Some(proj.clone())).unwrap();
 
     // --- add ---
-    let report = ops::add_skill(&project, &collection, "demo").unwrap();
+    let report = ops::add_skill(&project, &catalog, "demo").unwrap();
     assert!(report.link_created);
     assert!(report.lock_added);
     assert!(report.exclude_added);
     assert!(!report.not_a_git_repo);
 
-    // Symlink exists and resolves to the collection source.
+    // Symlink exists and resolves to the catalog source.
     let link = proj.join(".github/skills/demo");
     let meta = fs::symlink_metadata(&link).unwrap();
     assert!(meta.file_type().is_symlink(), "target should be a symlink");
     assert_eq!(
         link.canonicalize().unwrap(),
-        collection_root.join("skills/demo").canonicalize().unwrap()
+        catalog_root.join("skills/demo").canonicalize().unwrap()
     );
 
     // git/info/exclude has both lines.
@@ -90,7 +90,7 @@ fn add_skill_end_to_end_and_idempotent() {
     );
 
     // --- idempotent re-run ---
-    let report2 = ops::add_skill(&project, &collection, "demo").unwrap();
+    let report2 = ops::add_skill(&project, &catalog, "demo").unwrap();
     assert!(!report2.link_created, "second add should not re-create link");
     assert!(!report2.lock_added, "second add should not duplicate lock entry");
     assert!(!report2.exclude_added, "second add should not duplicate exclude");
@@ -116,12 +116,12 @@ fn add_skill_end_to_end_and_idempotent() {
 fn unknown_skill_errors() {
     let tmp = tempfile::tempdir().unwrap();
     let base = tmp.path();
-    let collection = Collection::with_root(base.join("collection"));
+    let catalog = Catalog::with_root(base.join("catalog"));
     let proj = base.join("project");
     fs::create_dir_all(&proj).unwrap();
     git(&["init", "-q"], &proj);
     let project = Project::locate(Some(proj)).unwrap();
 
-    let err = ops::add_skill(&project, &collection, "missing").unwrap_err();
+    let err = ops::add_skill(&project, &catalog, "missing").unwrap_err();
     assert!(err.to_string().contains("not found"), "got: {err}");
 }

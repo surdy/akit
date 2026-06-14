@@ -4,12 +4,12 @@ use anyhow::{Result, bail};
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 
-use akit::collection::Collection;
+use akit::catalog::Catalog;
 use akit::doctor;
 use akit::doctor::{DoctorReport, SyncReport};
 use akit::lockfile::{ItemType, Mode};
 use akit::ops;
-use akit::ops::{HealthStatus, ListItem};
+use akit::ops::{CatalogItem, HealthStatus, ListItem};
 use akit::project::Project;
 use akit::remote::{self, SourceSpec};
 use akit::search::{self, SearchHit};
@@ -36,7 +36,7 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Pull a skill or agent from your collection, or owner/repo/path[#ref], into this project.
+    /// Pull a skill or agent from your catalog, or owner/repo/path[#ref], into this project.
     Add {
         /// Add an agent (`agents/<name>.agent.md`) instead of a skill.
         #[arg(long)]
@@ -68,12 +68,12 @@ enum Commands {
     Sync,
     /// Read-only reconcile report for lockfile, files, and git-exclude lines.
     Doctor,
-    /// Search your collection by skill/agent frontmatter.
+    /// Search your catalog by skill/agent frontmatter.
     Search {
         /// Query to fuzzy-match against name and description (empty lists everything).
         query: Option<String>,
     },
-    /// Print a read-only preview of a collection item (frontmatter + content).
+    /// Print a read-only preview of a catalog item (frontmatter + content).
     Show {
         /// Show an agent (`agents/<id>.agent.md`) instead of a skill.
         #[arg(long)]
@@ -81,7 +81,7 @@ enum Commands {
         /// Item id: a skill directory name, or an agent file stem.
         id: String,
     },
-    /// Fetch a remote owner/repo/path[#ref] source into your local collection.
+    /// Fetch a remote owner/repo/path[#ref] source into your local catalog.
     Pull {
         /// Pull an agent (`.agent.md`) instead of a skill.
         #[arg(long)]
@@ -89,26 +89,38 @@ enum Commands {
         /// Store under this id instead of the source's last path segment.
         #[arg(long = "as")]
         as_id: Option<String>,
-        /// Overwrite an existing collection item that differs from the source.
+        /// Overwrite an existing catalog item that differs from the source.
         #[arg(long)]
         force: bool,
         /// Remote source: owner/repo/path[#ref].
         source: String,
     },
-    /// Re-fetch every remote item recorded in the collection manifest (akit.yml).
+    /// Re-fetch every remote item recorded in the catalog manifest (akit.yml).
     Restore {
-        /// Overwrite collection items that differ from their recorded source.
+        /// Overwrite catalog items that differ from their recorded source.
         #[arg(long)]
         force: bool,
     },
-    /// Remove a pulled item from the collection and prune its manifest entry (inverse of pull).
+    /// Remove a pulled item from the catalog and prune its manifest entry (inverse of pull).
     Unpull {
         /// Unpull an agent (`.agent.md`) instead of a skill.
         #[arg(long)]
         agent: bool,
-        /// Collection id to unpull.
+        /// Catalog id to unpull.
         id: String,
     },
+    /// Inspect your catalog (the local store of skills and agents).
+    Catalog {
+        #[command(subcommand)]
+        command: CatalogCommands,
+    },
+}
+
+#[derive(Subcommand)]
+enum CatalogCommands {
+    /// List every skill and agent in your catalog.
+    #[command(alias = "list")]
+    Ls,
 }
 
 fn main() {
@@ -139,8 +151,8 @@ fn run() -> Result<()> {
                         bail!("add --bundle cannot be combined with --agent");
                     }
                     let project = Project::locate(cli.project.clone())?;
-                    let collection = Collection::locate()?;
-                    let report = ops::add_bundle(&project, &collection, bundle, mode)?;
+                    let catalog = Catalog::locate()?;
+                    let report = ops::add_bundle(&project, &catalog, bundle, mode)?;
                     if cli.json {
                         println!("{}", serde_json::to_string(&report)?);
                     } else {
@@ -170,8 +182,8 @@ fn run() -> Result<()> {
                     } else if name.contains('/') {
                         bail!("invalid remote source spec '{name}'; expected owner/repo/path[#ref]")
                     } else {
-                        let collection = Collection::locate()?;
-                        ops::add_item(&project, &collection, item_type(*agent), name, mode, None)?
+                        let catalog = Catalog::locate()?;
+                        ops::add_item(&project, &catalog, item_type(*agent), name, mode, None)?
                     };
                     if cli.json {
                         println!("{}", serde_json::to_string(&report)?);
@@ -241,8 +253,8 @@ fn run() -> Result<()> {
         }
         Commands::Sync => {
             let project = Project::locate(cli.project.clone())?;
-            let collection = Collection::locate()?;
-            let report = doctor::sync(&project, &collection)?;
+            let catalog = Catalog::locate()?;
+            let report = doctor::sync(&project, &catalog)?;
             if cli.json {
                 println!("{}", serde_json::to_string(&report)?);
             } else {
@@ -251,8 +263,8 @@ fn run() -> Result<()> {
         }
         Commands::Doctor => {
             let project = Project::locate(cli.project.clone())?;
-            let collection = Collection::locate()?;
-            let report = doctor::diagnose(&project, &collection)?;
+            let catalog = Catalog::locate()?;
+            let report = doctor::diagnose(&project, &catalog)?;
             if cli.json {
                 println!("{}", serde_json::to_string(&report)?);
             } else {
@@ -260,8 +272,8 @@ fn run() -> Result<()> {
             }
         }
         Commands::Search { query } => {
-            let collection = Collection::locate()?;
-            let hits = search::search(&collection, query.as_deref().unwrap_or_default())?;
+            let catalog = Catalog::locate()?;
+            let hits = search::search(&catalog, query.as_deref().unwrap_or_default())?;
             if cli.json {
                 println!("{}", serde_json::to_string(&hits)?);
             } else {
@@ -269,8 +281,8 @@ fn run() -> Result<()> {
             }
         }
         Commands::Show { agent, id } => {
-            let collection = Collection::locate()?;
-            let preview = show::show(&collection, id, item_type(*agent))?;
+            let catalog = Catalog::locate()?;
+            let preview = show::show(&catalog, id, item_type(*agent))?;
             if cli.json {
                 println!("{}", serde_json::to_string(&preview)?);
             } else {
@@ -286,9 +298,9 @@ fn run() -> Result<()> {
             let Some(spec) = SourceSpec::parse(source) else {
                 bail!("invalid remote source spec '{source}'; expected owner/repo/path[#ref]")
             };
-            let collection = Collection::locate()?;
-            let report = ops::pull_into_collection(
-                &collection,
+            let catalog = Catalog::locate()?;
+            let report = ops::pull_into_catalog(
+                &catalog,
                 &spec,
                 item_type(*agent),
                 as_id.as_deref(),
@@ -302,8 +314,8 @@ fn run() -> Result<()> {
             }
         }
         Commands::Restore { force } => {
-            let collection = Collection::locate()?;
-            let report = ops::restore_collection(&collection, &remote_base_url(), *force)?;
+            let catalog = Catalog::locate()?;
+            let report = ops::restore_catalog(&catalog, &remote_base_url(), *force)?;
             if cli.json {
                 println!("{}", serde_json::to_string(&report)?);
             } else {
@@ -314,14 +326,25 @@ fn run() -> Result<()> {
             }
         }
         Commands::Unpull { agent, id } => {
-            let collection = Collection::locate()?;
-            let report = ops::unpull_from_collection(&collection, item_type(*agent), id)?;
+            let catalog = Catalog::locate()?;
+            let report = ops::unpull_from_catalog(&catalog, item_type(*agent), id)?;
             if cli.json {
                 println!("{}", serde_json::to_string(&report)?);
             } else {
                 println!("{}", unpull_report_line(&report));
             }
         }
+        Commands::Catalog { command } => match command {
+            CatalogCommands::Ls => {
+                let catalog = Catalog::locate()?;
+                let items = ops::list_catalog(&catalog)?;
+                if cli.json {
+                    println!("{}", serde_json::to_string(&items)?);
+                } else {
+                    print_catalog_table(&items);
+                }
+            }
+        },
     }
     Ok(())
 }
@@ -458,7 +481,7 @@ fn restore_status_label(status: ops::RestoreStatus) -> &'static str {
 
 fn print_restore_report(report: &ops::RestoreReport) {
     if report.items.is_empty() {
-        println!("Nothing to restore; collection manifest has no remote items.");
+        println!("Nothing to restore; catalog manifest has no remote items.");
         return;
     }
     for item in &report.items {
@@ -697,6 +720,40 @@ fn print_sync_report(report: &SyncReport) {
     if !printed {
         println!("Already in sync");
     }
+}
+
+fn print_catalog_table(items: &[CatalogItem]) {
+    if items.is_empty() {
+        println!("Catalog is empty. Populate it by hand or with `akit pull`.");
+        return;
+    }
+
+    let mut type_width = "TYPE".len();
+    let mut id_width = "ID".len();
+    let mut origin_width = "ORIGIN".len();
+    for item in items {
+        type_width = type_width.max(type_name(item.item_type).len());
+        id_width = id_width.max(item.id.len());
+        origin_width = origin_width.max(catalog_origin(item).len());
+    }
+
+    println!(
+        "{:<type_width$}  {:<id_width$}  {:<origin_width$}  DESCRIPTION",
+        "TYPE", "ID", "ORIGIN"
+    );
+    for item in items {
+        println!(
+            "{:<type_width$}  {:<id_width$}  {:<origin_width$}  {}",
+            type_name(item.item_type),
+            item.id,
+            catalog_origin(item),
+            item.description
+        );
+    }
+}
+
+fn catalog_origin(item: &CatalogItem) -> String {
+    item.source.clone().unwrap_or_else(|| "local".to_string())
 }
 
 fn print_search_hits(hits: &[SearchHit]) {

@@ -3,7 +3,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use akit::collection::Collection;
+use akit::catalog::Catalog;
 use akit::lockfile::{ItemType, Lockfile, Mode};
 use akit::ops::{self, HealthStatus};
 use akit::project::Project;
@@ -24,8 +24,8 @@ fn init_project(base: &Path) -> (PathBuf, Project) {
     (proj, project)
 }
 
-fn make_skill(collection_root: &Path, name: &str) {
-    let dir = collection_root.join("skills").join(name);
+fn make_skill(catalog_root: &Path, name: &str) {
+    let dir = catalog_root.join("skills").join(name);
     fs::create_dir_all(&dir).unwrap();
     fs::write(
         dir.join("SKILL.md"),
@@ -34,8 +34,8 @@ fn make_skill(collection_root: &Path, name: &str) {
     .unwrap();
 }
 
-fn make_agent(collection_root: &Path, name: &str) {
-    let dir = collection_root.join("agents");
+fn make_agent(catalog_root: &Path, name: &str) {
+    let dir = catalog_root.join("agents");
     fs::create_dir_all(&dir).unwrap();
     fs::write(
         dir.join(format!("{name}.agent.md")),
@@ -44,8 +44,8 @@ fn make_agent(collection_root: &Path, name: &str) {
     .unwrap();
 }
 
-fn make_bundle(collection_root: &Path, name: &str, manifest: &str) {
-    let dir = collection_root.join("bundles");
+fn make_bundle(catalog_root: &Path, name: &str, manifest: &str) {
+    let dir = catalog_root.join("bundles");
     fs::create_dir_all(&dir).unwrap();
     fs::write(dir.join(format!("{name}.yml")), manifest).unwrap();
 }
@@ -68,19 +68,19 @@ fn ids(items: &[(&str, &str)]) -> BTreeSet<(String, String)> {
 fn add_bundle_installs_mixed_items_and_tags_lockfile() {
     let tmp = tempfile::tempdir().unwrap();
     let base = tmp.path();
-    let collection_root = base.join("collection");
-    make_skill(&collection_root, "deploy-to-vercel");
-    make_skill(&collection_root, "lint-fix");
-    make_agent(&collection_root, "code-reviewer");
+    let catalog_root = base.join("catalog");
+    make_skill(&catalog_root, "deploy-to-vercel");
+    make_skill(&catalog_root, "lint-fix");
+    make_agent(&catalog_root, "code-reviewer");
     make_bundle(
-        &collection_root,
+        &catalog_root,
         "demo",
         "skills: [deploy-to-vercel, lint-fix]\nagents: [code-reviewer]\n",
     );
-    let collection = Collection::with_root(&collection_root);
+    let catalog = Catalog::with_root(&catalog_root);
     let (proj, project) = init_project(base);
 
-    let report = ops::add_bundle(&project, &collection, "demo", Mode::Symlink).unwrap();
+    let report = ops::add_bundle(&project, &catalog, "demo", Mode::Symlink).unwrap();
 
     assert_eq!(report.bundle, "demo");
     assert_eq!(report.items.len(), 3);
@@ -130,38 +130,38 @@ fn add_bundle_installs_mixed_items_and_tags_lockfile() {
 fn remove_bundle_uses_lockfile_tags_and_leaves_unrelated_items() {
     let tmp = tempfile::tempdir().unwrap();
     let base = tmp.path();
-    let collection_root = base.join("collection");
+    let catalog_root = base.join("catalog");
     for skill in ["deploy-to-vercel", "lint-fix", "standalone", "other-skill"] {
-        make_skill(&collection_root, skill);
+        make_skill(&catalog_root, skill);
     }
-    make_agent(&collection_root, "code-reviewer");
-    make_agent(&collection_root, "other-agent");
+    make_agent(&catalog_root, "code-reviewer");
+    make_agent(&catalog_root, "other-agent");
     make_bundle(
-        &collection_root,
+        &catalog_root,
         "demo",
         "skills: [deploy-to-vercel, lint-fix]\nagents: [code-reviewer]\n",
     );
     make_bundle(
-        &collection_root,
+        &catalog_root,
         "other",
         "skills: [other-skill]\nagents: [other-agent]\n",
     );
-    let collection = Collection::with_root(&collection_root);
+    let catalog = Catalog::with_root(&catalog_root);
     let (proj, project) = init_project(base);
 
-    ops::add_bundle(&project, &collection, "demo", Mode::Symlink).unwrap();
+    ops::add_bundle(&project, &catalog, "demo", Mode::Symlink).unwrap();
     ops::add_item(
         &project,
-        &collection,
+        &catalog,
         ItemType::Skill,
         "standalone",
         Mode::Symlink,
         None,
     )
     .unwrap();
-    ops::add_bundle(&project, &collection, "other", Mode::Symlink).unwrap();
+    ops::add_bundle(&project, &catalog, "other", Mode::Symlink).unwrap();
 
-    make_bundle(&collection_root, "demo", "skills: [standalone]\n");
+    make_bundle(&catalog_root, "demo", "skills: [standalone]\n");
     let report = ops::remove_bundle(&project, "demo").unwrap();
 
     assert_eq!(report.items.len(), 3);
@@ -207,13 +207,13 @@ fn remove_bundle_uses_lockfile_tags_and_leaves_unrelated_items() {
 fn bundle_manifest_missing_keys_are_empty() {
     let tmp = tempfile::tempdir().unwrap();
     let base = tmp.path();
-    let collection_root = base.join("collection");
-    make_skill(&collection_root, "only-skill");
-    make_bundle(&collection_root, "skills-only", "skills: [only-skill]\n");
-    let collection = Collection::with_root(&collection_root);
+    let catalog_root = base.join("catalog");
+    make_skill(&catalog_root, "only-skill");
+    make_bundle(&catalog_root, "skills-only", "skills: [only-skill]\n");
+    let catalog = Catalog::with_root(&catalog_root);
     let (proj, project) = init_project(base);
 
-    let report = ops::add_bundle(&project, &collection, "skills-only", Mode::Symlink).unwrap();
+    let report = ops::add_bundle(&project, &catalog, "skills-only", Mode::Symlink).unwrap();
 
     assert_eq!(report.items.len(), 1);
     assert!(proj.join(".github/skills/only-skill").exists());
@@ -226,13 +226,13 @@ fn bundle_manifest_missing_keys_are_empty() {
 fn missing_bundle_item_fails_whole_bundle_with_clear_error() {
     let tmp = tempfile::tempdir().unwrap();
     let base = tmp.path();
-    let collection_root = base.join("collection");
-    make_skill(&collection_root, "present");
-    make_bundle(&collection_root, "broken", "skills: [present, missing]\n");
-    let collection = Collection::with_root(&collection_root);
+    let catalog_root = base.join("catalog");
+    make_skill(&catalog_root, "present");
+    make_bundle(&catalog_root, "broken", "skills: [present, missing]\n");
+    let catalog = Catalog::with_root(&catalog_root);
     let (proj, project) = init_project(base);
 
-    let err = ops::add_bundle(&project, &collection, "broken", Mode::Symlink).unwrap_err();
+    let err = ops::add_bundle(&project, &catalog, "broken", Mode::Symlink).unwrap_err();
 
     let message = format!("{err:#}");
     assert!(
@@ -256,11 +256,11 @@ fn missing_bundle_item_fails_whole_bundle_with_clear_error() {
 fn cli_add_and_rm_bundle_apply_copy_mode() {
     let tmp = tempfile::tempdir().unwrap();
     let base = tmp.path();
-    let collection_root = base.join("collection");
-    make_skill(&collection_root, "deploy-to-vercel");
-    make_agent(&collection_root, "code-reviewer");
+    let catalog_root = base.join("catalog");
+    make_skill(&catalog_root, "deploy-to-vercel");
+    make_agent(&catalog_root, "code-reviewer");
     make_bundle(
-        &collection_root,
+        &catalog_root,
         "demo",
         "skills: [deploy-to-vercel]\nagents: [code-reviewer]\n",
     );
@@ -276,7 +276,7 @@ fn cli_add_and_rm_bundle_apply_copy_mode() {
             "--bundle",
             "demo",
         ])
-        .env("KIT_COLLECTION_DIR", &collection_root)
+        .env("KIT_CATALOG_DIR", &catalog_root)
         .output()
         .expect("akit binary should run");
 
@@ -342,26 +342,26 @@ fn cli_add_and_rm_bundle_apply_copy_mode() {
 fn cli_ls_labels_and_groups_bundle_items() {
     let tmp = tempfile::tempdir().unwrap();
     let base = tmp.path();
-    let collection_root = base.join("collection");
-    make_skill(&collection_root, "alpha-skill");
-    make_skill(&collection_root, "zeta-skill");
-    make_skill(&collection_root, "standalone");
-    make_bundle(&collection_root, "zeta", "skills: [zeta-skill]\n");
-    make_bundle(&collection_root, "alpha", "skills: [alpha-skill]\n");
-    let collection = Collection::with_root(&collection_root);
+    let catalog_root = base.join("catalog");
+    make_skill(&catalog_root, "alpha-skill");
+    make_skill(&catalog_root, "zeta-skill");
+    make_skill(&catalog_root, "standalone");
+    make_bundle(&catalog_root, "zeta", "skills: [zeta-skill]\n");
+    make_bundle(&catalog_root, "alpha", "skills: [alpha-skill]\n");
+    let catalog = Catalog::with_root(&catalog_root);
     let (proj, project) = init_project(base);
 
-    ops::add_bundle(&project, &collection, "zeta", Mode::Symlink).unwrap();
+    ops::add_bundle(&project, &catalog, "zeta", Mode::Symlink).unwrap();
     ops::add_item(
         &project,
-        &collection,
+        &catalog,
         ItemType::Skill,
         "standalone",
         Mode::Symlink,
         None,
     )
     .unwrap();
-    ops::add_bundle(&project, &collection, "alpha", Mode::Symlink).unwrap();
+    ops::add_bundle(&project, &catalog, "alpha", Mode::Symlink).unwrap();
 
     let output = Command::new(env!("CARGO_BIN_EXE_akit"))
         .args(["--project", proj.to_str().unwrap(), "ls"])

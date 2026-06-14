@@ -167,7 +167,7 @@ fn copy_dir_all(src: &Path, dst: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Return `true` when the copied materialization differs from the collection source.
+/// Return `true` when the copied materialization differs from the catalog source.
 pub fn drifted(src: &Path, dst: &Path) -> Result<bool> {
     let src_meta = std::fs::metadata(src).with_context(|| format!("reading {}", src.display()))?;
     let dst_meta = std::fs::metadata(dst).with_context(|| format!("reading {}", dst.display()))?;

@@ -3,10 +3,11 @@
 
 use anyhow::{Context, Result};
 use serde::Serialize;
+use std::collections::HashMap;
 use std::io::ErrorKind;
 
 use crate::bundle;
-use crate::collection::Collection;
+use crate::catalog::Catalog;
 use crate::fsops;
 use crate::gitexclude;
 use crate::lockfile::{ItemType, LockItem, Lockfile, Mode};
@@ -26,7 +27,7 @@ pub struct AddReport {
     pub mode: Mode,
     /// Project-relative materialized path.
     pub target: String,
-    /// `local` for collection items, or `owner/repo/path` for remote items.
+    /// `local` for catalog items, or `owner/repo/path` for remote items.
     pub source: String,
     /// Source ref, when applicable.
     #[serde(rename = "ref", skip_serializing_if = "Option::is_none")]
@@ -100,18 +101,33 @@ pub struct ListItem {
     pub status: HealthStatus,
 }
 
-/// Pull an item from the collection into the project (symlink, gitignore, record).
+/// One skill or agent present in the catalog, as listed by `catalog ls`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct CatalogItem {
+    /// Catalog id: the handle used by `add`, `show`, and `unpull`.
+    pub id: String,
+    #[serde(rename = "type")]
+    pub item_type: ItemType,
+    /// Frontmatter description, or empty when absent.
+    pub description: String,
+    /// Remote provenance (`owner/repo/path[#ref]`) when the item was pulled and
+    /// recorded in the manifest; `None` for hand-authored (local) items.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
+}
+
+/// Pull an item from the catalog into the project (symlink, gitignore, record).
 pub fn add_item(
     project: &Project,
-    collection: &Collection,
+    catalog: &Catalog,
     item_type: ItemType,
     name: &str,
     mode: Mode,
     bundle_name: Option<&str>,
 ) -> Result<AddReport> {
     let src = match item_type {
-        ItemType::Skill => collection.resolve_skill(name)?,
-        ItemType::Agent => collection.resolve_agent(name)?,
+        ItemType::Skill => catalog.resolve_skill(name)?,
+        ItemType::Agent => catalog.resolve_agent(name)?,
     };
     let target_rel = target_for(item_type, name);
     record_materialized(
@@ -129,7 +145,7 @@ pub fn add_item(
     )
 }
 
-/// Outcome of a `pull` operation (fetch a remote source into the local collection).
+/// Outcome of a `pull` operation (fetch a remote source into the local catalog).
 #[derive(Debug, Serialize)]
 pub struct PullReport {
     pub id: String,
@@ -140,7 +156,7 @@ pub struct PullReport {
     /// Source ref, when one was supplied.
     #[serde(rename = "ref", skip_serializing_if = "Option::is_none")]
     pub git_ref: Option<String>,
-    /// Absolute path written in the collection.
+    /// Absolute path written in the catalog.
     pub path: String,
     /// Whether files were written (false when an identical copy was already present).
     pub created: bool,
@@ -148,26 +164,26 @@ pub struct PullReport {
     pub overwritten: bool,
 }
 
-/// Fetch a remote `owner/repo/path[#ref]` source and copy it into the local collection.
+/// Fetch a remote `owner/repo/path[#ref]` source and copy it into the local catalog.
 ///
 /// Unlike [`add_remote`], which materializes a remote source straight into a project, this
-/// seeds a reusable **collection** item (`skills/<id>/` or `agents/<id>.agent.md`) so it can
+/// seeds a reusable **catalog** item (`skills/<id>/` or `agents/<id>.agent.md`) so it can
 /// later be added, searched, and previewed like any other local item. The copy is standalone,
 /// independent of the git-fetch cache.
 ///
-/// The remote provenance is recorded in the collection manifest ([`manifest`]) so the item can
-/// be re-fetched on a new machine with [`restore_collection`].
-pub fn pull_into_collection(
-    collection: &Collection,
+/// The remote provenance is recorded in the catalog manifest ([`manifest`]) so the item can
+/// be re-fetched on a new machine with [`restore_catalog`].
+pub fn pull_into_catalog(
+    catalog: &Catalog,
     spec: &SourceSpec,
     item_type: ItemType,
     as_id: Option<&str>,
     base_url: &str,
     force: bool,
 ) -> Result<PullReport> {
-    let report = pull_copy(collection, spec, item_type, as_id, base_url, force)?;
+    let report = pull_copy(catalog, spec, item_type, as_id, base_url, force)?;
     manifest::record(
-        collection,
+        catalog,
         &manifest::ManifestEntry {
             spec: spec.clone(),
             item_type,
@@ -177,9 +193,9 @@ pub fn pull_into_collection(
     Ok(report)
 }
 
-/// Copy a remote source into the collection without touching the manifest.
+/// Copy a remote source into the catalog without touching the manifest.
 fn pull_copy(
-    collection: &Collection,
+    catalog: &Catalog,
     spec: &SourceSpec,
     item_type: ItemType,
     as_id: Option<&str>,
@@ -193,8 +209,8 @@ fn pull_copy(
     validate_remote_source(item_type, id, &src)?;
 
     let dst = match item_type {
-        ItemType::Skill => collection.skill_source(id),
-        ItemType::Agent => collection.agent_source(id),
+        ItemType::Skill => catalog.skill_source(id),
+        ItemType::Agent => catalog.agent_source(id),
     };
 
     let existed = std::fs::symlink_metadata(&dst).is_ok();
@@ -204,7 +220,7 @@ fn pull_copy(
         if fsops::drifted(&src, &dst)? {
             if !force {
                 anyhow::bail!(
-                    "collection already has {} '{id}' at {} and it differs from the source; \
+                    "catalog already has {} '{id}' at {} and it differs from the source; \
                      pass --force to overwrite",
                     type_label(item_type),
                     dst.display()
@@ -233,11 +249,11 @@ fn pull_copy(
     })
 }
 
-/// Status of a single item processed by [`restore_collection`].
+/// Status of a single item processed by [`restore_catalog`].
 #[derive(Debug, Clone, Copy, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum RestoreStatus {
-    /// Newly fetched and written into the collection.
+    /// Newly fetched and written into the catalog.
     Pulled,
     /// Already present and identical; nothing changed.
     AlreadyPresent,
@@ -278,23 +294,23 @@ pub struct RestoreReport {
     pub summary: RestoreSummary,
 }
 
-/// Re-fetch every item recorded in the collection manifest.
+/// Re-fetch every item recorded in the catalog manifest.
 ///
 /// Each entry is pulled with its recorded id (`--as` semantics) for an exact reproduction.
 /// Per-item failures are collected rather than aborting the whole run; the caller decides how
 /// to react to a non-zero `summary.errors`.
-pub fn restore_collection(
-    collection: &Collection,
+pub fn restore_catalog(
+    catalog: &Catalog,
     base_url: &str,
     force: bool,
 ) -> Result<RestoreReport> {
-    let entries = manifest::entries(collection)?;
+    let entries = manifest::entries(catalog)?;
     let mut items = Vec::with_capacity(entries.len());
     let mut summary = RestoreSummary::default();
 
     for entry in entries {
         let result = pull_copy(
-            collection,
+            catalog,
             &entry.spec,
             entry.item_type,
             Some(&entry.id),
@@ -340,7 +356,7 @@ pub fn restore_collection(
     Ok(RestoreReport { items, summary })
 }
 
-/// Outcome of an `unpull` operation (the inverse of [`pull_into_collection`]).
+/// Outcome of an `unpull` operation (the inverse of [`pull_into_catalog`]).
 #[derive(Debug, Serialize)]
 pub struct UnpullReport {
     pub id: String,
@@ -350,42 +366,42 @@ pub struct UnpullReport {
     pub source: String,
     #[serde(rename = "ref", skip_serializing_if = "Option::is_none")]
     pub git_ref: Option<String>,
-    /// Collection path that was (or would have been) removed.
+    /// Catalog path that was (or would have been) removed.
     pub path: String,
     /// Whether files were actually removed from disk (false if already absent).
     pub item_removed: bool,
 }
 
-/// Remove a previously pulled item from the collection and prune its manifest entry.
+/// Remove a previously pulled item from the catalog and prune its manifest entry.
 ///
-/// The inverse of [`pull_into_collection`]: it deletes the collection copy
+/// The inverse of [`pull_into_catalog`]: it deletes the catalog copy
 /// (`skills/<id>/` or `agents/<id>.agent.md`) and removes the matching manifest entry.
 ///
 /// Only items recorded in the manifest can be unpulled. If `id` has no manifest entry this
 /// fails without touching the filesystem, so hand-authored skills/agents are never deleted
 /// this way.
-pub fn unpull_from_collection(
-    collection: &Collection,
+pub fn unpull_from_catalog(
+    catalog: &Catalog,
     item_type: ItemType,
     id: &str,
 ) -> Result<UnpullReport> {
     ensure_simple_id(id)?;
-    let entry = manifest::entries(collection)?
+    let entry = manifest::entries(catalog)?
         .into_iter()
         .find(|e| e.item_type == item_type && e.id == id)
         .with_context(|| {
             format!(
-                "no pulled {} '{id}' in the collection manifest; nothing to unpull",
+                "no pulled {} '{id}' in the catalog manifest; nothing to unpull",
                 type_label(item_type)
             )
         })?;
 
     let dst = match item_type {
-        ItemType::Skill => collection.skill_source(id),
-        ItemType::Agent => collection.agent_source(id),
+        ItemType::Skill => catalog.skill_source(id),
+        ItemType::Agent => catalog.agent_source(id),
     };
     let item_removed = fsops::remove(&dst)?;
-    manifest::remove(collection, item_type, id)?;
+    manifest::remove(catalog, item_type, id)?;
 
     Ok(UnpullReport {
         id: id.to_string(),
@@ -399,7 +415,7 @@ pub fn unpull_from_collection(
 
 fn ensure_simple_id(id: &str) -> Result<()> {
     if id.is_empty() || id == "." || id == ".." || id.contains('/') || id.contains('\\') {
-        anyhow::bail!("invalid collection id '{id}'; expected a single path segment");
+        anyhow::bail!("invalid catalog id '{id}'; expected a single path segment");
     }
     Ok(())
 }
@@ -537,11 +553,11 @@ fn remote_id(item_type: ItemType, spec: &SourceSpec) -> String {
     }
 }
 
-/// Pull a skill from the collection into the project (symlink, gitignore, record).
-pub fn add_skill(project: &Project, collection: &Collection, name: &str) -> Result<AddReport> {
+/// Pull a skill from the catalog into the project (symlink, gitignore, record).
+pub fn add_skill(project: &Project, catalog: &Catalog, name: &str) -> Result<AddReport> {
     add_item(
         project,
-        collection,
+        catalog,
         ItemType::Skill,
         name,
         Mode::Symlink,
@@ -549,19 +565,19 @@ pub fn add_skill(project: &Project, collection: &Collection, name: &str) -> Resu
     )
 }
 
-/// Pull every item in a named collection bundle into the project.
+/// Pull every item in a named catalog bundle into the project.
 pub fn add_bundle(
     project: &Project,
-    collection: &Collection,
+    catalog: &Catalog,
     name: &str,
     mode: Mode,
 ) -> Result<BundleAddReport> {
-    let bundle = bundle::load(collection, name)?;
+    let bundle = bundle::load(catalog, name)?;
     let mut items = Vec::with_capacity(bundle.items.len());
     for item in &bundle.items {
         items.push(add_item(
             project,
-            collection,
+            catalog,
             item.item_type,
             &item.id,
             mode,
@@ -659,35 +675,35 @@ fn remove_item_from_lockfile(
 
 /// List lockfile items with their on-disk health.
 pub fn list_items(project: &Project) -> Result<Vec<ListItem>> {
-    list_items_with_optional_collection(project, None)
+    list_items_with_optional_catalog(project, None)
 }
 
-/// List lockfile items using an explicit collection root for copy drift checks.
-pub fn list_items_with_collection(
+/// List lockfile items using an explicit catalog root for copy drift checks.
+pub fn list_items_with_catalog(
     project: &Project,
-    collection: &Collection,
+    catalog: &Catalog,
 ) -> Result<Vec<ListItem>> {
-    list_items_with_optional_collection(project, Some(collection))
+    list_items_with_optional_catalog(project, Some(catalog))
 }
 
-fn list_items_with_optional_collection(
+fn list_items_with_optional_catalog(
     project: &Project,
-    collection: Option<&Collection>,
+    catalog: Option<&Catalog>,
 ) -> Result<Vec<ListItem>> {
     let lockfile = Lockfile::load(&project.lockfile_path())?;
-    let needs_collection = lockfile.items.iter().any(|item| item.mode == Mode::Copy);
-    let located_collection = if collection.is_none() && needs_collection {
-        Some(Collection::locate()?)
+    let needs_catalog = lockfile.items.iter().any(|item| item.mode == Mode::Copy);
+    let located_catalog = if catalog.is_none() && needs_catalog {
+        Some(Catalog::locate()?)
     } else {
         None
     };
-    let collection = collection.or(located_collection.as_ref());
+    let catalog = catalog.or(located_catalog.as_ref());
 
     lockfile
         .items
         .into_iter()
         .map(|item| {
-            let status = health(project, &item, collection)?;
+            let status = health(project, &item, catalog)?;
             Ok(ListItem {
                 id: item.id,
                 item_type: item.item_type,
@@ -700,6 +716,118 @@ fn list_items_with_optional_collection(
         .collect()
 }
 
+/// List every skill and agent present in the catalog, with provenance.
+///
+/// Each item is annotated with its remote `source` when the manifest records it
+/// as pulled; hand-authored items have `source: None`. Sorted skills-first, then
+/// by id.
+pub fn list_catalog(catalog: &Catalog) -> Result<Vec<CatalogItem>> {
+    let sources = manifest_sources(catalog)?;
+    let mut items = Vec::new();
+    scan_catalog_skills(catalog, &sources, &mut items)?;
+    scan_catalog_agents(catalog, &sources, &mut items)?;
+    items.sort_by(|a, b| {
+        type_rank(a.item_type)
+            .cmp(&type_rank(b.item_type))
+            .then_with(|| a.id.cmp(&b.id))
+    });
+    Ok(items)
+}
+
+fn type_rank(item_type: ItemType) -> u8 {
+    match item_type {
+        ItemType::Skill => 0,
+        ItemType::Agent => 1,
+    }
+}
+
+/// Map each recorded `(type, id)` to its remote source string (`owner/repo/path[#ref]`).
+fn manifest_sources(catalog: &Catalog) -> Result<HashMap<(ItemType, String), String>> {
+    let mut sources = HashMap::new();
+    for entry in manifest::entries(catalog)? {
+        let source = match &entry.spec.ref_ {
+            Some(git_ref) => format!("{}#{git_ref}", entry.spec.source()),
+            None => entry.spec.source(),
+        };
+        sources.insert((entry.item_type, entry.id), source);
+    }
+    Ok(sources)
+}
+
+fn scan_catalog_skills(
+    catalog: &Catalog,
+    sources: &HashMap<(ItemType, String), String>,
+    items: &mut Vec<CatalogItem>,
+) -> Result<()> {
+    let dir = catalog.root.join("skills");
+    let entries = match std::fs::read_dir(&dir) {
+        Ok(entries) => entries,
+        Err(e) if e.kind() == ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(e).with_context(|| format!("reading {}", dir.display())),
+    };
+    for entry in entries {
+        let entry = entry.with_context(|| format!("reading {}", dir.display()))?;
+        let path = entry.path();
+        if !path.is_dir() || !path.join("SKILL.md").is_file() {
+            continue;
+        }
+        let id = entry.file_name().to_string_lossy().into_owned();
+        items.push(catalog_item(
+            ItemType::Skill,
+            id,
+            &path.join("SKILL.md"),
+            sources,
+        ));
+    }
+    Ok(())
+}
+
+fn scan_catalog_agents(
+    catalog: &Catalog,
+    sources: &HashMap<(ItemType, String), String>,
+    items: &mut Vec<CatalogItem>,
+) -> Result<()> {
+    let dir = catalog.root.join("agents");
+    let entries = match std::fs::read_dir(&dir) {
+        Ok(entries) => entries,
+        Err(e) if e.kind() == ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(e).with_context(|| format!("reading {}", dir.display())),
+    };
+    for entry in entries {
+        let entry = entry.with_context(|| format!("reading {}", dir.display()))?;
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
+        }
+        let file_name = entry.file_name();
+        let file_name = file_name.to_string_lossy();
+        let Some(id) = file_name.strip_suffix(".agent.md") else {
+            continue;
+        };
+        items.push(catalog_item(ItemType::Agent, id.to_string(), &path, sources));
+    }
+    Ok(())
+}
+
+fn catalog_item(
+    item_type: ItemType,
+    id: String,
+    path: &std::path::Path,
+    sources: &HashMap<(ItemType, String), String>,
+) -> CatalogItem {
+    let description = std::fs::read_to_string(path)
+        .ok()
+        .and_then(|content| crate::search::parse_frontmatter(path, &content).description)
+        .unwrap_or_default();
+    let source = sources.get(&(item_type, id.clone())).cloned();
+    CatalogItem {
+        id,
+        item_type,
+        description,
+        source,
+    }
+}
+
 fn target_for(item_type: ItemType, name: &str) -> String {
     match item_type {
         ItemType::Skill => format!(".github/skills/{name}"),
@@ -710,13 +838,13 @@ fn target_for(item_type: ItemType, name: &str) -> String {
 pub(crate) fn health(
     project: &Project,
     item: &LockItem,
-    collection: Option<&Collection>,
+    catalog: Option<&Catalog>,
 ) -> Result<HealthStatus> {
     let dst = project.root.join(&item.target);
     match std::fs::symlink_metadata(&dst) {
         Ok(_) if item.mode == Mode::Copy => {
-            let collection = collection.context("collection is required to check copy drift")?;
-            let src = source_for_item(collection, item);
+            let catalog = catalog.context("catalog is required to check copy drift")?;
+            let src = source_for_item(catalog, item);
             if !src.exists() {
                 return Ok(HealthStatus::Orphaned);
             }
@@ -740,21 +868,21 @@ pub(crate) fn health(
 }
 
 pub(crate) fn source_for(
-    collection: &Collection,
+    catalog: &Catalog,
     item_type: ItemType,
     id: &str,
 ) -> std::path::PathBuf {
     match item_type {
-        ItemType::Skill => collection.skill_source(id),
-        ItemType::Agent => collection.agent_source(id),
+        ItemType::Skill => catalog.skill_source(id),
+        ItemType::Agent => catalog.agent_source(id),
     }
 }
 
-pub(crate) fn source_for_item(collection: &Collection, item: &LockItem) -> std::path::PathBuf {
+pub(crate) fn source_for_item(catalog: &Catalog, item: &LockItem) -> std::path::PathBuf {
     if item.source == "local" {
-        return source_for(collection, item.item_type, &item.id);
+        return source_for(catalog, item.item_type, &item.id);
     }
     SourceSpec::from_source_and_ref(&item.source, item.git_ref.clone())
         .map(|spec| remote::cached_item_path(&spec))
-        .unwrap_or_else(|| source_for(collection, item.item_type, &item.id))
+        .unwrap_or_else(|| source_for(catalog, item.item_type, &item.id))
 }

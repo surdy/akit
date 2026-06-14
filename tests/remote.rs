@@ -103,7 +103,7 @@ fn run_akit(
         .args(["--project", project.to_str().unwrap(), "--json"])
         .args(args)
         .env(remote::ENV_CACHE_DIR, cache)
-        .env_remove("KIT_COLLECTION_DIR")
+        .env_remove("KIT_CATALOG_DIR")
         .env_remove(remote::ENV_REMOTE_BASE_URL);
     if let Some(base_url) = base_url {
         command.env(remote::ENV_REMOTE_BASE_URL, base_url);
@@ -251,7 +251,7 @@ fn live_vercel_skill_can_be_added() {
 
 fn run_akit_pull(
     args: &[&str],
-    collection: &Path,
+    catalog: &Path,
     cache: &Path,
     base_url: &str,
 ) -> std::process::Output {
@@ -259,25 +259,25 @@ fn run_akit_pull(
         .args(["--json"])
         .args(args)
         .env(remote::ENV_CACHE_DIR, cache)
-        .env("KIT_COLLECTION_DIR", collection)
+        .env("KIT_CATALOG_DIR", catalog)
         .env(remote::ENV_REMOTE_BASE_URL, base_url)
         .output()
         .expect("akit binary should run")
 }
 
 #[test]
-fn pull_remote_into_collection_via_local_bare_repo() {
+fn pull_remote_into_catalog_via_local_bare_repo() {
     let tmp = test_tempdir();
     let base = tmp.path();
     let git_base = make_local_bare_remote(base);
     let cache = base.join("cache");
-    let collection = base.join("collection");
+    let catalog = base.join("catalog");
     let base_url = format!("file://{}", git_base.display());
 
-    // First pull copies the remote skill into the collection.
+    // First pull copies the remote skill into the catalog.
     let output = run_akit_pull(
         &["pull", "acme/kit-skills/deploy-to-vercel#main"],
-        &collection,
+        &catalog,
         &cache,
         &base_url,
     );
@@ -296,7 +296,7 @@ fn pull_remote_into_collection_via_local_bare_repo() {
     assert_eq!(json["created"], true);
     assert_eq!(json["overwritten"], false);
 
-    let skill_dir = collection.join("skills/deploy-to-vercel");
+    let skill_dir = catalog.join("skills/deploy-to-vercel");
     assert!(skill_dir.join("SKILL.md").is_file());
     // It is a standalone copy, not a symlink into the cache.
     assert!(
@@ -309,7 +309,7 @@ fn pull_remote_into_collection_via_local_bare_repo() {
     // Re-pulling an identical item is an idempotent no-op.
     let output = run_akit_pull(
         &["pull", "acme/kit-skills/deploy-to-vercel#main"],
-        &collection,
+        &catalog,
         &cache,
         &base_url,
     );
@@ -326,7 +326,7 @@ fn pull_remote_into_collection_via_local_bare_repo() {
             "vercel-deploy",
             "acme/kit-skills/deploy-to-vercel#main",
         ],
-        &collection,
+        &catalog,
         &cache,
         &base_url,
     );
@@ -335,7 +335,7 @@ fn pull_remote_into_collection_via_local_bare_repo() {
     assert_eq!(json["id"], "vercel-deploy");
     assert_eq!(json["created"], true);
     assert!(
-        collection
+        catalog
             .join("skills/vercel-deploy/SKILL.md")
             .is_file()
     );
@@ -347,7 +347,7 @@ fn pull_records_manifest_and_restore_rebootstraps() {
     let base = tmp.path();
     let git_base = make_local_bare_remote(base);
     let cache = base.join("cache");
-    let collection = base.join("collection");
+    let catalog = base.join("catalog");
     let base_url = format!("file://{}", git_base.display());
 
     // Pull a default-id skill and a custom-id (`--as`) skill.
@@ -360,7 +360,7 @@ fn pull_records_manifest_and_restore_rebootstraps() {
             "acme/kit-skills/deploy-to-vercel#main",
         ],
     ] {
-        let output = run_akit_pull(&args, &collection, &cache, &base_url);
+        let output = run_akit_pull(&args, &catalog, &cache, &base_url);
         assert!(
             output.status.success(),
             "akit pull failed\nstdout:\n{}\nstderr:\n{}",
@@ -370,7 +370,7 @@ fn pull_records_manifest_and_restore_rebootstraps() {
     }
 
     // The manifest records both items (shorthand for the default id, object form for `--as`).
-    let manifest = fs::read_to_string(collection.join("akit.yml")).unwrap();
+    let manifest = fs::read_to_string(catalog.join("akit.yml")).unwrap();
     assert!(
         manifest.contains("acme/kit-skills/deploy-to-vercel#main"),
         "{manifest}"
@@ -378,11 +378,11 @@ fn pull_records_manifest_and_restore_rebootstraps() {
     assert!(manifest.contains("alias: vercel"), "{manifest}");
 
     // Simulate a fresh machine: wipe the materialized items but keep the manifest.
-    fs::remove_dir_all(collection.join("skills")).unwrap();
-    assert!(!collection.join("skills/deploy-to-vercel").exists());
+    fs::remove_dir_all(catalog.join("skills")).unwrap();
+    assert!(!catalog.join("skills/deploy-to-vercel").exists());
 
     // Restore re-fetches everything in the manifest.
-    let output = run_akit_pull(&["restore"], &collection, &cache, &base_url);
+    let output = run_akit_pull(&["restore"], &catalog, &cache, &base_url);
     assert!(
         output.status.success(),
         "akit restore failed\nstdout:\n{}\nstderr:\n{}",
@@ -392,11 +392,11 @@ fn pull_records_manifest_and_restore_rebootstraps() {
     let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(json["summary"]["pulled"], 2);
     assert_eq!(json["summary"]["errors"], 0);
-    assert!(collection.join("skills/deploy-to-vercel/SKILL.md").is_file());
-    assert!(collection.join("skills/vercel/SKILL.md").is_file());
+    assert!(catalog.join("skills/deploy-to-vercel/SKILL.md").is_file());
+    assert!(catalog.join("skills/vercel/SKILL.md").is_file());
 
     // Restore is idempotent: a second run reports everything already present.
-    let output = run_akit_pull(&["restore"], &collection, &cache, &base_url);
+    let output = run_akit_pull(&["restore"], &catalog, &cache, &base_url);
     assert!(output.status.success());
     let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(json["summary"]["already_present"], 2);
@@ -404,25 +404,25 @@ fn pull_records_manifest_and_restore_rebootstraps() {
 }
 
 #[test]
-fn unpull_removes_collection_item_and_prunes_manifest() {
+fn unpull_removes_catalog_item_and_prunes_manifest() {
     let tmp = test_tempdir();
     let base = tmp.path();
     let git_base = make_local_bare_remote(base);
     let cache = base.join("cache");
-    let collection = base.join("collection");
+    let catalog = base.join("catalog");
     let base_url = format!("file://{}", git_base.display());
 
     // Pull a skill, then unpull it.
     let output = run_akit_pull(
         &["pull", "acme/kit-skills/deploy-to-vercel#main"],
-        &collection,
+        &catalog,
         &cache,
         &base_url,
     );
     assert!(output.status.success());
-    assert!(collection.join("skills/deploy-to-vercel/SKILL.md").is_file());
+    assert!(catalog.join("skills/deploy-to-vercel/SKILL.md").is_file());
 
-    let output = run_akit_pull(&["unpull", "deploy-to-vercel"], &collection, &cache, &base_url);
+    let output = run_akit_pull(&["unpull", "deploy-to-vercel"], &catalog, &cache, &base_url);
     assert!(
         output.status.success(),
         "akit unpull failed\nstdout:\n{}\nstderr:\n{}",
@@ -433,20 +433,20 @@ fn unpull_removes_collection_item_and_prunes_manifest() {
     assert_eq!(json["id"], "deploy-to-vercel");
     assert_eq!(json["item_removed"], true);
 
-    // Collection item is gone and the manifest no longer lists it.
-    assert!(!collection.join("skills/deploy-to-vercel").exists());
-    let manifest = fs::read_to_string(collection.join("akit.yml")).unwrap();
+    // Catalog item is gone and the manifest no longer lists it.
+    assert!(!catalog.join("skills/deploy-to-vercel").exists());
+    let manifest = fs::read_to_string(catalog.join("akit.yml")).unwrap();
     assert!(!manifest.contains("deploy-to-vercel"), "{manifest}");
 
     // Restore now has nothing to do for that item.
-    let output = run_akit_pull(&["restore"], &collection, &cache, &base_url);
+    let output = run_akit_pull(&["restore"], &catalog, &cache, &base_url);
     assert!(output.status.success());
     let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(json["summary"]["pulled"], 0);
-    assert!(!collection.join("skills/deploy-to-vercel").exists());
+    assert!(!catalog.join("skills/deploy-to-vercel").exists());
 
     // Unpulling something that was never pulled fails and touches nothing.
-    let output = run_akit_pull(&["unpull", "never-pulled"], &collection, &cache, &base_url);
+    let output = run_akit_pull(&["unpull", "never-pulled"], &catalog, &cache, &base_url);
     assert!(!output.status.success());
     assert!(
         String::from_utf8_lossy(&output.stderr).contains("nothing to unpull"),

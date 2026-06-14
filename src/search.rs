@@ -1,4 +1,4 @@
-//! Collection search over skill and agent frontmatter.
+//! Catalog search over skill and agent frontmatter.
 
 use anyhow::{Context, Result};
 use fuzzy_matcher::FuzzyMatcher;
@@ -8,10 +8,10 @@ use std::cmp::Ordering;
 use std::io::ErrorKind;
 use std::path::Path;
 
-use crate::collection::Collection;
+use crate::catalog::Catalog;
 use crate::lockfile::ItemType;
 
-/// One ranked collection search result.
+/// One ranked catalog search result.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct SearchHit {
     #[serde(rename = "type")]
@@ -29,12 +29,12 @@ pub(crate) struct Frontmatter {
     pub(crate) category: Option<String>,
 }
 
-/// Search collection skills and agents by frontmatter name and description.
+/// Search catalog skills and agents by frontmatter name and description.
 ///
 /// An empty query returns every item with score `0`.
-pub fn search(collection: &Collection, query: &str) -> Result<Vec<SearchHit>> {
+pub fn search(catalog: &Catalog, query: &str) -> Result<Vec<SearchHit>> {
     let query = query.trim();
-    let mut items = scan_items(collection)?;
+    let mut items = scan_items(catalog)?;
     let matcher = SkimMatcherV2::default();
 
     let mut hits = Vec::new();
@@ -49,15 +49,15 @@ pub fn search(collection: &Collection, query: &str) -> Result<Vec<SearchHit>> {
     Ok(hits)
 }
 
-fn scan_items(collection: &Collection) -> Result<Vec<SearchHit>> {
+fn scan_items(catalog: &Catalog) -> Result<Vec<SearchHit>> {
     let mut items = Vec::new();
-    scan_skills(collection, &mut items)?;
-    scan_agents(collection, &mut items)?;
+    scan_skills(catalog, &mut items)?;
+    scan_agents(catalog, &mut items)?;
     Ok(items)
 }
 
-fn scan_skills(collection: &Collection, items: &mut Vec<SearchHit>) -> Result<()> {
-    let skills_dir = collection.root.join("skills");
+fn scan_skills(catalog: &Catalog, items: &mut Vec<SearchHit>) -> Result<()> {
+    let skills_dir = catalog.root.join("skills");
     let entries = match std::fs::read_dir(&skills_dir) {
         Ok(entries) => entries,
         Err(e) if e.kind() == ErrorKind::NotFound => return Ok(()),
@@ -80,8 +80,8 @@ fn scan_skills(collection: &Collection, items: &mut Vec<SearchHit>) -> Result<()
     Ok(())
 }
 
-fn scan_agents(collection: &Collection, items: &mut Vec<SearchHit>) -> Result<()> {
-    let agents_dir = collection.root.join("agents");
+fn scan_agents(catalog: &Catalog, items: &mut Vec<SearchHit>) -> Result<()> {
+    let agents_dir = catalog.root.join("agents");
     let entries = match std::fs::read_dir(&agents_dir) {
         Ok(entries) => entries,
         Err(e) if e.kind() == ErrorKind::NotFound => return Ok(()),

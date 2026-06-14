@@ -7,7 +7,7 @@ use std::fs;
 use std::path::Path;
 use std::process::Command;
 
-use akit::collection::Collection;
+use akit::catalog::Catalog;
 use akit::doctor;
 use akit::lockfile::{ItemType, Mode};
 use akit::ops::{self, HealthStatus};
@@ -48,11 +48,11 @@ fn library_consumer_full_lifecycle() {
     let tmp = tempfile::tempdir().unwrap();
     let base = tmp.path();
 
-    // Host owns where the collection lives (env or explicit root).
-    let collection_root = base.join("collection");
-    make_skill(&collection_root, "deploy-helper", "Ship apps safely");
-    make_agent(&collection_root, "reviewer", "Reviews diffs");
-    let collection = Collection::with_root(&collection_root);
+    // Host owns where the catalog lives (env or explicit root).
+    let catalog_root = base.join("catalog");
+    make_skill(&catalog_root, "deploy-helper", "Ship apps safely");
+    make_agent(&catalog_root, "reviewer", "Reviews diffs");
+    let catalog = Catalog::with_root(&catalog_root);
 
     // Host resolves the project explicitly (e.g. the active workspace dir).
     let proj = base.join("project");
@@ -61,11 +61,11 @@ fn library_consumer_full_lifecycle() {
     let project = Project::locate(Some(proj.clone())).unwrap();
 
     // add — one skill, one agent.
-    let skill_add = ops::add_skill(&project, &collection, "deploy-helper").unwrap();
+    let skill_add = ops::add_skill(&project, &catalog, "deploy-helper").unwrap();
     assert!(skill_add.link_created);
     let agent_add = ops::add_item(
         &project,
-        &collection,
+        &catalog,
         ItemType::Agent,
         "reviewer",
         Mode::Symlink,
@@ -75,7 +75,7 @@ fn library_consumer_full_lifecycle() {
     assert!(agent_add.link_created);
 
     // list — with health, and serializable to JSON for the host to re-emit.
-    let items = ops::list_items_with_collection(&project, &collection).unwrap();
+    let items = ops::list_items_with_catalog(&project, &catalog).unwrap();
     assert_eq!(items.len(), 2);
     assert!(items.iter().all(|i| i.status == HealthStatus::Ok));
     let json = serde_json::to_string(&items).unwrap();
@@ -83,20 +83,20 @@ fn library_consumer_full_lifecycle() {
     assert!(json.contains("\"type\":\"agent\""), "json: {json}");
     assert!(json.contains("\"status\":\"ok\""), "json: {json}");
 
-    // search — fuzzy over collection frontmatter.
-    let hits = search::search(&collection, "deploy").unwrap();
+    // search — fuzzy over catalog frontmatter.
+    let hits = search::search(&catalog, "deploy").unwrap();
     assert!(
         hits.iter().any(|h| h.name == "deploy-helper"),
         "hits: {hits:?}"
     );
 
     // doctor — read-only, healthy.
-    let report = doctor::diagnose(&project, &collection).unwrap();
+    let report = doctor::diagnose(&project, &catalog).unwrap();
     assert!(report.summary.healthy, "doctor: {report:?}");
 
     // Break a target, then sync repairs it.
     fs::remove_file(proj.join(".github/agents/reviewer.agent.md")).unwrap();
-    let before = ops::list_items_with_collection(&project, &collection).unwrap();
+    let before = ops::list_items_with_catalog(&project, &catalog).unwrap();
     assert!(
         before
             .iter()
@@ -104,9 +104,9 @@ fn library_consumer_full_lifecycle() {
         "expected reviewer missing: {before:?}"
     );
 
-    let sync = doctor::sync(&project, &collection).unwrap();
+    let sync = doctor::sync(&project, &catalog).unwrap();
     assert!(sync.summary.healthy, "sync should restore: {sync:?}");
-    let after = ops::list_items_with_collection(&project, &collection).unwrap();
+    let after = ops::list_items_with_catalog(&project, &catalog).unwrap();
     assert!(
         after.iter().all(|i| i.status == HealthStatus::Ok),
         "all ok after sync: {after:?}"
