@@ -2,15 +2,15 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use ckit::lockfile::{ItemType, Lockfile, Mode};
-use ckit::project::Project;
-use ckit::remote::{self, SourceSpec};
+use akit::lockfile::{ItemType, Lockfile, Mode};
+use akit::project::Project;
+use akit::remote::{self, SourceSpec};
 
 fn test_tempdir() -> tempfile::TempDir {
     let root = std::env::current_dir()
         .unwrap()
         .join("target")
-        .join("ckit-test-tmp");
+        .join("akit-test-tmp");
     fs::create_dir_all(&root).unwrap();
     tempfile::Builder::new()
         .prefix("remote-")
@@ -92,13 +92,13 @@ fn make_local_bare_remote(base: &Path) -> PathBuf {
     git_base
 }
 
-fn run_ckit(
+fn run_akit(
     args: &[&str],
     project: &Path,
     cache: &Path,
     base_url: Option<&str>,
 ) -> std::process::Output {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_ckit"));
+    let mut command = Command::new(env!("CARGO_BIN_EXE_akit"));
     command
         .args(["--project", project.to_str().unwrap(), "--json"])
         .args(args)
@@ -108,7 +108,7 @@ fn run_ckit(
     if let Some(base_url) = base_url {
         command.env(remote::ENV_REMOTE_BASE_URL, base_url);
     }
-    command.output().expect("ckit binary should run")
+    command.output().expect("akit binary should run")
 }
 
 #[test]
@@ -141,7 +141,7 @@ fn remote_cli_fetch_add_and_rm_via_local_bare_repo() {
     let cache = base.join("cache");
     let base_url = format!("file://{}", git_base.display());
 
-    let output = run_ckit(
+    let output = run_akit(
         &["add", "acme/kit-skills/deploy-to-vercel#main"],
         &proj,
         &cache,
@@ -149,7 +149,7 @@ fn remote_cli_fetch_add_and_rm_via_local_bare_repo() {
     );
     assert!(
         output.status.success(),
-        "ckit add failed\nstdout:\n{}\nstderr:\n{}",
+        "akit add failed\nstdout:\n{}\nstderr:\n{}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
@@ -197,10 +197,10 @@ fn remote_cli_fetch_add_and_rm_via_local_bare_repo() {
         String::from_utf8_lossy(&status.stdout)
     );
 
-    let output = run_ckit(&["rm", "deploy-to-vercel"], &proj, &cache, Some(&base_url));
+    let output = run_akit(&["rm", "deploy-to-vercel"], &proj, &cache, Some(&base_url));
     assert!(
         output.status.success(),
-        "ckit rm failed\nstdout:\n{}\nstderr:\n{}",
+        "akit rm failed\nstdout:\n{}\nstderr:\n{}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
@@ -231,7 +231,7 @@ fn live_vercel_skill_can_be_added() {
     let (proj, _project) = init_project(base);
     let cache = base.join("cache");
 
-    let output = run_ckit(
+    let output = run_akit(
         &["add", "vercel-labs/agent-skills/deploy-to-vercel#main"],
         &proj,
         &cache,
@@ -239,7 +239,7 @@ fn live_vercel_skill_can_be_added() {
     );
     assert!(
         output.status.success(),
-        "ckit add failed\nstdout:\n{}\nstderr:\n{}",
+        "akit add failed\nstdout:\n{}\nstderr:\n{}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
@@ -249,20 +249,20 @@ fn live_vercel_skill_can_be_added() {
     );
 }
 
-fn run_ckit_pull(
+fn run_akit_pull(
     args: &[&str],
     collection: &Path,
     cache: &Path,
     base_url: &str,
 ) -> std::process::Output {
-    Command::new(env!("CARGO_BIN_EXE_ckit"))
+    Command::new(env!("CARGO_BIN_EXE_akit"))
         .args(["--json"])
         .args(args)
         .env(remote::ENV_CACHE_DIR, cache)
         .env("KIT_COLLECTION_DIR", collection)
         .env(remote::ENV_REMOTE_BASE_URL, base_url)
         .output()
-        .expect("ckit binary should run")
+        .expect("akit binary should run")
 }
 
 #[test]
@@ -275,7 +275,7 @@ fn pull_remote_into_collection_via_local_bare_repo() {
     let base_url = format!("file://{}", git_base.display());
 
     // First pull copies the remote skill into the collection.
-    let output = run_ckit_pull(
+    let output = run_akit_pull(
         &["pull", "acme/kit-skills/deploy-to-vercel#main"],
         &collection,
         &cache,
@@ -283,7 +283,7 @@ fn pull_remote_into_collection_via_local_bare_repo() {
     );
     assert!(
         output.status.success(),
-        "ckit pull failed\nstdout:\n{}\nstderr:\n{}",
+        "akit pull failed\nstdout:\n{}\nstderr:\n{}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
@@ -307,7 +307,7 @@ fn pull_remote_into_collection_via_local_bare_repo() {
     );
 
     // Re-pulling an identical item is an idempotent no-op.
-    let output = run_ckit_pull(
+    let output = run_akit_pull(
         &["pull", "acme/kit-skills/deploy-to-vercel#main"],
         &collection,
         &cache,
@@ -319,7 +319,7 @@ fn pull_remote_into_collection_via_local_bare_repo() {
     assert_eq!(json["overwritten"], false);
 
     // A custom id stores a second copy under that name.
-    let output = run_ckit_pull(
+    let output = run_akit_pull(
         &[
             "pull",
             "--as",
@@ -360,10 +360,10 @@ fn pull_records_manifest_and_restore_rebootstraps() {
             "acme/kit-skills/deploy-to-vercel#main",
         ],
     ] {
-        let output = run_ckit_pull(&args, &collection, &cache, &base_url);
+        let output = run_akit_pull(&args, &collection, &cache, &base_url);
         assert!(
             output.status.success(),
-            "ckit pull failed\nstdout:\n{}\nstderr:\n{}",
+            "akit pull failed\nstdout:\n{}\nstderr:\n{}",
             String::from_utf8_lossy(&output.stdout),
             String::from_utf8_lossy(&output.stderr)
         );
@@ -382,10 +382,10 @@ fn pull_records_manifest_and_restore_rebootstraps() {
     assert!(!collection.join("skills/deploy-to-vercel").exists());
 
     // Restore re-fetches everything in the manifest.
-    let output = run_ckit_pull(&["restore"], &collection, &cache, &base_url);
+    let output = run_akit_pull(&["restore"], &collection, &cache, &base_url);
     assert!(
         output.status.success(),
-        "ckit restore failed\nstdout:\n{}\nstderr:\n{}",
+        "akit restore failed\nstdout:\n{}\nstderr:\n{}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
@@ -396,7 +396,7 @@ fn pull_records_manifest_and_restore_rebootstraps() {
     assert!(collection.join("skills/vercel/SKILL.md").is_file());
 
     // Restore is idempotent: a second run reports everything already present.
-    let output = run_ckit_pull(&["restore"], &collection, &cache, &base_url);
+    let output = run_akit_pull(&["restore"], &collection, &cache, &base_url);
     assert!(output.status.success());
     let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(json["summary"]["already_present"], 2);

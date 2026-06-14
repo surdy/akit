@@ -1,4 +1,4 @@
-//! Embedding test for issue #10: drive ckit purely through its public library API,
+//! Embedding test for issue #10: drive akit purely through its public library API,
 //! the way a GUI host (pterm) does — no `main`, no CLI. Exercises the whole surface
 //! a host needs (resolve → add → list → search → doctor → sync) and proves the
 //! returned reports serialize to JSON for the host to re-emit to its frontend.
@@ -7,12 +7,12 @@ use std::fs;
 use std::path::Path;
 use std::process::Command;
 
-use ckit::collection::Collection;
-use ckit::doctor;
-use ckit::lockfile::{ItemType, Mode};
-use ckit::ops::{self, HealthStatus};
-use ckit::project::Project;
-use ckit::search;
+use akit::collection::Collection;
+use akit::doctor;
+use akit::lockfile::{ItemType, Mode};
+use akit::ops::{self, HealthStatus};
+use akit::project::Project;
+use akit::search;
 
 fn git(args: &[&str], cwd: &Path) {
     Command::new("git")

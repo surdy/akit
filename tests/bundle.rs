@@ -3,10 +3,10 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use ckit::collection::Collection;
-use ckit::lockfile::{ItemType, Lockfile, Mode};
-use ckit::ops::{self, HealthStatus};
-use ckit::project::Project;
+use akit::collection::Collection;
+use akit::lockfile::{ItemType, Lockfile, Mode};
+use akit::ops::{self, HealthStatus};
+use akit::project::Project;
 
 fn git(args: &[&str], cwd: &Path) -> std::process::Output {
     Command::new("git")
@@ -266,7 +266,7 @@ fn cli_add_and_rm_bundle_apply_copy_mode() {
     );
     let (proj, project) = init_project(base);
 
-    let add_output = Command::new(env!("CARGO_BIN_EXE_ckit"))
+    let add_output = Command::new(env!("CARGO_BIN_EXE_akit"))
         .args([
             "--project",
             proj.to_str().unwrap(),
@@ -278,11 +278,11 @@ fn cli_add_and_rm_bundle_apply_copy_mode() {
         ])
         .env("KIT_COLLECTION_DIR", &collection_root)
         .output()
-        .expect("ckit binary should run");
+        .expect("akit binary should run");
 
     assert!(
         add_output.status.success(),
-        "ckit failed: {}",
+        "akit failed: {}",
         String::from_utf8_lossy(&add_output.stderr)
     );
     let add_json: serde_json::Value = serde_json::from_slice(&add_output.stdout).unwrap();
@@ -308,7 +308,7 @@ fn cli_add_and_rm_bundle_apply_copy_mode() {
             .is_symlink()
     );
 
-    let rm_output = Command::new(env!("CARGO_BIN_EXE_ckit"))
+    let rm_output = Command::new(env!("CARGO_BIN_EXE_akit"))
         .args([
             "--project",
             proj.to_str().unwrap(),
@@ -318,11 +318,11 @@ fn cli_add_and_rm_bundle_apply_copy_mode() {
             "demo",
         ])
         .output()
-        .expect("ckit binary should run");
+        .expect("akit binary should run");
 
     assert!(
         rm_output.status.success(),
-        "ckit failed: {}",
+        "akit failed: {}",
         String::from_utf8_lossy(&rm_output.stderr)
     );
     let rm_json: serde_json::Value = serde_json::from_slice(&rm_output.stdout).unwrap();
@@ -363,14 +363,14 @@ fn cli_ls_labels_and_groups_bundle_items() {
     .unwrap();
     ops::add_bundle(&project, &collection, "alpha", Mode::Symlink).unwrap();
 
-    let output = Command::new(env!("CARGO_BIN_EXE_ckit"))
+    let output = Command::new(env!("CARGO_BIN_EXE_akit"))
         .args(["--project", proj.to_str().unwrap(), "ls"])
         .output()
-        .expect("ckit binary should run");
+        .expect("akit binary should run");
 
     assert!(
         output.status.success(),
-        "ckit failed: {}",
+        "akit failed: {}",
         String::from_utf8_lossy(&output.stderr)
     );
     let stdout = String::from_utf8_lossy(&output.stdout);

@@ -75,18 +75,18 @@ impl SourceSpec {
 
 /// Return the source cache root.
 ///
-/// Precedence: `$KIT_CACHE_DIR`, `$XDG_CACHE_HOME/ckit`, then `~/.cache/ckit`.
+/// Precedence: `$KIT_CACHE_DIR`, `$XDG_CACHE_HOME/akit`, then `~/.cache/akit`.
 pub fn cache_root() -> PathBuf {
     if let Some(path) = nonempty_env(ENV_CACHE_DIR) {
         return PathBuf::from(path);
     }
     if let Some(path) = nonempty_env("XDG_CACHE_HOME") {
-        return PathBuf::from(path).join("ckit");
+        return PathBuf::from(path).join("akit");
     }
     dirs::home_dir()
         .unwrap_or_else(|| PathBuf::from("."))
         .join(".cache")
-        .join("ckit")
+        .join("akit")
 }
 
 /// Fetch (or reuse) the remote repository and return the requested item path inside the cache.

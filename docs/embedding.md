@@ -1,6 +1,6 @@
-# Embedding ckit (library API)
+# Embedding akit (library API)
 
-`ckit` is a library crate as well as a CLI. A Rust host — for example
+`akit` is a library crate as well as a CLI. A Rust host — for example
 [pterm](https://github.com/surdy/pterm), which puts a GUI on top — depends on the
 crate and drives the same core the CLI uses. There is no separate binary to bundle
 or shell out to.
@@ -14,11 +14,11 @@ or shell out to.
 # Cargo.toml
 [dependencies]
 # pin to a tag/commit for reproducible builds
-ckit = { git = "https://github.com/surdy/ckit", rev = "<commit-or-tag>" }
+akit = { git = "https://github.com/surdy/akit", rev = "<commit-or-tag>" }
 serde_json = "1"
 ```
 
-A path dependency (`ckit = { path = "../ckit" }`) also works for local
+A path dependency (`akit = { path = "../akit" }`) also works for local
 co-development.
 
 ## The two anchors
@@ -27,14 +27,14 @@ Every operation takes a **`Project`** (where items are materialized) and, for mo
 a **`Collection`** (where items come from):
 
 ```rust
-use ckit::project::Project;
-use ckit::collection::Collection;
+use akit::project::Project;
+use akit::collection::Collection;
 
 // Resolve the project: explicit dir, else the enclosing git root, else cwd.
 let project = Project::locate(Some(workspace_dir))?;
 
 // Resolve the collection: explicit root, or `$KIT_COLLECTION_DIR`
-// (default `~/.copilot-kit/collection`) via `Collection::locate()`.
+// (default `~/.akit/collection`) via `Collection::locate()`.
 let collection = Collection::with_root(collection_dir); // or Collection::locate()?
 ```
 
@@ -44,8 +44,8 @@ All report types derive `serde::Serialize`, so a host can return them straight t
 its frontend (e.g. as a Tauri command result).
 
 ```rust
-use ckit::{ops, search, doctor};
-use ckit::lockfile::{ItemType, Mode};
+use akit::{ops, search, doctor};
+use akit::lockfile::{ItemType, Mode};
 
 // List installed items with health (ok / orphaned / missing / drifted).
 let items = ops::list_items_with_collection(&project, &collection)?;

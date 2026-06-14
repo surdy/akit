@@ -1,6 +1,6 @@
 //! Read-only preview of a single collection item.
 //!
-//! Backs the CLI `ckit show` command and the pterm kit-palette preview: given an
+//! Backs the CLI `akit show` command and the pterm kit-palette preview: given an
 //! id and a kind, it resolves the source file, parses its frontmatter (reusing
 //! [`crate::search`]'s parser), and returns the raw content alongside.
 

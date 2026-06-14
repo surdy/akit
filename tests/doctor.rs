@@ -2,11 +2,11 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use ckit::collection::Collection;
-use ckit::doctor;
-use ckit::lockfile::{ItemType, Mode};
-use ckit::ops::{self, HealthStatus};
-use ckit::project::Project;
+use akit::collection::Collection;
+use akit::doctor;
+use akit::lockfile::{ItemType, Mode};
+use akit::ops::{self, HealthStatus};
+use akit::project::Project;
 
 fn git(args: &[&str], cwd: &Path) -> std::process::Output {
     Command::new("git")
