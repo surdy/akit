@@ -2,7 +2,7 @@ use std::fs;
 use std::path::Path;
 use std::process::Command;
 
-use akit::collection::Collection;
+use akit::catalog::Catalog;
 use akit::lockfile::{ItemType, Lockfile, Mode};
 use akit::ops::{self, HealthStatus};
 use akit::project::Project;
@@ -23,8 +23,8 @@ fn init_project(base: &Path) -> (std::path::PathBuf, Project) {
     (proj, project)
 }
 
-fn make_skill(collection_root: &Path, name: &str) {
-    let dir = collection_root.join("skills").join(name);
+fn make_skill(catalog_root: &Path, name: &str) {
+    let dir = catalog_root.join("skills").join(name);
     fs::create_dir_all(&dir).unwrap();
     fs::write(
         dir.join("SKILL.md"),
@@ -33,8 +33,8 @@ fn make_skill(collection_root: &Path, name: &str) {
     .unwrap();
 }
 
-fn make_agent(collection_root: &Path, name: &str) {
-    let dir = collection_root.join("agents");
+fn make_agent(catalog_root: &Path, name: &str) {
+    let dir = catalog_root.join("agents");
     fs::create_dir_all(&dir).unwrap();
     fs::write(
         dir.join(format!("{name}.agent.md")),
@@ -47,12 +47,12 @@ fn make_agent(collection_root: &Path, name: &str) {
 fn rm_closes_loop_for_skill_and_is_idempotent() {
     let tmp = tempfile::tempdir().unwrap();
     let base = tmp.path();
-    let collection_root = base.join("collection");
-    make_skill(&collection_root, "demo");
-    let collection = Collection::with_root(&collection_root);
+    let catalog_root = base.join("catalog");
+    make_skill(&catalog_root, "demo");
+    let catalog = Catalog::with_root(&catalog_root);
     let (proj, project) = init_project(base);
 
-    ops::add_skill(&project, &collection, "demo").unwrap();
+    ops::add_skill(&project, &catalog, "demo").unwrap();
     let items = ops::list_items(&project).unwrap();
     assert_eq!(items.len(), 1);
     assert_eq!(items[0].item_type, ItemType::Skill);
@@ -101,14 +101,14 @@ fn rm_closes_loop_for_skill_and_is_idempotent() {
 fn agent_add_appears_as_symlink_and_lists_type_agent() {
     let tmp = tempfile::tempdir().unwrap();
     let base = tmp.path();
-    let collection_root = base.join("collection");
-    make_agent(&collection_root, "helper");
-    let collection = Collection::with_root(&collection_root);
+    let catalog_root = base.join("catalog");
+    make_agent(&catalog_root, "helper");
+    let catalog = Catalog::with_root(&catalog_root);
     let (proj, project) = init_project(base);
 
     let report = ops::add_item(
         &project,
-        &collection,
+        &catalog,
         ItemType::Agent,
         "helper",
         Mode::Symlink,
@@ -124,7 +124,7 @@ fn agent_add_appears_as_symlink_and_lists_type_agent() {
     assert!(meta.file_type().is_symlink(), "agent should be a symlink");
     assert_eq!(
         link.canonicalize().unwrap(),
-        collection_root
+        catalog_root
             .join("agents/helper.agent.md")
             .canonicalize()
             .unwrap()
@@ -142,18 +142,18 @@ fn agent_add_appears_as_symlink_and_lists_type_agent() {
 fn ls_reports_orphaned_and_missing_targets() {
     let tmp = tempfile::tempdir().unwrap();
     let base = tmp.path();
-    let collection_root = base.join("collection");
-    make_skill(&collection_root, "demo");
-    let collection = Collection::with_root(&collection_root);
+    let catalog_root = base.join("catalog");
+    make_skill(&catalog_root, "demo");
+    let catalog = Catalog::with_root(&catalog_root);
     let (proj, project) = init_project(base);
 
-    ops::add_skill(&project, &collection, "demo").unwrap();
+    ops::add_skill(&project, &catalog, "demo").unwrap();
     assert_eq!(
         ops::list_items(&project).unwrap()[0].status,
         HealthStatus::Ok
     );
 
-    fs::remove_dir_all(collection_root.join("skills/demo")).unwrap();
+    fs::remove_dir_all(catalog_root.join("skills/demo")).unwrap();
     assert_eq!(
         ops::list_items(&project).unwrap()[0].status,
         HealthStatus::Orphaned
@@ -167,7 +167,7 @@ fn ls_reports_orphaned_and_missing_targets() {
 }
 
 #[test]
-fn cli_status_alias_outputs_json_without_collection() {
+fn cli_status_alias_outputs_json_without_catalog() {
     let tmp = tempfile::tempdir().unwrap();
     let base = tmp.path();
     let (proj, _project) = init_project(base);

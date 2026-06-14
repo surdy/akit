@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 use std::path::Path;
 
 /// The kind of customization an item represents.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ItemType {
     Skill,
@@ -34,7 +34,7 @@ pub struct LockItem {
     pub id: String,
     #[serde(rename = "type")]
     pub item_type: ItemType,
-    /// `local` for the local collection, or an `owner/repo/path` source spec (future).
+    /// `local` for the local catalog, or an `owner/repo/path` source spec (future).
     pub source: String,
     /// Source ref (branch/tag/sha), when applicable.
     #[serde(rename = "ref", skip_serializing_if = "Option::is_none", default)]

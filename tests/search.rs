@@ -1,18 +1,18 @@
 use std::fs;
 use std::path::Path;
 
-use akit::collection::Collection;
+use akit::catalog::Catalog;
 use akit::lockfile::ItemType;
 use akit::search;
 
-fn make_skill(collection_root: &Path, dir_name: &str, body: &str) {
-    let dir = collection_root.join("skills").join(dir_name);
+fn make_skill(catalog_root: &Path, dir_name: &str, body: &str) {
+    let dir = catalog_root.join("skills").join(dir_name);
     fs::create_dir_all(&dir).unwrap();
     fs::write(dir.join("SKILL.md"), body).unwrap();
 }
 
-fn make_agent(collection_root: &Path, file_name: &str, body: &str) {
-    let dir = collection_root.join("agents");
+fn make_agent(catalog_root: &Path, file_name: &str, body: &str) {
+    let dir = catalog_root.join("agents");
     fs::create_dir_all(&dir).unwrap();
     fs::write(dir.join(format!("{file_name}.agent.md")), body).unwrap();
 }
@@ -20,20 +20,20 @@ fn make_agent(collection_root: &Path, file_name: &str, body: &str) {
 #[test]
 fn partial_query_ranks_matching_item_first() {
     let tmp = tempfile::tempdir().unwrap();
-    let collection_root = tmp.path().join("collection");
+    let catalog_root = tmp.path().join("catalog");
     make_skill(
-        &collection_root,
+        &catalog_root,
         "deploy-helper",
         "---\nname: Deploy Helper\ndescription: Ship apps safely\ncategory: ops\n---\nbody\n",
     );
     make_skill(
-        &collection_root,
+        &catalog_root,
         "docs-helper",
         "---\nname: Docs Helper\ndescription: Write project docs\ncategory: writing\n---\nbody\n",
     );
 
-    let collection = Collection::with_root(&collection_root);
-    let hits = search::search(&collection, "depl").unwrap();
+    let catalog = Catalog::with_root(&catalog_root);
+    let hits = search::search(&catalog, "depl").unwrap();
 
     assert!(!hits.is_empty());
     assert_eq!(hits[0].item_type, ItemType::Skill);
@@ -44,20 +44,20 @@ fn partial_query_ranks_matching_item_first() {
 #[test]
 fn empty_query_returns_all_items() {
     let tmp = tempfile::tempdir().unwrap();
-    let collection_root = tmp.path().join("collection");
+    let catalog_root = tmp.path().join("catalog");
     make_skill(
-        &collection_root,
+        &catalog_root,
         "deploy-helper",
         "---\nname: Deploy Helper\ndescription: Ship apps safely\ncategory: ops\n---\nbody\n",
     );
     make_agent(
-        &collection_root,
+        &catalog_root,
         "reviewer",
         "---\nname: Reviewer\ndescription: Review code\ncategory: quality\n---\nbody\n",
     );
 
-    let collection = Collection::with_root(&collection_root);
-    let hits = search::search(&collection, "").unwrap();
+    let catalog = Catalog::with_root(&catalog_root);
+    let hits = search::search(&catalog, "").unwrap();
 
     assert_eq!(hits.len(), 2);
     assert!(hits.iter().all(|hit| hit.score == 0));
@@ -68,16 +68,16 @@ fn empty_query_returns_all_items() {
 #[test]
 fn missing_or_malformed_frontmatter_is_included_without_panicking() {
     let tmp = tempfile::tempdir().unwrap();
-    let collection_root = tmp.path().join("collection");
-    make_skill(&collection_root, "plain", "body without frontmatter\n");
+    let catalog_root = tmp.path().join("catalog");
+    make_skill(&catalog_root, "plain", "body without frontmatter\n");
     make_agent(
-        &collection_root,
+        &catalog_root,
         "broken",
         "---\nname: Broken Agent\ndescription: unterminated frontmatter\n",
     );
 
-    let collection = Collection::with_root(&collection_root);
-    let hits = search::search(&collection, "").unwrap();
+    let catalog = Catalog::with_root(&catalog_root);
+    let hits = search::search(&catalog, "").unwrap();
 
     assert_eq!(hits.len(), 2);
     assert!(hits.iter().any(|hit| hit.name == "plain"));

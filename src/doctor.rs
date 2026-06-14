@@ -5,7 +5,7 @@ use serde::Serialize;
 use std::collections::BTreeSet;
 use std::io::ErrorKind;
 
-use crate::collection::Collection;
+use crate::catalog::Catalog;
 use crate::fsops;
 use crate::gitexclude;
 use crate::lockfile::{ItemType, LockItem, Lockfile, Mode};
@@ -118,8 +118,8 @@ struct ExcludeInspection {
     lines: Option<BTreeSet<String>>,
 }
 
-/// Inspect lockfile items, materialized files, collection sources, and git-exclude lines.
-pub fn diagnose(project: &Project, collection: &Collection) -> Result<DoctorReport> {
+/// Inspect lockfile items, materialized files, catalog sources, and git-exclude lines.
+pub fn diagnose(project: &Project, catalog: &Catalog) -> Result<DoctorReport> {
     let lockfile_path = project.lockfile_path();
     let lockfile_exists = lockfile_path.exists();
     let lockfile = Lockfile::load(&lockfile_path)?;
@@ -128,7 +128,7 @@ pub fn diagnose(project: &Project, collection: &Collection) -> Result<DoctorRepo
     let items = lockfile
         .items
         .iter()
-        .map(|item| doctor_item(project, collection, item, exclude.lines.as_ref()))
+        .map(|item| doctor_item(project, catalog, item, exclude.lines.as_ref()))
         .collect::<Result<Vec<_>>>()?;
     let summary = doctor_summary(&items, &exclude.health);
 
@@ -140,7 +140,7 @@ pub fn diagnose(project: &Project, collection: &Collection) -> Result<DoctorRepo
 }
 
 /// Repair safely restorable drift: missing materializations and missing exclude lines.
-pub fn sync(project: &Project, collection: &Collection) -> Result<SyncReport> {
+pub fn sync(project: &Project, catalog: &Catalog) -> Result<SyncReport> {
     let lockfile_path = project.lockfile_path();
     let lockfile_exists = lockfile_path.exists();
     let lockfile = Lockfile::load(&lockfile_path)?;
@@ -160,7 +160,7 @@ pub fn sync(project: &Project, collection: &Collection) -> Result<SyncReport> {
             false
         };
 
-        items.push(sync_item(project, collection, item, exclude_added)?);
+        items.push(sync_item(project, catalog, item, exclude_added)?);
     }
 
     let lockfile_added = if should_expect_lockfile_line(&lockfile.items, lockfile_exists) {
@@ -192,13 +192,13 @@ pub fn sync(project: &Project, collection: &Collection) -> Result<SyncReport> {
 
 fn doctor_item(
     project: &Project,
-    collection: &Collection,
+    catalog: &Catalog,
     item: &LockItem,
     exclude_lines: Option<&BTreeSet<String>>,
 ) -> Result<DoctorItem> {
-    let source_present = ops::source_for_item(collection, item).exists();
+    let source_present = ops::source_for_item(catalog, item).exists();
     let target_present = std::fs::symlink_metadata(project.root.join(&item.target)).is_ok();
-    let status = item_health(project, collection, item, source_present, target_present)?;
+    let status = item_health(project, catalog, item, source_present, target_present)?;
     let exclude_present =
         exclude_lines.is_some_and(|lines| lines.contains(&exclude_line(&item.target)));
 
@@ -217,14 +217,14 @@ fn doctor_item(
 
 fn sync_item(
     project: &Project,
-    collection: &Collection,
+    catalog: &Catalog,
     item: &LockItem,
     exclude_added: bool,
 ) -> Result<SyncItem> {
-    let src = ops::source_for_item(collection, item);
+    let src = ops::source_for_item(catalog, item);
     let source_present = src.exists();
     let target_present = std::fs::symlink_metadata(project.root.join(&item.target)).is_ok();
-    let status_before = item_health(project, collection, item, source_present, target_present)?;
+    let status_before = item_health(project, catalog, item, source_present, target_present)?;
     let mut restored = false;
     let mut skipped_orphan = false;
     let mut drifted = false;
@@ -246,7 +246,7 @@ fn sync_item(
     let target_present_after = std::fs::symlink_metadata(project.root.join(&item.target)).is_ok();
     let status_after = item_health(
         project,
-        collection,
+        catalog,
         item,
         source_present,
         target_present_after,
@@ -269,12 +269,12 @@ fn sync_item(
 
 fn item_health(
     project: &Project,
-    collection: &Collection,
+    catalog: &Catalog,
     item: &LockItem,
     source_present: bool,
     target_present: bool,
 ) -> Result<HealthStatus> {
-    let status = ops::health(project, item, Some(collection))?;
+    let status = ops::health(project, item, Some(catalog))?;
     if !source_present && target_present {
         Ok(HealthStatus::Orphaned)
     } else {

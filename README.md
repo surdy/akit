@@ -2,7 +2,7 @@
 
 A standalone, harness-agnostic CLI for **on-demand personal agent customizations**.
 
-Keep your skills and custom agents in one central collection, or pull a remote
+Keep your skills and custom agents in one central catalog, or pull a remote
 `owner/repo/path[#ref]` source through the git-fetch cache, then activate only the ones you
 need in a project on demand — one at a time or as named bundles — materialized into
 `.github/{skills,agents}` via **symlink** or `akit add --copy` (with auto copy fallback on
@@ -17,7 +17,7 @@ as easily.
 ## Why
 
 `~/.copilot/` is **user scope**, so every personal skill/agent is active in **every** project →
-noise and context bloat. `akit` moves the canonical collection out of the auto-discovered dir
+noise and context bloat. `akit` moves the canonical catalog out of the auto-discovered dir
 and materializes only selected items per project.
 
 ## Validated foundation (Copilot CLI 1.0.62)
@@ -31,7 +31,7 @@ See [`docs/design.md`](docs/design.md) for the full design, decisions, and Phase
 
 ## Roadmap
 
-- **Phase 1 — core engine MVP** (this repo): single local collection; `add`/`rm`/`ls`/`search`/
+- **Phase 1 — core engine MVP** (this repo): single local catalog; `add`/`rm`/`ls`/`search`/
   `show`/`sync`/`doctor`/`pull`; symlink-default/copy-fallback; auto-gitignore; lockfile. Scoped into tracer-bullet
   issues — see the [issues](../../issues).
 - **Phase 2 — pterm GUI**: search palette, per-project "active kits" panel, launch-dialog hook.
@@ -41,13 +41,14 @@ See [`docs/design.md`](docs/design.md) for the full design, decisions, and Phase
 
 ## Shared contracts (frozen by issue #1, the walking skeleton)
 
-- **Collection layout:** `$KIT_COLLECTION_DIR` (default `~/.akit/collection`) with
+- **Catalog layout:** `$KIT_CATALOG_DIR` (default `~/.akit/catalog`) with
   `skills/<name>/SKILL.md`, `agents/<name>.agent.md`, `bundles/<name>.yml`, and an `akit.yml`
   manifest of remotely-pulled items.
 - **Lockfile:** `<project>/.copilot/kit.lock.json` (gitignored):
   `{ "version": 1, "items": [ { "id", "type", "source", "ref", "mode", "target", "bundle"? } ] }`.
 - **fs helpers:** `materialize(item, mode)`, `addExclude`/`removeExclude` on `.git/info/exclude`.
 - **CLI scaffold:** `akit <cmd> [--project <dir>] [--json]`; commands include `add [--copy]`, `rm`,
-  `add --bundle`, `rm --bundle`, `ls`/`status`, `search`, `show`, `sync`, `doctor`,
-  `pull` (fetch a remote source into the collection), `unpull` (remove a pulled item +
-  prune its manifest entry), and `restore` (rebootstrap the collection from `akit.yml`).
+  `add --bundle`, `rm --bundle`, `ls`/`status` (project scope), `catalog ls` (catalog scope),
+  `search`, `show`, `sync`, `doctor`, `pull` (fetch a remote source into the catalog), `unpull`
+  (remove a pulled item + prune its manifest entry), and `restore` (rebootstrap the catalog from
+  `akit.yml`).

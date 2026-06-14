@@ -1,6 +1,6 @@
-//! Collection-level manifest in an APM-compatible format, stored as `akit.yml`.
+//! Catalog-level manifest in an APM-compatible format, stored as `akit.yml`.
 //!
-//! Records the remote provenance of items pulled into the collection so a new machine can be
+//! Records the remote provenance of items pulled into the catalog so a new machine can be
 //! rebootstrapped with `akit restore`. Only remotely-sourced items are tracked; hand-authored
 //! skills/agents are content you keep under your own version control.
 //!
@@ -8,7 +8,7 @@
 //! stores it under its own filename, `akit.yml`):
 //!
 //! ```yaml
-//! name: akit-collection
+//! name: akit-catalog
 //! version: 0.0.0
 //! dependencies:
 //!   apm:
@@ -26,40 +26,40 @@ use anyhow::{Context, Result};
 use serde_yaml::{Mapping, Value};
 use std::path::{Path, PathBuf};
 
-use crate::collection::Collection;
+use crate::catalog::Catalog;
 use crate::lockfile::ItemType;
 use crate::remote::SourceSpec;
 
-/// Manifest filename at the collection root (APM-compatible contents).
+/// Manifest filename at the catalog root (APM-compatible contents).
 pub const MANIFEST_FILE: &str = "akit.yml";
 
 /// Default manifest `name` when scaffolding a fresh file.
-const DEFAULT_NAME: &str = "akit-collection";
+const DEFAULT_NAME: &str = "akit-catalog";
 /// Default manifest `version` when scaffolding a fresh file.
 const DEFAULT_VERSION: &str = "0.0.0";
 
-/// A resolved manifest entry: a remote source plus the collection id/type it materializes as.
+/// A resolved manifest entry: a remote source plus the catalog id/type it materializes as.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ManifestEntry {
     pub spec: SourceSpec,
     pub item_type: ItemType,
-    /// Collection id the item is stored under (after any `--as`).
+    /// Catalog id the item is stored under (after any `--as`).
     pub id: String,
 }
 
-/// Path to the collection manifest (may not exist).
-pub fn manifest_path(collection: &Collection) -> PathBuf {
-    collection.root.join(MANIFEST_FILE)
+/// Path to the catalog manifest (may not exist).
+pub fn manifest_path(catalog: &Catalog) -> PathBuf {
+    catalog.root.join(MANIFEST_FILE)
 }
 
-/// Whether the collection has a manifest on disk.
-pub fn exists(collection: &Collection) -> bool {
-    manifest_path(collection).is_file()
+/// Whether the catalog has a manifest on disk.
+pub fn exists(catalog: &Catalog) -> bool {
+    manifest_path(catalog).is_file()
 }
 
-/// Record (upsert) a remote item in the collection manifest, keyed by `(type, id)`.
-pub fn record(collection: &Collection, entry: &ManifestEntry) -> Result<()> {
-    let path = manifest_path(collection);
+/// Record (upsert) a remote item in the catalog manifest, keyed by `(type, id)`.
+pub fn record(catalog: &Catalog, entry: &ManifestEntry) -> Result<()> {
+    let path = manifest_path(catalog);
     let mut root = load_value(&path)?;
     if root.is_null() {
         root = Value::Mapping(Mapping::new());
@@ -84,8 +84,8 @@ pub fn record(collection: &Collection, entry: &ManifestEntry) -> Result<()> {
 /// Remove the manifest entry matching `(item_type, id)`, if present.
 ///
 /// Returns whether an entry was removed. Other keys and entries are preserved.
-pub fn remove(collection: &Collection, item_type: ItemType, id: &str) -> Result<bool> {
-    let path = manifest_path(collection);
+pub fn remove(catalog: &Catalog, item_type: ItemType, id: &str) -> Result<bool> {
+    let path = manifest_path(catalog);
     let mut root = load_value(&path)?;
     let Some(map) = root.as_mapping_mut() else {
         return Ok(false);
@@ -110,9 +110,9 @@ pub fn remove(collection: &Collection, item_type: ItemType, id: &str) -> Result<
     Ok(true)
 }
 
-/// Read all remote items recorded in the collection manifest.
-pub fn entries(collection: &Collection) -> Result<Vec<ManifestEntry>> {
-    let root = load_value(&manifest_path(collection))?;
+/// Read all remote items recorded in the catalog manifest.
+pub fn entries(catalog: &Catalog) -> Result<Vec<ManifestEntry>> {
+    let root = load_value(&manifest_path(catalog))?;
     let mut out = Vec::new();
     let Some(map) = root.as_mapping() else {
         return Ok(out);
@@ -297,8 +297,8 @@ mod tests {
     use super::*;
     use tempfile::TempDir;
 
-    fn collection(tmp: &TempDir) -> Collection {
-        Collection::with_root(tmp.path().join("collection"))
+    fn catalog(tmp: &TempDir) -> Catalog {
+        Catalog::with_root(tmp.path().join("catalog"))
     }
 
     fn spec(s: &str) -> SourceSpec {
@@ -308,7 +308,7 @@ mod tests {
     #[test]
     fn skill_roundtrips_as_string_shorthand() {
         let tmp = TempDir::new().unwrap();
-        let c = collection(&tmp);
+        let c = catalog(&tmp);
         let entry = ManifestEntry {
             spec: spec("acme/repo/deploy#main"),
             item_type: ItemType::Skill,
@@ -325,7 +325,7 @@ mod tests {
     #[test]
     fn agent_roundtrips_with_agent_extension() {
         let tmp = TempDir::new().unwrap();
-        let c = collection(&tmp);
+        let c = catalog(&tmp);
         let entry = ManifestEntry {
             spec: spec("acme/repo/reviewer#main"),
             item_type: ItemType::Agent,
@@ -345,7 +345,7 @@ mod tests {
     #[test]
     fn custom_id_uses_object_form_with_alias() {
         let tmp = TempDir::new().unwrap();
-        let c = collection(&tmp);
+        let c = catalog(&tmp);
         let entry = ManifestEntry {
             spec: spec("acme/repo/deploy#main"),
             item_type: ItemType::Skill,
@@ -362,7 +362,7 @@ mod tests {
     #[test]
     fn record_upserts_by_id_and_type() {
         let tmp = TempDir::new().unwrap();
-        let c = collection(&tmp);
+        let c = catalog(&tmp);
         record(
             &c,
             &ManifestEntry {
@@ -385,7 +385,7 @@ mod tests {
     #[test]
     fn scaffold_sets_name_version_and_preserves_unknown_keys() {
         let tmp = TempDir::new().unwrap();
-        let c = collection(&tmp);
+        let c = catalog(&tmp);
         std::fs::create_dir_all(&c.root).unwrap();
         std::fs::write(
             manifest_path(&c),
@@ -412,7 +412,7 @@ mod tests {
     #[test]
     fn remove_prunes_matching_entry_and_preserves_others() {
         let tmp = TempDir::new().unwrap();
-        let c = collection(&tmp);
+        let c = catalog(&tmp);
         let skill = ManifestEntry {
             spec: spec("acme/repo/deploy#main"),
             item_type: ItemType::Skill,

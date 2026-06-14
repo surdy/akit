@@ -2,7 +2,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use akit::collection::Collection;
+use akit::catalog::Catalog;
 use akit::doctor;
 use akit::lockfile::{ItemType, Mode};
 use akit::ops::{self, HealthStatus};
@@ -24,8 +24,8 @@ fn init_project(base: &Path) -> (PathBuf, Project) {
     (proj, project)
 }
 
-fn make_skill(collection_root: &Path, name: &str) {
-    let dir = collection_root.join("skills").join(name);
+fn make_skill(catalog_root: &Path, name: &str) {
+    let dir = catalog_root.join("skills").join(name);
     fs::create_dir_all(&dir).unwrap();
     fs::write(
         dir.join("SKILL.md"),
@@ -63,19 +63,19 @@ fn append_exclude_line(project_root: &Path, line: &str) {
 fn sync_restores_deleted_symlink_and_doctor_reports_ok() {
     let tmp = tempfile::tempdir().unwrap();
     let base = tmp.path();
-    let collection_root = base.join("collection");
-    make_skill(&collection_root, "demo");
-    let collection = Collection::with_root(&collection_root);
+    let catalog_root = base.join("catalog");
+    make_skill(&catalog_root, "demo");
+    let catalog = Catalog::with_root(&catalog_root);
     let (proj, project) = init_project(base);
 
-    ops::add_skill(&project, &collection, "demo").unwrap();
+    ops::add_skill(&project, &catalog, "demo").unwrap();
     let target = proj.join(".github/skills/demo");
     fs::remove_file(&target).unwrap();
 
-    let before = doctor::diagnose(&project, &collection).unwrap();
+    let before = doctor::diagnose(&project, &catalog).unwrap();
     assert_eq!(before.items[0].status, HealthStatus::Missing);
 
-    let sync = doctor::sync(&project, &collection).unwrap();
+    let sync = doctor::sync(&project, &catalog).unwrap();
     assert_eq!(sync.summary.restored, 1);
     assert!(sync.items[0].restored);
     assert!(
@@ -85,10 +85,10 @@ fn sync_restores_deleted_symlink_and_doctor_reports_ok() {
             .is_symlink()
     );
 
-    let after = doctor::diagnose(&project, &collection).unwrap();
+    let after = doctor::diagnose(&project, &catalog).unwrap();
     assert!(after.summary.healthy, "{after:#?}");
     assert_eq!(after.items[0].status, HealthStatus::Ok);
-    let listed = ops::list_items_with_collection(&project, &collection).unwrap();
+    let listed = ops::list_items_with_catalog(&project, &catalog).unwrap();
     assert_eq!(listed[0].status, HealthStatus::Ok);
 }
 
@@ -96,19 +96,19 @@ fn sync_restores_deleted_symlink_and_doctor_reports_ok() {
 fn doctor_reports_orphaned_source_and_sync_skips_it() {
     let tmp = tempfile::tempdir().unwrap();
     let base = tmp.path();
-    let collection_root = base.join("collection");
-    make_skill(&collection_root, "demo");
-    let collection = Collection::with_root(&collection_root);
+    let catalog_root = base.join("catalog");
+    make_skill(&catalog_root, "demo");
+    let catalog = Catalog::with_root(&catalog_root);
     let (proj, project) = init_project(base);
 
-    ops::add_skill(&project, &collection, "demo").unwrap();
-    fs::remove_dir_all(collection_root.join("skills/demo")).unwrap();
+    ops::add_skill(&project, &catalog, "demo").unwrap();
+    fs::remove_dir_all(catalog_root.join("skills/demo")).unwrap();
 
-    let report = doctor::diagnose(&project, &collection).unwrap();
+    let report = doctor::diagnose(&project, &catalog).unwrap();
     assert_eq!(report.items[0].status, HealthStatus::Orphaned);
     assert!(!report.items[0].source_present);
 
-    let sync = doctor::sync(&project, &collection).unwrap();
+    let sync = doctor::sync(&project, &catalog).unwrap();
     assert_eq!(sync.summary.skipped_orphan, 1);
     assert!(sync.items[0].skipped_orphan);
     assert!(fs::symlink_metadata(proj.join(".github/skills/demo")).is_ok());
@@ -118,15 +118,15 @@ fn doctor_reports_orphaned_source_and_sync_skips_it() {
 fn sync_restores_missing_exclude_line_and_is_idempotent() {
     let tmp = tempfile::tempdir().unwrap();
     let base = tmp.path();
-    let collection_root = base.join("collection");
-    make_skill(&collection_root, "demo");
-    let collection = Collection::with_root(&collection_root);
+    let catalog_root = base.join("catalog");
+    make_skill(&catalog_root, "demo");
+    let catalog = Catalog::with_root(&catalog_root);
     let (proj, project) = init_project(base);
 
-    ops::add_skill(&project, &collection, "demo").unwrap();
+    ops::add_skill(&project, &catalog, "demo").unwrap();
     remove_exclude_line(&proj, "/.github/skills/demo");
 
-    let before = doctor::diagnose(&project, &collection).unwrap();
+    let before = doctor::diagnose(&project, &catalog).unwrap();
     assert!(!before.items[0].exclude_present);
     assert!(
         before
@@ -136,7 +136,7 @@ fn sync_restores_missing_exclude_line_and_is_idempotent() {
             .any(|line| line == "/.github/skills/demo")
     );
 
-    let sync = doctor::sync(&project, &collection).unwrap();
+    let sync = doctor::sync(&project, &catalog).unwrap();
     assert_eq!(sync.summary.exclude_added, 1);
     assert!(sync.items[0].exclude_added);
     assert!(
@@ -149,7 +149,7 @@ fn sync_restores_missing_exclude_line_and_is_idempotent() {
     let exclude = fs::read_to_string(proj.join(".git/info/exclude")).unwrap();
     assert!(exclude.lines().any(|line| line == "/.github/skills/demo"));
 
-    let second = doctor::sync(&project, &collection).unwrap();
+    let second = doctor::sync(&project, &catalog).unwrap();
     assert_eq!(second.summary.exclude_added, 0);
     assert!(second.summary.healthy);
 }
@@ -158,15 +158,15 @@ fn sync_restores_missing_exclude_line_and_is_idempotent() {
 fn doctor_flags_stale_exclude_line_and_sync_does_not_delete_it() {
     let tmp = tempfile::tempdir().unwrap();
     let base = tmp.path();
-    let collection_root = base.join("collection");
-    make_skill(&collection_root, "demo");
-    let collection = Collection::with_root(&collection_root);
+    let catalog_root = base.join("catalog");
+    make_skill(&catalog_root, "demo");
+    let catalog = Catalog::with_root(&catalog_root);
     let (proj, project) = init_project(base);
 
-    ops::add_skill(&project, &collection, "demo").unwrap();
+    ops::add_skill(&project, &catalog, "demo").unwrap();
     append_exclude_line(&proj, "/.github/skills/old");
 
-    let report = doctor::diagnose(&project, &collection).unwrap();
+    let report = doctor::diagnose(&project, &catalog).unwrap();
     assert!(
         report
             .exclude
@@ -175,7 +175,7 @@ fn doctor_flags_stale_exclude_line_and_sync_does_not_delete_it() {
             .any(|line| line == "/.github/skills/old")
     );
 
-    let sync = doctor::sync(&project, &collection).unwrap();
+    let sync = doctor::sync(&project, &catalog).unwrap();
     assert!(
         sync.exclude
             .stale
@@ -190,14 +190,14 @@ fn doctor_flags_stale_exclude_line_and_sync_does_not_delete_it() {
 fn doctor_reports_copy_mode_drift() {
     let tmp = tempfile::tempdir().unwrap();
     let base = tmp.path();
-    let collection_root = base.join("collection");
-    make_skill(&collection_root, "demo");
-    let collection = Collection::with_root(&collection_root);
+    let catalog_root = base.join("catalog");
+    make_skill(&catalog_root, "demo");
+    let catalog = Catalog::with_root(&catalog_root);
     let (proj, project) = init_project(base);
 
     ops::add_item(
         &project,
-        &collection,
+        &catalog,
         ItemType::Skill,
         "demo",
         Mode::Copy,
@@ -206,11 +206,11 @@ fn doctor_reports_copy_mode_drift() {
     .unwrap();
     fs::write(proj.join(".github/skills/demo/SKILL.md"), "changed\n").unwrap();
 
-    let report = doctor::diagnose(&project, &collection).unwrap();
+    let report = doctor::diagnose(&project, &catalog).unwrap();
     assert_eq!(report.items[0].status, HealthStatus::Drifted);
     assert_eq!(report.summary.drifted, 1);
 
-    let sync = doctor::sync(&project, &collection).unwrap();
+    let sync = doctor::sync(&project, &catalog).unwrap();
     assert_eq!(sync.summary.drifted, 1);
     assert!(sync.items[0].drifted);
     assert_eq!(

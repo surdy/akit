@@ -1,6 +1,6 @@
-//! Bundle manifests: named sets of skills and agents in a collection.
+//! Bundle manifests: named sets of skills and agents in a catalog.
 //!
-//! A bundle lives at `<collection>/bundles/<name>.yml` and uses this schema:
+//! A bundle lives at `<catalog>/bundles/<name>.yml` and uses this schema:
 //!
 //! ```yaml
 //! skills: [deploy-to-vercel, lint-fix]
@@ -13,7 +13,7 @@
 use anyhow::{bail, Context, Result};
 use serde::Deserialize;
 
-use crate::collection::Collection;
+use crate::catalog::Catalog;
 use crate::lockfile::ItemType;
 
 /// One bundle item resolved from a manifest.
@@ -38,12 +38,12 @@ struct Manifest {
     agents: Vec<String>,
 }
 
-/// Load and validate `<collection>/bundles/<name>.yml`.
-pub fn load(collection: &Collection, name: &str) -> Result<Bundle> {
-    let path = collection.root.join("bundles").join(format!("{name}.yml"));
+/// Load and validate `<catalog>/bundles/<name>.yml`.
+pub fn load(catalog: &Catalog, name: &str) -> Result<Bundle> {
+    let path = catalog.root.join("bundles").join(format!("{name}.yml"));
     if !path.is_file() {
         bail!(
-            "bundle '{name}' not found in collection (looked in {})",
+            "bundle '{name}' not found in catalog (looked in {})",
             path.display()
         );
     }
@@ -55,7 +55,7 @@ pub fn load(collection: &Collection, name: &str) -> Result<Bundle> {
 
     let mut items = Vec::with_capacity(manifest.skills.len() + manifest.agents.len());
     for skill in manifest.skills {
-        collection
+        catalog
             .resolve_skill(&skill)
             .with_context(|| format!("bundle '{name}' references skill '{skill}'"))?;
         items.push(BundleItem {
@@ -64,7 +64,7 @@ pub fn load(collection: &Collection, name: &str) -> Result<Bundle> {
         });
     }
     for agent in manifest.agents {
-        collection
+        catalog
             .resolve_agent(&agent)
             .with_context(|| format!("bundle '{name}' references agent '{agent}'"))?;
         items.push(BundleItem {

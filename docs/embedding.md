@@ -24,18 +24,18 @@ co-development.
 ## The two anchors
 
 Every operation takes a **`Project`** (where items are materialized) and, for most,
-a **`Collection`** (where items come from):
+a **`Catalog`** (where items come from):
 
 ```rust
 use akit::project::Project;
-use akit::collection::Collection;
+use akit::catalog::Catalog;
 
 // Resolve the project: explicit dir, else the enclosing git root, else cwd.
 let project = Project::locate(Some(workspace_dir))?;
 
-// Resolve the collection: explicit root, or `$KIT_COLLECTION_DIR`
-// (default `~/.akit/collection`) via `Collection::locate()`.
-let collection = Collection::with_root(collection_dir); // or Collection::locate()?
+// Resolve the catalog: explicit root, or `$KIT_CATALOG_DIR`
+// (default `~/.akit/catalog`) via `Catalog::locate()`.
+let catalog = Catalog::with_root(catalog_dir); // or Catalog::locate()?
 ```
 
 ## Operations
@@ -48,28 +48,31 @@ use akit::{ops, search, doctor};
 use akit::lockfile::{ItemType, Mode};
 
 // List installed items with health (ok / orphaned / missing / drifted).
-let items = ops::list_items_with_collection(&project, &collection)?;
+let items = ops::list_items_with_catalog(&project, &catalog)?;
 let json  = serde_json::to_string(&items)?; // hand to the GUI
 
+// List the whole catalog (every skill/agent + provenance), independent of any project.
+let catalog_items = ops::list_catalog(&catalog)?;
+
 // Add a skill (symlink by default) or an agent.
-ops::add_skill(&project, &collection, "deploy-helper")?;
-ops::add_item(&project, &collection, ItemType::Agent, "reviewer", Mode::Symlink, None)?;
+ops::add_skill(&project, &catalog, "deploy-helper")?;
+ops::add_item(&project, &catalog, ItemType::Agent, "reviewer", Mode::Symlink, None)?;
 
 // Add a named bundle, or a remote `owner/repo/path#ref` source.
-ops::add_bundle(&project, &collection, "web", Mode::Symlink)?;
+ops::add_bundle(&project, &catalog, "web", Mode::Symlink)?;
 
 // Remove.
 ops::remove_skill(&project, "deploy-helper")?;
 
-// Search the collection by frontmatter (name / description / category).
-let hits = search::search(&collection, "deploy")?;
+// Search the catalog by frontmatter (name / description / category).
+let hits = search::search(&catalog, "deploy")?;
 
 // Reconcile: read-only report, or repair safe drift.
-let report = doctor::diagnose(&project, &collection)?;
-let synced = doctor::sync(&project, &collection)?;
+let report = doctor::diagnose(&project, &catalog)?;
+let synced = doctor::sync(&project, &catalog)?;
 ```
 
-Key types: `ops::{AddReport, RemoveReport, ListItem, HealthStatus}`,
+Key types: `ops::{AddReport, RemoveReport, ListItem, CatalogItem, HealthStatus}`,
 `search::SearchHit`, `doctor::{DoctorReport, SyncReport}`, and
 `lockfile::{ItemType, Mode}` — all `Serialize`.
 

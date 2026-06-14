@@ -1,7 +1,7 @@
 # akit usage
 
 `akit` pulls personal agent customizations (skills and custom agents) from a central
-**collection** into a project on demand, kept personal and gitignored, tracked by a lockfile.
+**catalog** into a project on demand, kept personal and gitignored, tracked by a lockfile.
 
 ## Install / build
 
@@ -12,15 +12,15 @@ cargo build --release
 # binary at target/release/akit
 ```
 
-## Your collection
+## Your catalog
 
-`akit` reads from a single local collection directory:
+`akit` reads from a single local catalog directory:
 
-- Location: `$KIT_COLLECTION_DIR`, or `~/.akit/collection` by default.
+- Location: `$KIT_CATALOG_DIR`, or `~/.akit/catalog` by default.
 - Layout:
 
   ```text
-  <collection>/
+  <catalog>/
     akit.yml                 # manifest of remotely-pulled items (for `akit restore`)
     skills/<name>/SKILL.md
     agents/<name>.agent.md
@@ -32,10 +32,10 @@ project). Skills are directories containing `SKILL.md`; agents are single
 `agents/<name>.agent.md` files. `akit` then materializes only the ones you select into a given
 project.
 
-You can populate the collection by hand (move/copy files into the layout above) or fetch a
-remote source straight into it with [`akit pull`](#pull--fetch-a-remote-source-into-the-collection).
-Each `pull` records its source in a collection manifest (`akit.yml`) so a new machine can be
-rebootstrapped with [`akit restore`](#restore--rebootstrap-the-collection-from-the-manifest).
+You can populate the catalog by hand (move/copy files into the layout above) or fetch a
+remote source straight into it with [`akit pull`](#pull--fetch-a-remote-source-into-the-catalog).
+Each `pull` records its source in a catalog manifest (`akit.yml`) so a new machine can be
+rebootstrapped with [`akit restore`](#restore--rebootstrap-the-catalog-from-the-manifest).
 
 Bundles are named YAML manifests that install a set of skills and agents together:
 
@@ -64,13 +64,13 @@ akit add [--agent] [--copy] owner/repo/path[#ref]
 akit add [--copy] --bundle <name>
 ```
 
-- By default, symlinks `<collection>/skills/<name>` into `<project>/.github/skills/<name>`
+- By default, symlinks `<catalog>/skills/<name>` into `<project>/.github/skills/<name>`
   (Copilot loads it as a **project-scope** skill).
-- With `--agent`, symlinks `<collection>/agents/<name>.agent.md` into
+- With `--agent`, symlinks `<catalog>/agents/<name>.agent.md` into
   `<project>/.github/agents/<name>.agent.md`.
 - With `--copy`, copies the source files instead of symlinking them and records `"mode": "copy"`
   in the lockfile and `--json` add report.
-- If `<name>` contains `/`, `akit` treats it as a remote source spec instead of a local collection
+- If `<name>` contains `/`, `akit` treats it as a remote source spec instead of a local catalog
   name. The syntax is `owner/repo/path[#ref]`; `path` points at a skill directory containing
   `SKILL.md` (or, with `--agent`, a `.agent.md` file). For skill repositories with a top-level
   `skills/` directory, a single-segment path like `deploy-to-vercel` also resolves to
@@ -85,7 +85,7 @@ akit add [--copy] --bundle <name>
 - Remote lockfile entries record `"source": "owner/repo/path"` and `"ref": "<ref>"` when a ref was
   supplied. The future intended backend is APM; the current git-fetch cache is the equivalent
   offline-friendly mechanism used today.
-- With `--bundle <name>`, reads `<collection>/bundles/<name>.yml` and adds every listed skill and
+- With `--bundle <name>`, reads `<catalog>/bundles/<name>.yml` and adds every listed skill and
   agent through the same add pipeline. `--copy` applies to every item. `--agent` is not used with
   bundles because the manifest already distinguishes item types.
 - If symlink creation fails at runtime (for example, Windows without symlink privilege), `akit`
@@ -118,33 +118,33 @@ Added bundle 'web' (3 items)
   Added agent 'code-reviewer' -> .github/agents/code-reviewer.agent.md (linked)
 ```
 
-### `pull` — fetch a remote source into the collection
+### `pull` — fetch a remote source into the catalog
 
 ```bash
 akit pull [--agent] [--as <id>] [--force] owner/repo/path[#ref]
 ```
 
 Where `add` materializes items *into a project*, `pull` copies a remote source *into your local
-collection* so it becomes a reusable item you can later `add`, `search`, and `show` like any
-hand-authored kit. This is how you populate the collection from shared repositories without
+catalog* so it becomes a reusable item you can later `add`, `search`, and `show` like any
+hand-authored kit. This is how you populate the catalog from shared repositories without
 cloning and copying by hand.
 
 - Fetches `owner/repo/path[#ref]` through the same git-fetch cache as `add` (honoring
   `$KIT_CACHE_DIR` and `$KIT_REMOTE_BASE_URL`), then **copies** the resolved item into the
-  collection — a standalone copy, independent of the cache.
-- By default the source is a **skill** (`<collection>/skills/<id>/`); with `--agent` it is an
-  agent (`<collection>/agents/<id>.agent.md`). The same path resolution as `add` applies, so a
+  catalog — a standalone copy, independent of the cache.
+- By default the source is a **skill** (`<catalog>/skills/<id>/`); with `--agent` it is an
+  agent (`<catalog>/agents/<id>.agent.md`). The same path resolution as `add` applies, so a
   single-segment `path` like `deploy-to-vercel` resolves to `skills/deploy-to-vercel` (or, with
   `--agent`, `agents/deploy-to-vercel.agent.md`) in the source repo.
-- The collection **id** defaults to the source's last path segment; `--as <id>` stores it under
+- The catalog **id** defaults to the source's last path segment; `--as <id>` stores it under
   a different name. Ids must be a single path segment (no `/`).
 - Validates the fetched source before writing: a skill must be a directory containing `SKILL.md`;
   an agent must be a `.agent.md` file.
-- Creates the `skills/` / `agents/` directories if the collection does not exist yet.
+- Creates the `skills/` / `agents/` directories if the catalog does not exist yet.
 - **Idempotent and safe:** an identical existing item is a no-op (`"created": false`); an item
   that already exists and *differs* from the source is left untouched and the command errors
   unless you pass `--force` to overwrite it.
-- The global `--project` flag is accepted but unused — `pull` only touches the collection.
+- The global `--project` flag is accepted but unused — `pull` only touches the catalog.
 
 With `--json`, `pull` emits a stable object:
 
@@ -154,7 +154,7 @@ With `--json`, `pull` emits a stable object:
   "type": "skill",
   "source": "vercel-labs/agent-skills/deploy-to-vercel",
   "ref": "main",
-  "path": "/home/you/.akit/collection/skills/deploy-to-vercel",
+  "path": "/home/you/.akit/catalog/skills/deploy-to-vercel",
   "created": true,
   "overwritten": false
 }
@@ -168,16 +168,16 @@ Example:
 
 ```bash
 $ akit pull vercel-labs/agent-skills/deploy-to-vercel#main
-Pulled skill 'deploy-to-vercel' from vercel-labs/agent-skills/deploy-to-vercel#main -> /home/you/.akit/collection/skills/deploy-to-vercel (copied)
+Pulled skill 'deploy-to-vercel' from vercel-labs/agent-skills/deploy-to-vercel#main -> /home/you/.akit/catalog/skills/deploy-to-vercel (copied)
 
 $ akit pull --agent acme/kits/reviewer#main
-Pulled agent 'reviewer' from acme/kits/reviewer#main -> /home/you/.akit/collection/agents/reviewer.agent.md (copied)
+Pulled agent 'reviewer' from acme/kits/reviewer#main -> /home/you/.akit/catalog/agents/reviewer.agent.md (copied)
 
 $ akit pull --as vercel vercel-labs/agent-skills/deploy-to-vercel#main
-Pulled skill 'vercel' from vercel-labs/agent-skills/deploy-to-vercel#main -> /home/you/.akit/collection/skills/vercel (copied)
+Pulled skill 'vercel' from vercel-labs/agent-skills/deploy-to-vercel#main -> /home/you/.akit/catalog/skills/vercel (copied)
 ```
 
-Once pulled, the item is just another collection entry:
+Once pulled, the item is just another catalog entry:
 
 ```bash
 $ akit search deploy
@@ -185,15 +185,15 @@ skill  Deploy to Vercel  — Ship apps to Vercel (ops)
 $ akit add deploy-to-vercel   # materialize it into a project
 ```
 
-### `restore` — rebootstrap the collection from the manifest
+### `restore` — rebootstrap the catalog from the manifest
 
 ```text
 akit restore [--force]
 ```
 
-Re-fetches every remotely-pulled item recorded in the collection manifest (`akit.yml`), so you
-can recreate your collection on a new machine. Run it after copying just `akit.yml` to a fresh
-`~/.akit/collection/`:
+Re-fetches every remotely-pulled item recorded in the catalog manifest (`akit.yml`), so you
+can recreate your catalog on a new machine. Run it after copying just `akit.yml` to a fresh
+`~/.akit/catalog/`:
 
 ```bash
 $ akit restore
@@ -204,7 +204,7 @@ Restored 2 item(s): 2 pulled, 0 already present, 0 overwritten, 0 error(s).
 
 - Each entry is re-pulled under its recorded id, so `--as` aliases are reproduced exactly.
 - Items already present and identical are left untouched (idempotent). `--force` overwrites a
-  collection item that has drifted from its recorded source.
+  catalog item that has drifted from its recorded source.
 - A failed item does not abort the run; remaining items are still restored. `restore` exits
   non-zero if **any** item failed.
 - The manifest only tracks remote pulls. Hand-authored skills/agents are your own content —
@@ -212,11 +212,11 @@ Restored 2 item(s): 2 pulled, 0 already present, 0 overwritten, 0 error(s).
 
 #### The manifest (`akit.yml`)
 
-`pull` records each remote item in `<collection>/akit.yml`, using the
+`pull` records each remote item in `<catalog>/akit.yml`, using the
 [APM](https://github.com/microsoft/apm) manifest shape:
 
 ```yaml
-name: akit-collection
+name: akit-catalog
 version: 0.0.0
 dependencies:
   apm:
@@ -254,23 +254,23 @@ With `--json`, `restore` emits a stable object:
 `status` is one of `pulled`, `already-present`, `overwritten`, or `error`; failed items add an
 `error` string.
 
-### `unpull` — remove a pulled item from the collection
+### `unpull` — remove a pulled item from the catalog
 
 ```text
 akit unpull [--agent] <id>
 ```
 
-The inverse of [`pull`](#pull--fetch-a-remote-source-into-the-collection): it deletes the
-collection item (`skills/<id>/` or `agents/<id>.agent.md`) **and** prunes its entry from the
-manifest, so [`restore`](#restore--rebootstrap-the-collection-from-the-manifest) won't bring it
+The inverse of [`pull`](#pull--fetch-a-remote-source-into-the-catalog): it deletes the
+catalog item (`skills/<id>/` or `agents/<id>.agent.md`) **and** prunes its entry from the
+manifest, so [`restore`](#restore--rebootstrap-the-catalog-from-the-manifest) won't bring it
 back.
 
 ```bash
 $ akit unpull deploy-to-vercel
-Unpulled skill 'deploy-to-vercel' (from vercel-labs/agent-skills/deploy-to-vercel#main) -> /home/you/.akit/collection/skills/deploy-to-vercel (removed)
+Unpulled skill 'deploy-to-vercel' (from vercel-labs/agent-skills/deploy-to-vercel#main) -> /home/you/.akit/catalog/skills/deploy-to-vercel (removed)
 
 $ akit unpull --agent reviewer
-Unpulled agent 'reviewer' (from acme/kits/reviewer.agent.md#main) -> /home/you/.akit/collection/agents/reviewer.agent.md (removed)
+Unpulled agent 'reviewer' (from acme/kits/reviewer.agent.md#main) -> /home/you/.akit/catalog/agents/reviewer.agent.md (removed)
 ```
 
 - Only **recorded pulls** can be unpulled. If `<id>` has no manifest entry, `unpull` errors and
@@ -278,7 +278,7 @@ Unpulled agent 'reviewer' (from acme/kits/reviewer.agent.md#main) -> /home/you/.
   hand).
 - It still prunes the manifest entry when the files are already gone (reported as
   `manifest entry pruned; files were already absent`).
-- The global `--project` flag is accepted but unused — `unpull` only touches the collection.
+- The global `--project` flag is accepted but unused — `unpull` only touches the catalog.
 
 With `--json`, `unpull` emits a stable object (`item_removed` is `false` when the files were
 already absent):
@@ -289,7 +289,7 @@ already absent):
   "type": "skill",
   "source": "vercel-labs/agent-skills/deploy-to-vercel",
   "ref": "main",
-  "path": "/home/you/.akit/collection/skills/deploy-to-vercel",
+  "path": "/home/you/.akit/catalog/skills/deploy-to-vercel",
   "item_removed": true
 }
 ```
@@ -340,7 +340,7 @@ show `-`. Health values:
 - `ok`: target exists and, for symlinks, resolves to an existing source.
 - `orphaned`: target is a symlink whose source no longer exists.
 - `missing`: lockfile entry exists but the target is gone.
-- `drifted`: copy-mode target exists, but its content differs from the current collection source.
+- `drifted`: copy-mode target exists, but its content differs from the current catalog source.
 
 Example:
 
@@ -362,11 +362,11 @@ standalone items).
 akit doctor
 ```
 
-Checks the lockfile against the project filesystem, the current collection, and
+Checks the lockfile against the project filesystem, the current catalog, and
 `.git/info/exclude` without modifying anything.
 
 - Reports each lockfile item as `ok`, `orphaned`, `missing`, or `drifted`.
-- Shows whether the collection source exists, the project target exists, and the target's
+- Shows whether the catalog source exists, the project target exists, and the target's
   `/.github/...` exclude line is present.
 - Reports missing managed exclude lines, including `/.copilot/kit.lock.json`.
 - Flags stale managed exclude lines (for example, a `/.github/skills/...` line with no matching
@@ -432,13 +432,13 @@ no-op.
 Repairs:
 
 - Missing materialized targets, using the recorded `mode` (`symlink` or `copy`) and the current
-  collection source.
+  catalog source.
 - Missing `.git/info/exclude` lines for locked targets.
 - The lockfile's own `/.copilot/kit.lock.json` exclude line.
 
 Does **not** silently delete or overwrite user data:
 
-- Orphaned items whose collection source is gone are reported and skipped.
+- Orphaned items whose catalog source is gone are reported and skipped.
 - Drifted copy-mode targets are reported and not overwritten.
 - Stale exclude lines are reported and not removed.
 
@@ -493,20 +493,20 @@ With `--json`, `sync` emits:
 }
 ```
 
-### `search` — search the collection
+### `search` — search the catalog
 
 ```bash
 akit search [<query>]
 ```
 
-- Scans `<collection>/skills/<name>/SKILL.md` and `<collection>/agents/<name>.agent.md`.
+- Scans `<catalog>/skills/<name>/SKILL.md` and `<catalog>/agents/<name>.agent.md`.
 - Reads leading YAML-style frontmatter fields: `name`, `description`, and `category`.
 - If `name` is missing, uses the skill directory or agent file name.
 - Fuzzy-matches `<query>` against `name` first and `description` second; best scores print first.
-- An omitted or empty query lists every collection item.
+- An omitted or empty query lists every catalog item.
 - Missing or malformed frontmatter emits a warning to stderr and falls back to available fields.
 - Supports the global `--json` flag. The global `--project` flag is accepted but `search` reads
-  only the collection.
+  only the catalog.
 
 Human output is one hit per line:
 
@@ -542,22 +542,22 @@ For `search`, `--json` emits a stable array of objects:
 `type` is `"skill"` or `"agent"`. Missing `description` and `category` serialize as empty
 strings. Empty-query results use score `0`.
 
-### `show` — preview a collection item
+### `show` — preview a catalog item
 
 ```bash
 akit show [--agent] <id>
 ```
 
-- Reads a single item from the collection and prints its frontmatter and raw content,
+- Reads a single item from the catalog and prints its frontmatter and raw content,
   without touching the project.
-- Defaults to a skill (`<collection>/skills/<id>/SKILL.md`); pass `--agent` to read an
-  agent (`<collection>/agents/<id>.agent.md`).
+- Defaults to a skill (`<catalog>/skills/<id>/SKILL.md`); pass `--agent` to read an
+  agent (`<catalog>/agents/<id>.agent.md`).
 - Reuses the same frontmatter parsing as `search` (`name`, `description`, `category`); a
   missing `name` falls back to the `<id>`, and malformed frontmatter warns to stderr and
   falls back to available fields.
 - Exits non-zero with an error when the id or its markdown file is missing.
 - Supports the global `--json` flag. The global `--project` flag is accepted but `show`
-  reads only the collection.
+  reads only the catalog.
 
 Human output is a header (`type · name · category`), the description and source path, then
 the raw file content:
@@ -566,7 +566,7 @@ the raw file content:
 $ akit show deploy-helper
 skill · Deploy Helper · ops
 Ship apps safely
-/home/you/.akit/collection/skills/deploy-helper/SKILL.md
+/home/you/.akit/catalog/skills/deploy-helper/SKILL.md
 
 ---
 name: Deploy Helper
@@ -586,7 +586,7 @@ For `show`, `--json` emits a stable object:
   "name": "Deploy Helper",
   "description": "Ship apps safely",
   "category": "ops",
-  "path": "/home/you/.akit/collection/skills/deploy-helper/SKILL.md",
+  "path": "/home/you/.akit/catalog/skills/deploy-helper/SKILL.md",
   "content": "---\nname: Deploy Helper\n...\n"
 }
 ```
@@ -596,7 +596,54 @@ For `show`, `--json` emits a stable object:
 the full file (frontmatter included).
 
 > Remote-source and bundle-member preview are not yet supported — `show` reads local
-> collection items only.
+> catalog items only.
+
+### `catalog ls` — list everything in the catalog
+
+```bash
+akit catalog ls
+# alias:
+akit catalog list
+```
+
+Lists every skill and agent in your catalog, with the **id** you pass to `add`, `show`, and
+`unpull`. Unlike [`search`](#search--search-the-catalog) (which fuzzy-matches and shows each
+item's frontmatter `name`), `catalog ls` is the catalog-wide inventory keyed by id, and it
+records each item's provenance:
+
+- `ls` (project scope) lists what's **installed into the current project**; `catalog ls`
+  (catalog scope) lists what's **available in your catalog**.
+- The `ORIGIN` column shows `owner/repo/path[#ref]` for items recorded as pulled in the
+  manifest (`akit.yml`), or `local` for hand-authored items.
+- Sorted skills-first, then by id.
+- Supports the global `--json` flag. The global `--project` flag is accepted but `catalog ls`
+  reads only the catalog.
+
+Example:
+
+```bash
+$ akit catalog ls
+TYPE   ID             ORIGIN                              DESCRIPTION
+skill  deploy-helper  local                               Ship apps safely
+skill  grill-me       mattpocock/skills/.../grill-me      Stress-test a plan
+agent  reviewer       local                               Review code
+```
+
+For `catalog ls`, `--json` emits a stable array of objects:
+
+```json
+[
+  {
+    "type": "skill",
+    "id": "grill-me",
+    "description": "Stress-test a plan",
+    "source": "mattpocock/skills/skills/productivity/grill-me#main"
+  }
+]
+```
+
+`type` is `"skill"` or `"agent"`. `description` is the frontmatter description (empty when
+absent). `source` is present only for pulled items; hand-authored (local) items omit it.
 
 ## How it stays out of your repo
 

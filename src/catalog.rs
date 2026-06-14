@@ -1,8 +1,8 @@
-//! The collection: a local directory holding the canonical set of skills and agents.
+//! The catalog: a local directory holding the canonical set of skills and agents.
 //!
 //! Layout (shared contract, frozen by issue #1):
 //! ```text
-//! $KIT_COLLECTION_DIR/          (default ~/.akit/collection)
+//! $KIT_CATALOG_DIR/          (default ~/.akit/catalog)
 //!   skills/<name>/SKILL.md
 //!   agents/<name>.agent.md
 //! ```
@@ -10,29 +10,29 @@
 use anyhow::{Context, Result, bail};
 use std::path::PathBuf;
 
-/// Environment variable that overrides the collection location.
-pub const ENV_COLLECTION_DIR: &str = "KIT_COLLECTION_DIR";
+/// Environment variable that overrides the catalog location.
+pub const ENV_CATALOG_DIR: &str = "KIT_CATALOG_DIR";
 
-/// A handle to the on-disk collection.
-pub struct Collection {
+/// A handle to the on-disk catalog.
+pub struct Catalog {
     pub root: PathBuf,
 }
 
-impl Collection {
-    /// Locate the collection from `$KIT_COLLECTION_DIR`, falling back to
-    /// `~/.akit/collection`.
+impl Catalog {
+    /// Locate the catalog from `$KIT_CATALOG_DIR`, falling back to
+    /// `~/.akit/catalog`.
     pub fn locate() -> Result<Self> {
-        let root = match std::env::var_os(ENV_COLLECTION_DIR) {
+        let root = match std::env::var_os(ENV_CATALOG_DIR) {
             Some(v) if !v.is_empty() => PathBuf::from(v),
             _ => {
                 let home = dirs::home_dir().context("could not determine home directory")?;
-                home.join(".akit").join("collection")
+                home.join(".akit").join("catalog")
             }
         };
         Ok(Self { root })
     }
 
-    /// Construct a collection rooted at an explicit path (used in tests / by callers).
+    /// Construct a catalog rooted at an explicit path (used in tests / by callers).
     pub fn with_root(root: impl Into<PathBuf>) -> Self {
         Self { root: root.into() }
     }
@@ -52,7 +52,7 @@ impl Collection {
         let dir = self.skill_source(name);
         if !dir.is_dir() {
             bail!(
-                "skill '{name}' not found in collection (looked in {})",
+                "skill '{name}' not found in catalog (looked in {})",
                 dir.display()
             );
         }
@@ -71,7 +71,7 @@ impl Collection {
         let file = self.agent_source(name);
         if !file.is_file() {
             bail!(
-                "agent '{name}' not found in collection (looked in {})",
+                "agent '{name}' not found in catalog (looked in {})",
                 file.display()
             );
         }

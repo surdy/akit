@@ -2,17 +2,17 @@
 
 > **Historical note:** this is the original design proposal under the project's working name
 > *ckit / "Copilot Kit"*. The project has since been renamed to **akit** ("agent kit") and the
-> default collection moved to `~/.akit/collection`. The design below is preserved as-is for
+> default catalog moved to `~/.akit/catalog`. The design below is preserved as-is for
 > context; current usage lives in [`../README.md`](../README.md) and [`usage.md`](usage.md).
 
 > Status: proposal only. No code written. Focus: GitHub Copilot CLI first; extensible to Codex/Claude later.
 
 ## Problem
-User keeps a personal collection of skills / custom agents / "prompts" in `~/.copilot/`.
+User keeps a personal catalog of skills / custom agents / "prompts" in `~/.copilot/`.
 Because `~/.copilot/` is **user scope**, every item is active in **every** project → noise,
 context bloat, irrelevant skills. Want: pull selected items into a project **on demand**,
 remove them just as easily. Future: multiple sources + an APM-style manifest for selecting
-which files form the searchable collection.
+which files form the searchable catalog.
 
 ## Verified facts about Copilot CLI customization (authoritative — GitHub Docs + CLI help)
 Customization primitives are: **custom instructions, skills, custom agents, hooks, MCP, plugins**.
@@ -38,7 +38,7 @@ Relevant native levers:
 
 ## Core insight
 The "all files in all projects" symptom is caused purely by living in `~/.copilot/` (user scope).
-The fix is structural: **move the canonical collection OUT of any auto-discovered Copilot dir** into a
+The fix is structural: **move the canonical catalog OUT of any auto-discovered Copilot dir** into a
 neutral store, then **materialize only selected items into each project's `.github/{skills,agents}`** on demand.
 
 ## Evaluation of the symlink idea (user's proposal)
@@ -57,19 +57,19 @@ Caveats / must-handle:
 3. **Windows** symlink support is poor (needs Dev Mode/admin) → copy fallback for portability.
 4. **No record of what's pulled** → need a per-project **lockfile** (gitignored) to power list / remove /
    remove-all / sync / status and to avoid orphans.
-5. Symlinking is only the *action*; still need a **search/browse** layer over the collection.
+5. Symlinking is only the *action*; still need a **search/browse** layer over the catalog.
 
 ## Alternative solutions
 - **A. Symlink (default) + copy (fallback)** into `.github/{skills,agents}`, gitignored, with lockfile. ✅ recommended primitive.
 - **B. Copy-only mode.** Portable, Windows-safe, can optionally be committed to share with a team. No propagation; "remove" = delete. Good as a mode/flag.
 - **C. Out-of-repo registration.** `/skills add ~/.copilot-kits/<proj>/skills` + `COPILOT_CUSTOM_INSTRUCTIONS_DIRS`. Avoids repo pollution but **agents can't** be registered this way → non-uniform. Weaker.
-- **D. Native plugins + personal marketplace.** Author the collection as plugin(s), `/plugin install` per project, toggle. Good for *distribution*, but install is user-scope (not per-project) and authoring is heavier. Complementary, not the core.
+- **D. Native plugins + personal marketplace.** Author the catalog as plugin(s), `/plugin install` per project, toggle. Good for *distribution*, but install is user-scope (not per-project) and authoring is heavier. Complementary, not the core.
 - **E. Adopt APM as the backend.** Strongest for the *future* multi-source + manifest goal; already does selection (`--skill`), lockfile, security, cross-harness. But it's oriented to *project-shared, committed, reproducible* config; for *personal ephemeral* use you'd gitignore its outputs. Heavier than needed for the seamless add/remove now, but ideal as the eventual engine.
 - **F. pterm-integrated manager** (UX layer over A). Searchable palette + "active kits in this dir" panel + integrate with the new launch-in-directory flow.
 
 ## Recommended architecture — two layers
 **1. Headless core engine** (standalone lib + tiny CLI, e.g. `ckit`), harness-agnostic:
-- Index a **collection**: v1 = one git repo with `skills/`, `agents/` (+ any "prompts" treated as skills);
+- Index a **catalog**: v1 = one git repo with `skills/`, `agents/` (+ any "prompts" treated as skills);
   parse YAML frontmatter (`name`, `description`, category) for search.
 - `add <item>`: materialize into `.github/skills/<name>/` or `.github/agents/<name>.agent.md`
   via **symlink (default) / copy (`--copy`, auto on Windows)**.
@@ -78,7 +78,7 @@ Caveats / must-handle:
 - Commands: `search`, `add`, `rm`, `ls`, `status`, `sync`, `update`.
 
 **2. pterm UX layer** (where a GUI genuinely wins):
-- Fuzzy **search/browse/preview** of the collection (reuse command-palette infra; show frontmatter descriptions).
+- Fuzzy **search/browse/preview** of the catalog (reuse command-palette infra; show frontmatter descriptions).
 - **"Kits in this project"** panel (per active directory) with add/remove toggles → calls the core engine.
 - Hook into the **agent-launch dialog** just built: "Launch Copilot in <dir> with kits [a, b, c]".
 
@@ -88,7 +88,7 @@ without owning fragile filesystem logic. Keeps the door open to delegate the hea
 
 ## Multiple sources (future)
 Distinguish two manifests:
-- **Collection manifest** (user-global, e.g. `~/.copilot-kit/sources.yml`): declares WHERE the searchable
+- **Catalog manifest** (user-global, e.g. `~/.copilot-kit/sources.yml`): declares WHERE the searchable
   pool comes from — multiple repos + path/glob selectors. APM-style source spec `owner/repo/path[#ref]`.
 - **Project lockfile** (per-repo, gitignored): declares WHAT was pulled into this project.
 Either implement this thin selection layer, or adopt **APM** as the backend and let pterm be the GUI over it.
@@ -99,7 +99,7 @@ in a standalone lib/CLI** so it's reusable and testable; pterm wraps it. Avoid c
 to the terminal app, and avoid reinventing APM's manifest/resolution.
 
 ## Phase 0 validation — RESULTS (2026-06-12, Copilot CLI 1.0.62)
-All unknowns validated **positive** with a throwaway harness (canonical collection outside the repo, symlinked into a temp git project's `.github/`). Method: ran `copilot -C <proj> --log-level all --log-dir <tmp> --no-remote -p "..."` and inspected the system prompt captured in the debug log.
+All unknowns validated **positive** with a throwaway harness (canonical catalog outside the repo, symlinked into a temp git project's `.github/`). Method: ran `copilot -C <proj> --log-level all --log-dir <tmp> --no-remote -p "..."` and inspected the system prompt captured in the debug log.
 
 1. **Symlinked skill directory IS followed.** A `.github/skills/<name>` symlink pointing at an out-of-repo `SKILL.md` dir showed up in the model's `<available_skills>` block as `<name>zzz-phase0-skill</name>` with **`<location>project</location>`**. → symlink-default is safe for skills.
 2. **Symlinked `.agent.md` IS followed.** A `.github/agents/<name>.agent.md` symlink appeared in the Task tool's `agent_type` **enum** (`"zzz-phase0-agent"`). → symlink-default is safe for agents.
@@ -110,10 +110,10 @@ All unknowns validated **positive** with a throwaway harness (canonical collecti
 
 ## Phased plan
 - **Phase 0 — validate unknowns:** ✅ **DONE — all positive (see results above).**
-- **Phase 1 — core engine MVP (single repo collection):** index + frontmatter search; `add/rm/ls/status`
+- **Phase 1 — core engine MVP (single repo catalog):** index + frontmatter search; `add/rm/ls/status`
   with symlink-default/copy-fallback; auto-gitignore; lockfile. Manual CLI usable standalone.
 - **Phase 2 — pterm integration:** search palette + per-project kits panel + launch-dialog "attach kits".
-- **Phase 3 — multiple sources + manifest:** collection `sources.yml` (multi-repo/glob) OR adopt APM backend.
+- **Phase 3 — multiple sources + manifest:** catalog `sources.yml` (multi-repo/glob) OR adopt APM backend.
 - **Phase 4 — cross-harness:** map the same items to Codex/Claude target dirs (or via APM `compile -t`).
 
 ## Open questions for the user
@@ -133,7 +133,7 @@ _Questions 1–4 are now resolved — see "Resolved decisions" below._
 
 ### Implications of these decisions
 - The core engine the plan describes is now mostly **APM configuration + a thin wrapper**, not a from-scratch resolver: lean on APM's `owner/repo/path#ref` sources, lockfile, integrity, and `compile -t`.
-- pterm work narrows to **(a)** a search/preview palette over the collection, **(b)** a per-project "active kits" panel, **(c)** wiring `apm install/uninstall` (symlink/copy + `.git/info/exclude`) behind those, and **(d)** the launch-dialog "attach kits" hook.
+- pterm work narrows to **(a)** a search/preview palette over the catalog, **(b)** a per-project "active kits" panel, **(c)** wiring `apm install/uninstall` (symlink/copy + `.git/info/exclude`) behind those, and **(d)** the launch-dialog "attach kits" hook.
 - "Bundles" map naturally to **APM manifest groups** (a named manifest that pulls a set), so bundle support mostly comes for free from the backend choice.
 - Phase 0 still gates everything: verify symlink-follow for skill dirs **and** `.agent.md`, the prompts→skills assumption, and that APM outputs can be fully hidden via `.git/info/exclude`.
 
@@ -143,7 +143,7 @@ _Questions 1–4 are now resolved — see "Resolved decisions" below._
 
 > **Filed:** these are live at **`surdy/ckit`** (private) — issues **#1–#8** (slices) + **#9** (epic). Repo: https://github.com/surdy/ckit · Epic: https://github.com/surdy/ckit/issues/9. GitHub issue numbers intentionally match the slice numbers below.
 
-Working name for the standalone core engine: **`ckit`** (Copilot Kit CLI). Phase 1 = a manually-usable CLI that pulls/removes items from a **single local collection** into a project, gitignored, tracked by a lockfile.
+Working name for the standalone core engine: **`ckit`** (Copilot Kit CLI). Phase 1 = a manually-usable CLI that pulls/removes items from a **single local catalog** into a project, gitignored, tracked by a lockfile.
 
 **Slicing principle:** each issue is a *vertical* slice that runs the whole pipeline end-to-end —
 `resolve → materialize → gitignore → record in lockfile → reflect back to the user` — rather than a
@@ -151,7 +151,7 @@ horizontal layer. Issue **#1 is the walking skeleton** (thinnest complete path) 
 shared contracts below; **#2–#8 fan out from it and are mostly grabbable in parallel.**
 
 ### Shared contracts (defined and frozen by #1, so others can be picked up independently)
-- **Collection layout:** local dir `KIT_COLLECTION_DIR` (default `~/.copilot-kit/collection`) containing
+- **Catalog layout:** local dir `KIT_CATALOG_DIR` (default `~/.copilot-kit/catalog`) containing
   `skills/<name>/SKILL.md` and `agents/<name>.agent.md`.
 - **Lockfile:** `<project>/.copilot/kit.lock.json` (itself gitignored). Schema:
   `{ "version": 1, "items": [ { "id", "type": "skill|agent", "source": "local|<owner/repo/path>", "ref", "mode": "symlink|copy", "target": ".github/skills/<name>", "bundle"? } ] }`.
@@ -165,7 +165,7 @@ shared contracts below; **#2–#8 fan out from it and are mostly grabbable in pa
 | 1 | Walking skeleton: `add` one skill | — | (foundation) |
 | 2 | `rm` + `ls` (skills) | #1 | ✅ |
 | 3 | Agents: `add`/`rm`/`ls` for `.agent.md` | #1 | ✅ |
-| 4 | `search` the collection | #1 (config only) | ✅✅ (read-only) |
+| 4 | `search` the catalog | #1 (config only) | ✅✅ (read-only) |
 | 5 | `--copy` mode + Windows fallback | #1 | ✅ |
 | 6 | Bundles: `add --bundle` | #1 (+#3 for mixed) | ✅ |
 | 7 | `sync` / `doctor` reconcile | #1, #2 | ✅ |
@@ -174,8 +174,8 @@ shared contracts below; **#2–#8 fan out from it and are mostly grabbable in pa
 ### Issue specs
 
 **#1 — Walking skeleton: `ckit add <skill>` pulls one skill end-to-end**  _(foundation, no deps)_
-The thinnest complete path from local collection to Copilot actually loading the skill.
-- Resolve `<skill>` → `$KIT_COLLECTION_DIR/skills/<name>/`.
+The thinnest complete path from local catalog to Copilot actually loading the skill.
+- Resolve `<skill>` → `$KIT_CATALOG_DIR/skills/<name>/`.
 - Symlink it into `<project>/.github/skills/<name>`.
 - Append the target to `.git/info/exclude`; also exclude `.copilot/kit.lock.json`.
 - Create/update the lockfile with one entry.
@@ -208,7 +208,7 @@ Acceptance: partial term returns the right items ranked; empty query lists all; 
 Acceptance: `--copy` yields real files (not links) recorded `mode:copy`; rm cleans; simulated symlink failure falls back with a warning.
 
 **#6 — Bundles: `ckit add --bundle <name>`**  _(dep #1, +#3 for mixed skill+agent bundles)_
-- Bundle manifest `bundles/<name>.yml` in the collection lists item ids (skills and/or agents).
+- Bundle manifest `bundles/<name>.yml` in the catalog lists item ids (skills and/or agents).
 - `add --bundle frontend` materializes the whole set via the #1 add path; each lockfile entry tagged `bundle:frontend`.
 - `rm --bundle frontend` removes exactly that set.
 Acceptance: a 3-item mixed bundle installs all 3; `ls` groups by bundle; `rm --bundle` removes precisely those.

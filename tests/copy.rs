@@ -2,7 +2,7 @@ use std::fs;
 use std::path::Path;
 use std::process::Command;
 
-use akit::collection::Collection;
+use akit::catalog::Catalog;
 use akit::lockfile::{ItemType, Lockfile, Mode};
 use akit::ops::{self, HealthStatus};
 use akit::project::Project;
@@ -23,8 +23,8 @@ fn init_project(base: &Path) -> (std::path::PathBuf, Project) {
     (proj, project)
 }
 
-fn make_skill(collection_root: &Path, name: &str) {
-    let dir = collection_root.join("skills").join(name);
+fn make_skill(catalog_root: &Path, name: &str) {
+    let dir = catalog_root.join("skills").join(name);
     fs::create_dir_all(dir.join("notes")).unwrap();
     fs::write(
         dir.join("SKILL.md"),
@@ -38,14 +38,14 @@ fn make_skill(collection_root: &Path, name: &str) {
 fn add_copy_creates_real_files_and_records_copy() {
     let tmp = tempfile::tempdir().unwrap();
     let base = tmp.path();
-    let collection_root = base.join("collection");
-    make_skill(&collection_root, "demo");
-    let collection = Collection::with_root(&collection_root);
+    let catalog_root = base.join("catalog");
+    make_skill(&catalog_root, "demo");
+    let catalog = Catalog::with_root(&catalog_root);
     let (proj, project) = init_project(base);
 
     let report = ops::add_item(
         &project,
-        &collection,
+        &catalog,
         ItemType::Skill,
         "demo",
         Mode::Copy,
@@ -71,14 +71,14 @@ fn add_copy_creates_real_files_and_records_copy() {
 fn rm_copy_mode_removes_target_exclude_and_lockfile_entry() {
     let tmp = tempfile::tempdir().unwrap();
     let base = tmp.path();
-    let collection_root = base.join("collection");
-    make_skill(&collection_root, "demo");
-    let collection = Collection::with_root(&collection_root);
+    let catalog_root = base.join("catalog");
+    make_skill(&catalog_root, "demo");
+    let catalog = Catalog::with_root(&catalog_root);
     let (proj, project) = init_project(base);
 
     ops::add_item(
         &project,
-        &collection,
+        &catalog,
         ItemType::Skill,
         "demo",
         Mode::Copy,
@@ -109,13 +109,13 @@ fn rm_copy_mode_removes_target_exclude_and_lockfile_entry() {
 fn symlink_failure_falls_back_to_copy_with_warning() {
     let tmp = tempfile::tempdir().unwrap();
     let base = tmp.path();
-    let collection_root = base.join("collection");
-    make_skill(&collection_root, "demo");
+    let catalog_root = base.join("catalog");
+    make_skill(&catalog_root, "demo");
     let (proj, project) = init_project(base);
 
     let output = Command::new(env!("CARGO_BIN_EXE_akit"))
         .args(["--project", proj.to_str().unwrap(), "--json", "add", "demo"])
-        .env("KIT_COLLECTION_DIR", &collection_root)
+        .env("KIT_CATALOG_DIR", &catalog_root)
         .env("CKIT_TEST_FORCE_SYMLINK_FAILURE", "1")
         .output()
         .expect("akit binary should run");
@@ -147,14 +147,14 @@ fn symlink_failure_falls_back_to_copy_with_warning() {
 fn list_reports_copy_drift_after_materialized_file_changes() {
     let tmp = tempfile::tempdir().unwrap();
     let base = tmp.path();
-    let collection_root = base.join("collection");
-    make_skill(&collection_root, "demo");
-    let collection = Collection::with_root(&collection_root);
+    let catalog_root = base.join("catalog");
+    make_skill(&catalog_root, "demo");
+    let catalog = Catalog::with_root(&catalog_root);
     let (proj, project) = init_project(base);
 
     ops::add_item(
         &project,
-        &collection,
+        &catalog,
         ItemType::Skill,
         "demo",
         Mode::Copy,
@@ -162,13 +162,13 @@ fn list_reports_copy_drift_after_materialized_file_changes() {
     )
     .unwrap();
 
-    let items = ops::list_items_with_collection(&project, &collection).unwrap();
+    let items = ops::list_items_with_catalog(&project, &catalog).unwrap();
     assert_eq!(items.len(), 1);
     assert_eq!(items[0].status, HealthStatus::Ok);
 
     fs::write(proj.join(".github/skills/demo/SKILL.md"), "changed\n").unwrap();
 
-    let items = ops::list_items_with_collection(&project, &collection).unwrap();
+    let items = ops::list_items_with_catalog(&project, &catalog).unwrap();
     assert_eq!(items.len(), 1);
     assert_eq!(items[0].status, HealthStatus::Drifted);
 }
