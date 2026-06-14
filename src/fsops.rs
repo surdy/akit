@@ -91,7 +91,7 @@ fn symlink(src: &Path, dst: &Path) -> Result<MaterializeOutcome> {
             );
         }
         bail!(
-            "{} already exists and is not a ckit-managed symlink; refusing to overwrite",
+            "{} already exists and is not a akit-managed symlink; refusing to overwrite",
             dst.display()
         );
     }

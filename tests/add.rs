@@ -5,10 +5,10 @@ use std::fs;
 use std::path::Path;
 use std::process::Command;
 
-use ckit::collection::Collection;
-use ckit::lockfile::{ItemType, Lockfile, Mode};
-use ckit::ops;
-use ckit::project::Project;
+use akit::collection::Collection;
+use akit::lockfile::{ItemType, Lockfile, Mode};
+use akit::ops;
+use akit::project::Project;
 
 fn git(args: &[&str], cwd: &Path) -> std::process::Output {
     Command::new("git")

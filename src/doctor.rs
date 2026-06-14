@@ -1,4 +1,4 @@
-//! Reconcile the ckit lockfile with materialized files and git's local exclude file.
+//! Reconcile the akit lockfile with materialized files and git's local exclude file.
 
 use anyhow::{Context, Result};
 use serde::Serialize;
@@ -35,7 +35,7 @@ pub struct DoctorItem {
     pub exclude_present: bool,
 }
 
-/// Health of `.git/info/exclude` lines managed by ckit.
+/// Health of `.git/info/exclude` lines managed by akit.
 #[derive(Debug, Serialize)]
 pub struct ExcludeHealth {
     pub checked: bool,

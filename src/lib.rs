@@ -1,6 +1,6 @@
-//! ckit — Copilot Kit core engine.
+//! akit — agent kit core engine.
 //!
-//! On-demand personal Copilot customizations: pull skills / custom agents from a central
+//! On-demand personal agent customizations: pull skills / custom agents from a central
 //! collection into a project's `.github/{skills,agents}` via symlink (copy fallback),
 //! keep them personal + gitignored (`.git/info/exclude`), tracked by a per-project lockfile.
 //!

@@ -2,7 +2,7 @@
 //!
 //! Layout (shared contract, frozen by issue #1):
 //! ```text
-//! $KIT_COLLECTION_DIR/          (default ~/.copilot-kit/collection)
+//! $KIT_COLLECTION_DIR/          (default ~/.akit/collection)
 //!   skills/<name>/SKILL.md
 //!   agents/<name>.agent.md
 //! ```
@@ -20,13 +20,13 @@ pub struct Collection {
 
 impl Collection {
     /// Locate the collection from `$KIT_COLLECTION_DIR`, falling back to
-    /// `~/.copilot-kit/collection`.
+    /// `~/.akit/collection`.
     pub fn locate() -> Result<Self> {
         let root = match std::env::var_os(ENV_COLLECTION_DIR) {
             Some(v) if !v.is_empty() => PathBuf::from(v),
             _ => {
                 let home = dirs::home_dir().context("could not determine home directory")?;
-                home.join(".copilot-kit").join("collection")
+                home.join(".akit").join("collection")
             }
         };
         Ok(Self { root })

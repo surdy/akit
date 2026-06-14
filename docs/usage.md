@@ -1,27 +1,27 @@
-# ckit usage
+# akit usage
 
-`ckit` pulls personal Copilot customizations (skills and custom agents) from a central
+`akit` pulls personal agent customizations (skills and custom agents) from a central
 **collection** into a project on demand, kept personal and gitignored, tracked by a lockfile.
 
 ## Install / build
 
 ```bash
-git clone https://github.com/surdy/ckit.git
-cd ckit
+git clone https://github.com/surdy/akit.git
+cd akit
 cargo build --release
-# binary at target/release/ckit
+# binary at target/release/akit
 ```
 
 ## Your collection
 
-`ckit` reads from a single local collection directory:
+`akit` reads from a single local collection directory:
 
-- Location: `$KIT_COLLECTION_DIR`, or `~/.copilot-kit/collection` by default.
+- Location: `$KIT_COLLECTION_DIR`, or `~/.akit/collection` by default.
 - Layout:
 
   ```text
   <collection>/
-    apm.yml                  # manifest of remotely-pulled items (for `ckit restore`)
+    apm.yml                  # manifest of remotely-pulled items (for `akit restore`)
     skills/<name>/SKILL.md
     agents/<name>.agent.md
     bundles/<name>.yml
@@ -29,13 +29,13 @@ cargo build --release
 
 Move your personal skills/agents here (out of `~/.copilot/`, which is auto-loaded in *every*
 project). Skills are directories containing `SKILL.md`; agents are single
-`agents/<name>.agent.md` files. `ckit` then materializes only the ones you select into a given
+`agents/<name>.agent.md` files. `akit` then materializes only the ones you select into a given
 project.
 
 You can populate the collection by hand (move/copy files into the layout above) or fetch a
-remote source straight into it with [`ckit pull`](#pull--fetch-a-remote-source-into-the-collection).
+remote source straight into it with [`akit pull`](#pull--fetch-a-remote-source-into-the-collection).
 Each `pull` records its source in a collection manifest (`apm.yml`) so a new machine can be
-rebootstrapped with [`ckit restore`](#restore--rebootstrap-the-collection-from-the-manifest).
+rebootstrapped with [`akit restore`](#restore--rebootstrap-the-collection-from-the-manifest).
 
 Bundles are named YAML manifests that install a set of skills and agents together:
 
@@ -59,9 +59,9 @@ skill and agent before materializing anything; if an id is missing, the whole bu
 ### `add` — pull a skill or agent into the project
 
 ```bash
-ckit add [--agent] [--copy] <name>
-ckit add [--agent] [--copy] owner/repo/path[#ref]
-ckit add [--copy] --bundle <name>
+akit add [--agent] [--copy] <name>
+akit add [--agent] [--copy] owner/repo/path[#ref]
+akit add [--copy] --bundle <name>
 ```
 
 - By default, symlinks `<collection>/skills/<name>` into `<project>/.github/skills/<name>`
@@ -70,7 +70,7 @@ ckit add [--copy] --bundle <name>
   `<project>/.github/agents/<name>.agent.md`.
 - With `--copy`, copies the source files instead of symlinking them and records `"mode": "copy"`
   in the lockfile and `--json` add report.
-- If `<name>` contains `/`, `ckit` treats it as a remote source spec instead of a local collection
+- If `<name>` contains `/`, `akit` treats it as a remote source spec instead of a local collection
   name. The syntax is `owner/repo/path[#ref]`; `path` points at a skill directory containing
   `SKILL.md` (or, with `--agent`, a `.agent.md` file). For skill repositories with a top-level
   `skills/` directory, a single-segment path like `deploy-to-vercel` also resolves to
@@ -78,8 +78,8 @@ ckit add [--copy] --bundle <name>
   `vercel-labs/agent-skills/deploy-to-vercel#main` lands at `.github/skills/deploy-to-vercel`.
 - Remote sources are fetched with `git` into a local cache, then materialized through the same
   symlink/copy pipeline as local items. The default cache is
-  `~/.cache/ckit/sources/<owner>/<repo>@<ref-or-default>`; `$XDG_CACHE_HOME` changes the cache base
-  to `$XDG_CACHE_HOME/ckit`, and `$KIT_CACHE_DIR` overrides it entirely. The CLI fetches from
+  `~/.cache/akit/sources/<owner>/<repo>@<ref-or-default>`; `$XDG_CACHE_HOME` changes the cache base
+  to `$XDG_CACHE_HOME/akit`, and `$KIT_CACHE_DIR` overrides it entirely. The CLI fetches from
   `https://github.com/<owner>/<repo>` by default; `$KIT_REMOTE_BASE_URL` can point at another git
   URL base (for example, a local `file://` mirror).
 - Remote lockfile entries record `"source": "owner/repo/path"` and `"ref": "<ref>"` when a ref was
@@ -88,7 +88,7 @@ ckit add [--copy] --bundle <name>
 - With `--bundle <name>`, reads `<collection>/bundles/<name>.yml` and adds every listed skill and
   agent through the same add pipeline. `--copy` applies to every item. `--agent` is not used with
   bundles because the manifest already distinguishes item types.
-- If symlink creation fails at runtime (for example, Windows without symlink privilege), `ckit`
+- If symlink creation fails at runtime (for example, Windows without symlink privilege), `akit`
   warns on stderr, falls back to copying, and records the effective `"mode": "copy"`.
 - Appends the pull and the lockfile to `.git/info/exclude`, so nothing is committed and your
   teammates are unaffected. This applies to both local and remote pulls.
@@ -99,19 +99,19 @@ ckit add [--copy] --bundle <name>
 Example:
 
 ```bash
-$ ckit add deploy-helper
+$ akit add deploy-helper
 Added skill 'deploy-helper' -> .github/skills/deploy-helper (linked)
 
-$ ckit add --agent reviewer
+$ akit add --agent reviewer
 Added agent 'reviewer' -> .github/agents/reviewer.agent.md (linked)
 
-$ ckit add --copy deploy-helper
+$ akit add --copy deploy-helper
 Added skill 'deploy-helper' -> .github/skills/deploy-helper (copied)
 
-$ ckit add vercel-labs/agent-skills/deploy-to-vercel#main
+$ akit add vercel-labs/agent-skills/deploy-to-vercel#main
 Added skill 'deploy-to-vercel' -> .github/skills/deploy-to-vercel (linked)
 
-$ ckit add --bundle web
+$ akit add --bundle web
 Added bundle 'web' (3 items)
   Added skill 'deploy-to-vercel' -> .github/skills/deploy-to-vercel (linked)
   Added skill 'lint-fix' -> .github/skills/lint-fix (linked)
@@ -121,7 +121,7 @@ Added bundle 'web' (3 items)
 ### `pull` — fetch a remote source into the collection
 
 ```bash
-ckit pull [--agent] [--as <id>] [--force] owner/repo/path[#ref]
+akit pull [--agent] [--as <id>] [--force] owner/repo/path[#ref]
 ```
 
 Where `add` materializes items *into a project*, `pull` copies a remote source *into your local
@@ -154,7 +154,7 @@ With `--json`, `pull` emits a stable object:
   "type": "skill",
   "source": "vercel-labs/agent-skills/deploy-to-vercel",
   "ref": "main",
-  "path": "/home/you/.copilot-kit/collection/skills/deploy-to-vercel",
+  "path": "/home/you/.akit/collection/skills/deploy-to-vercel",
   "created": true,
   "overwritten": false
 }
@@ -167,36 +167,36 @@ replaced a differing item.
 Example:
 
 ```bash
-$ ckit pull vercel-labs/agent-skills/deploy-to-vercel#main
-Pulled skill 'deploy-to-vercel' from vercel-labs/agent-skills/deploy-to-vercel#main -> /home/you/.copilot-kit/collection/skills/deploy-to-vercel (copied)
+$ akit pull vercel-labs/agent-skills/deploy-to-vercel#main
+Pulled skill 'deploy-to-vercel' from vercel-labs/agent-skills/deploy-to-vercel#main -> /home/you/.akit/collection/skills/deploy-to-vercel (copied)
 
-$ ckit pull --agent acme/kits/reviewer#main
-Pulled agent 'reviewer' from acme/kits/reviewer#main -> /home/you/.copilot-kit/collection/agents/reviewer.agent.md (copied)
+$ akit pull --agent acme/kits/reviewer#main
+Pulled agent 'reviewer' from acme/kits/reviewer#main -> /home/you/.akit/collection/agents/reviewer.agent.md (copied)
 
-$ ckit pull --as vercel vercel-labs/agent-skills/deploy-to-vercel#main
-Pulled skill 'vercel' from vercel-labs/agent-skills/deploy-to-vercel#main -> /home/you/.copilot-kit/collection/skills/vercel (copied)
+$ akit pull --as vercel vercel-labs/agent-skills/deploy-to-vercel#main
+Pulled skill 'vercel' from vercel-labs/agent-skills/deploy-to-vercel#main -> /home/you/.akit/collection/skills/vercel (copied)
 ```
 
 Once pulled, the item is just another collection entry:
 
 ```bash
-$ ckit search deploy
+$ akit search deploy
 skill  Deploy to Vercel  — Ship apps to Vercel (ops)
-$ ckit add deploy-to-vercel   # materialize it into a project
+$ akit add deploy-to-vercel   # materialize it into a project
 ```
 
 ### `restore` — rebootstrap the collection from the manifest
 
 ```text
-ckit restore [--force]
+akit restore [--force]
 ```
 
 Re-fetches every remotely-pulled item recorded in the collection manifest (`apm.yml`), so you
 can recreate your collection on a new machine. Run it after copying just `apm.yml` to a fresh
-`~/.copilot-kit/collection/`:
+`~/.akit/collection/`:
 
 ```bash
-$ ckit restore
+$ akit restore
   pulled skill 'deploy-to-vercel' from vercel-labs/agent-skills/deploy-to-vercel#main
   pulled agent 'reviewer' from acme/kits/reviewer.agent.md#main
 Restored 2 item(s): 2 pulled, 0 already present, 0 overwritten, 0 error(s).
@@ -216,7 +216,7 @@ Restored 2 item(s): 2 pulled, 0 already present, 0 overwritten, 0 error(s).
 [APM](https://github.com/microsoft/apm) manifest shape:
 
 ```yaml
-name: copilot-kit-collection
+name: akit-collection
 version: 0.0.0
 dependencies:
   apm:
@@ -257,15 +257,15 @@ With `--json`, `restore` emits a stable object:
 ### `rm` — remove a skill or agent from the project
 
 ```bash
-ckit rm [--agent] <name>
-ckit rm --bundle <name>
+akit rm [--agent] <name>
+akit rm --bundle <name>
 ```
 
 - Removes the materialized target from `.github/skills/` or `.github/agents/`.
 - Removes that target's `.git/info/exclude` line.
 - Removes the lockfile entry.
 - Remote items are removed by their installed id (the source path leaf), so a remote add of
-  `owner/repo/deploy-to-vercel#main` is reversed with `ckit rm deploy-to-vercel`.
+  `owner/repo/deploy-to-vercel#main` is reversed with `akit rm deploy-to-vercel`.
 - With `--bundle <name>`, removes exactly the installed lockfile entries tagged with that bundle.
   The current manifest is not consulted, so removal stays precise even if the manifest changed.
 - Idempotent: removing an item that is not installed exits successfully.
@@ -273,13 +273,13 @@ ckit rm --bundle <name>
 Example:
 
 ```bash
-$ ckit rm deploy-helper
+$ akit rm deploy-helper
 Removed skill 'deploy-helper' -> .github/skills/deploy-helper (removed)
 
-$ ckit rm --agent reviewer
+$ akit rm --agent reviewer
 Removed agent 'reviewer' -> .github/agents/reviewer.agent.md (removed)
 
-$ ckit rm --bundle web
+$ akit rm --bundle web
 Removed bundle 'web' (3 items)
   Removed skill 'deploy-to-vercel' -> .github/skills/deploy-to-vercel (removed)
   Removed skill 'lint-fix' -> .github/skills/lint-fix (removed)
@@ -289,9 +289,9 @@ Removed bundle 'web' (3 items)
 ### `ls` / `status` — list installed items
 
 ```bash
-ckit ls
+akit ls
 # alias:
-ckit status
+akit status
 ```
 
 Lists lockfile entries grouped by bundle and labeled in the `BUNDLE` column. Standalone entries
@@ -305,7 +305,7 @@ show `-`. Health values:
 Example:
 
 ```bash
-$ ckit ls
+$ akit ls
 BUNDLE  TYPE   ID                MODE     TARGET                                      STATUS
 web     skill  deploy-to-vercel  symlink  .github/skills/deploy-to-vercel             ok
 web     agent  code-reviewer     symlink  .github/agents/code-reviewer.agent.md       ok
@@ -319,7 +319,7 @@ standalone items).
 ### `doctor` — read-only reconcile report
 
 ```bash
-ckit doctor
+akit doctor
 ```
 
 Checks the lockfile against the project filesystem, the current collection, and
@@ -335,7 +335,7 @@ Checks the lockfile against the project filesystem, the current collection, and
 Example:
 
 ```bash
-$ ckit doctor
+$ akit doctor
 BUNDLE  TYPE   ID             MODE     TARGET                                STATUS    EXCLUDE
 -       skill  deploy-helper  symlink  .github/skills/deploy-helper          ok        present
 Exclude: ok
@@ -383,7 +383,7 @@ With `--json`, `doctor` emits:
 ### `sync` — repair safe lockfile/filesystem/exclude drift
 
 ```bash
-ckit sync
+akit sync
 ```
 
 Reconciles the project from the lockfile. It is idempotent: running it again after a clean sync is a
@@ -405,7 +405,7 @@ Does **not** silently delete or overwrite user data:
 Example:
 
 ```bash
-$ ckit sync
+$ akit sync
 Restored skill 'deploy-helper' -> .github/skills/deploy-helper (symlink)
 Added exclude /.copilot/kit.lock.json
 ```
@@ -456,7 +456,7 @@ With `--json`, `sync` emits:
 ### `search` — search the collection
 
 ```bash
-ckit search [<query>]
+akit search [<query>]
 ```
 
 - Scans `<collection>/skills/<name>/SKILL.md` and `<collection>/agents/<name>.agent.md`.
@@ -479,7 +479,7 @@ If `description` or `category` is empty, that part is omitted.
 Example:
 
 ```bash
-$ ckit search deploy
+$ akit search deploy
 skill  Deploy Helper  — Ship apps safely (ops)
 ```
 
@@ -505,7 +505,7 @@ strings. Empty-query results use score `0`.
 ### `show` — preview a collection item
 
 ```bash
-ckit show [--agent] <id>
+akit show [--agent] <id>
 ```
 
 - Reads a single item from the collection and prints its frontmatter and raw content,
@@ -523,10 +523,10 @@ Human output is a header (`type · name · category`), the description and sourc
 the raw file content:
 
 ```text
-$ ckit show deploy-helper
+$ akit show deploy-helper
 skill · Deploy Helper · ops
 Ship apps safely
-/home/you/.copilot-kit/collection/skills/deploy-helper/SKILL.md
+/home/you/.akit/collection/skills/deploy-helper/SKILL.md
 
 ---
 name: Deploy Helper
@@ -546,7 +546,7 @@ For `show`, `--json` emits a stable object:
   "name": "Deploy Helper",
   "description": "Ship apps safely",
   "category": "ops",
-  "path": "/home/you/.copilot-kit/collection/skills/deploy-helper/SKILL.md",
+  "path": "/home/you/.akit/collection/skills/deploy-helper/SKILL.md",
   "content": "---\nname: Deploy Helper\n...\n"
 }
 ```

@@ -1,25 +1,25 @@
-//! ckit CLI — a thin wrapper over the `ckit` engine.
+//! akit CLI — a thin wrapper over the `akit` engine.
 
 use anyhow::{Result, bail};
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 
-use ckit::collection::Collection;
-use ckit::doctor;
-use ckit::doctor::{DoctorReport, SyncReport};
-use ckit::lockfile::{ItemType, Mode};
-use ckit::ops;
-use ckit::ops::{HealthStatus, ListItem};
-use ckit::project::Project;
-use ckit::remote::{self, SourceSpec};
-use ckit::search::{self, SearchHit};
-use ckit::show;
+use akit::collection::Collection;
+use akit::doctor;
+use akit::doctor::{DoctorReport, SyncReport};
+use akit::lockfile::{ItemType, Mode};
+use akit::ops;
+use akit::ops::{HealthStatus, ListItem};
+use akit::project::Project;
+use akit::remote::{self, SourceSpec};
+use akit::search::{self, SearchHit};
+use akit::show;
 
 #[derive(Parser)]
 #[command(
-    name = "ckit",
+    name = "akit",
     version,
-    about = "Copilot Kit — on-demand personal Copilot customizations"
+    about = "akit (agent kit) — on-demand personal agent customizations"
 )]
 struct Cli {
     /// Project directory (defaults to the enclosing git repo root, else the current dir).

@@ -2,10 +2,10 @@ use std::fs;
 use std::path::Path;
 use std::process::Command;
 
-use ckit::collection::Collection;
-use ckit::lockfile::{ItemType, Lockfile, Mode};
-use ckit::ops::{self, HealthStatus};
-use ckit::project::Project;
+use akit::collection::Collection;
+use akit::lockfile::{ItemType, Lockfile, Mode};
+use akit::ops::{self, HealthStatus};
+use akit::project::Project;
 
 fn git(args: &[&str], cwd: &Path) -> std::process::Output {
     Command::new("git")
@@ -172,14 +172,14 @@ fn cli_status_alias_outputs_json_without_collection() {
     let base = tmp.path();
     let (proj, _project) = init_project(base);
 
-    let output = Command::new(env!("CARGO_BIN_EXE_ckit"))
+    let output = Command::new(env!("CARGO_BIN_EXE_akit"))
         .args(["--project", proj.to_str().unwrap(), "--json", "status"])
         .output()
-        .expect("ckit binary should run");
+        .expect("akit binary should run");
 
     assert!(
         output.status.success(),
-        "ckit failed: {}",
+        "akit failed: {}",
         String::from_utf8_lossy(&output.stderr)
     );
     assert_eq!(String::from_utf8_lossy(&output.stdout), "[]\n");

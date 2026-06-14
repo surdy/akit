@@ -1,9 +1,9 @@
 use std::fs;
 use std::path::Path;
 
-use ckit::collection::Collection;
-use ckit::lockfile::ItemType;
-use ckit::search;
+use akit::collection::Collection;
+use akit::lockfile::ItemType;
+use akit::search;
 
 fn make_skill(collection_root: &Path, dir_name: &str, body: &str) {
     let dir = collection_root.join("skills").join(dir_name);

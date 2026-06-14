@@ -1,5 +1,10 @@
 # On-demand personal Copilot customizations ("Copilot Kit") — design & plan
 
+> **Historical note:** this is the original design proposal under the project's working name
+> *ckit / "Copilot Kit"*. The project has since been renamed to **akit** ("agent kit") and the
+> default collection moved to `~/.akit/collection`. The design below is preserved as-is for
+> context; current usage lives in [`../README.md`](../README.md) and [`usage.md`](usage.md).
+
 > Status: proposal only. No code written. Focus: GitHub Copilot CLI first; extensible to Codex/Claude later.
 
 ## Problem

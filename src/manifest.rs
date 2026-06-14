@@ -1,13 +1,13 @@
 //! Collection-level manifest in the APM `apm.yml` format.
 //!
 //! Records the remote provenance of items pulled into the collection so a new machine can be
-//! rebootstrapped with `ckit restore`. Only remotely-sourced items are tracked; hand-authored
+//! rebootstrapped with `akit restore`. Only remotely-sourced items are tracked; hand-authored
 //! skills/agents are content you keep under your own version control.
 //!
 //! The on-disk shape mirrors APM's [`apm.yml`](https://github.com/microsoft/apm) manifest:
 //!
 //! ```yaml
-//! name: copilot-kit-collection
+//! name: akit-collection
 //! version: 0.0.0
 //! dependencies:
 //!   apm:
@@ -18,7 +18,7 @@
 //!       alias: vercel
 //! ```
 //!
-//! ckit owns the `dependencies.apm` list; all other keys (`name`, `author`, `mcp`, …) are
+//! akit owns the `dependencies.apm` list; all other keys (`name`, `author`, `mcp`, …) are
 //! preserved verbatim across rewrites (comments are not preserved).
 
 use anyhow::{Context, Result};
@@ -33,7 +33,7 @@ use crate::remote::SourceSpec;
 pub const MANIFEST_FILE: &str = "apm.yml";
 
 /// Default manifest `name` when scaffolding a fresh file.
-const DEFAULT_NAME: &str = "copilot-kit-collection";
+const DEFAULT_NAME: &str = "akit-collection";
 /// Default manifest `version` when scaffolding a fresh file.
 const DEFAULT_VERSION: &str = "0.0.0";
 
