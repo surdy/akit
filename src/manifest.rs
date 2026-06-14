@@ -1,10 +1,11 @@
-//! Collection-level manifest in the APM `apm.yml` format.
+//! Collection-level manifest in an APM-compatible format, stored as `akit.yml`.
 //!
 //! Records the remote provenance of items pulled into the collection so a new machine can be
 //! rebootstrapped with `akit restore`. Only remotely-sourced items are tracked; hand-authored
 //! skills/agents are content you keep under your own version control.
 //!
-//! The on-disk shape mirrors APM's [`apm.yml`](https://github.com/microsoft/apm) manifest:
+//! The on-disk shape mirrors APM's [`apm.yml`](https://github.com/microsoft/apm) manifest (akit
+//! stores it under its own filename, `akit.yml`):
 //!
 //! ```yaml
 //! name: akit-collection
@@ -29,8 +30,8 @@ use crate::collection::Collection;
 use crate::lockfile::ItemType;
 use crate::remote::SourceSpec;
 
-/// Manifest filename at the collection root (APM-compatible).
-pub const MANIFEST_FILE: &str = "apm.yml";
+/// Manifest filename at the collection root (APM-compatible contents).
+pub const MANIFEST_FILE: &str = "akit.yml";
 
 /// Default manifest `name` when scaffolding a fresh file.
 const DEFAULT_NAME: &str = "akit-collection";
