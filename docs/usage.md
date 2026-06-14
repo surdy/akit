@@ -21,6 +21,7 @@ cargo build --release
 
   ```text
   <collection>/
+    apm.yml                  # manifest of remotely-pulled items (for `ckit restore`)
     skills/<name>/SKILL.md
     agents/<name>.agent.md
     bundles/<name>.yml
@@ -33,6 +34,8 @@ project.
 
 You can populate the collection by hand (move/copy files into the layout above) or fetch a
 remote source straight into it with [`ckit pull`](#pull--fetch-a-remote-source-into-the-collection).
+Each `pull` records its source in a collection manifest (`apm.yml`) so a new machine can be
+rebootstrapped with [`ckit restore`](#restore--rebootstrap-the-collection-from-the-manifest).
 
 Bundles are named YAML manifests that install a set of skills and agents together:
 
@@ -181,6 +184,75 @@ $ ckit search deploy
 skill  Deploy to Vercel  — Ship apps to Vercel (ops)
 $ ckit add deploy-to-vercel   # materialize it into a project
 ```
+
+### `restore` — rebootstrap the collection from the manifest
+
+```text
+ckit restore [--force]
+```
+
+Re-fetches every remotely-pulled item recorded in the collection manifest (`apm.yml`), so you
+can recreate your collection on a new machine. Run it after copying just `apm.yml` to a fresh
+`~/.copilot-kit/collection/`:
+
+```bash
+$ ckit restore
+  pulled skill 'deploy-to-vercel' from vercel-labs/agent-skills/deploy-to-vercel#main
+  pulled agent 'reviewer' from acme/kits/reviewer.agent.md#main
+Restored 2 item(s): 2 pulled, 0 already present, 0 overwritten, 0 error(s).
+```
+
+- Each entry is re-pulled under its recorded id, so `--as` aliases are reproduced exactly.
+- Items already present and identical are left untouched (idempotent). `--force` overwrites a
+  collection item that has drifted from its recorded source.
+- A failed item does not abort the run; remaining items are still restored. `restore` exits
+  non-zero if **any** item failed.
+- The manifest only tracks remote pulls. Hand-authored skills/agents are your own content —
+  keep those under version control yourself.
+
+#### The manifest (`apm.yml`)
+
+`pull` records each remote item in `<collection>/apm.yml`, using the
+[APM](https://github.com/microsoft/apm) manifest shape:
+
+```yaml
+name: copilot-kit-collection
+version: 0.0.0
+dependencies:
+  apm:
+    - vercel-labs/agent-skills/deploy-to-vercel#main   # skill (string shorthand)
+    - acme/kits/reviewer.agent.md#main                 # agent (.agent.md file primitive)
+    - git: acme/kits                                   # custom id via object form
+      path: skills/deploy-to-vercel
+      ref: main
+      alias: vercel
+```
+
+Skills are recorded as the APM string shorthand `owner/repo/path[#ref]`; agents use the same
+shorthand with the `.agent.md` extension (APM's file-primitive convention); a `--as <id>` pull
+is stored as the APM object form carrying the custom id as `alias`. Entries are upserted by
+`(type, id)`, and unknown keys (`name`, `author`, …) are preserved across rewrites. `restore`
+classifies an entry as an agent when its path ends in `.agent.md`, otherwise a skill.
+
+With `--json`, `restore` emits a stable object:
+
+```json
+{
+  "items": [
+    {
+      "id": "deploy-to-vercel",
+      "type": "skill",
+      "source": "vercel-labs/agent-skills/deploy-to-vercel",
+      "ref": "main",
+      "status": "pulled"
+    }
+  ],
+  "summary": { "pulled": 1, "already_present": 0, "overwritten": 0, "errors": 0 }
+}
+```
+
+`status` is one of `pulled`, `already-present`, `overwritten`, or `error`; failed items add an
+`error` string.
 
 ### `rm` — remove a skill or agent from the project
 

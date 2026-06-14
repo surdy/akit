@@ -10,6 +10,7 @@ use crate::collection::Collection;
 use crate::fsops;
 use crate::gitexclude;
 use crate::lockfile::{ItemType, LockItem, Lockfile, Mode};
+use crate::manifest;
 use crate::project::Project;
 use crate::remote::{self, SourceSpec};
 
@@ -153,7 +154,31 @@ pub struct PullReport {
 /// seeds a reusable **collection** item (`skills/<id>/` or `agents/<id>.agent.md`) so it can
 /// later be added, searched, and previewed like any other local item. The copy is standalone,
 /// independent of the git-fetch cache.
+///
+/// The remote provenance is recorded in the collection manifest ([`manifest`]) so the item can
+/// be re-fetched on a new machine with [`restore_collection`].
 pub fn pull_into_collection(
+    collection: &Collection,
+    spec: &SourceSpec,
+    item_type: ItemType,
+    as_id: Option<&str>,
+    base_url: &str,
+    force: bool,
+) -> Result<PullReport> {
+    let report = pull_copy(collection, spec, item_type, as_id, base_url, force)?;
+    manifest::record(
+        collection,
+        &manifest::ManifestEntry {
+            spec: spec.clone(),
+            item_type,
+            id: report.id.clone(),
+        },
+    )?;
+    Ok(report)
+}
+
+/// Copy a remote source into the collection without touching the manifest.
+fn pull_copy(
     collection: &Collection,
     spec: &SourceSpec,
     item_type: ItemType,
@@ -206,6 +231,113 @@ pub fn pull_into_collection(
         created,
         overwritten,
     })
+}
+
+/// Status of a single item processed by [`restore_collection`].
+#[derive(Debug, Clone, Copy, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum RestoreStatus {
+    /// Newly fetched and written into the collection.
+    Pulled,
+    /// Already present and identical; nothing changed.
+    AlreadyPresent,
+    /// Present but differed; overwritten because `force` was set.
+    Overwritten,
+    /// Could not be restored (see `error`).
+    Error,
+}
+
+/// Per-item result of a restore.
+#[derive(Debug, Serialize)]
+pub struct RestoreItem {
+    pub id: String,
+    #[serde(rename = "type")]
+    pub item_type: ItemType,
+    /// `owner/repo/path` source the item is fetched from.
+    pub source: String,
+    #[serde(rename = "ref", skip_serializing_if = "Option::is_none")]
+    pub git_ref: Option<String>,
+    pub status: RestoreStatus,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+/// Aggregate counts for a restore.
+#[derive(Debug, Default, Serialize)]
+pub struct RestoreSummary {
+    pub pulled: usize,
+    pub already_present: usize,
+    pub overwritten: usize,
+    pub errors: usize,
+}
+
+/// Outcome of a `restore` operation.
+#[derive(Debug, Serialize)]
+pub struct RestoreReport {
+    pub items: Vec<RestoreItem>,
+    pub summary: RestoreSummary,
+}
+
+/// Re-fetch every item recorded in the collection manifest.
+///
+/// Each entry is pulled with its recorded id (`--as` semantics) for an exact reproduction.
+/// Per-item failures are collected rather than aborting the whole run; the caller decides how
+/// to react to a non-zero `summary.errors`.
+pub fn restore_collection(
+    collection: &Collection,
+    base_url: &str,
+    force: bool,
+) -> Result<RestoreReport> {
+    let entries = manifest::entries(collection)?;
+    let mut items = Vec::with_capacity(entries.len());
+    let mut summary = RestoreSummary::default();
+
+    for entry in entries {
+        let result = pull_copy(
+            collection,
+            &entry.spec,
+            entry.item_type,
+            Some(&entry.id),
+            base_url,
+            force,
+        );
+        let item = match result {
+            Ok(report) => {
+                let status = if report.overwritten {
+                    summary.overwritten += 1;
+                    RestoreStatus::Overwritten
+                } else if report.created {
+                    summary.pulled += 1;
+                    RestoreStatus::Pulled
+                } else {
+                    summary.already_present += 1;
+                    RestoreStatus::AlreadyPresent
+                };
+                RestoreItem {
+                    id: report.id,
+                    item_type: report.item_type,
+                    source: report.source,
+                    git_ref: report.git_ref,
+                    status,
+                    error: None,
+                }
+            }
+            Err(e) => {
+                summary.errors += 1;
+                RestoreItem {
+                    id: entry.id,
+                    item_type: entry.item_type,
+                    source: entry.spec.source(),
+                    git_ref: entry.spec.ref_.clone(),
+                    status: RestoreStatus::Error,
+                    error: Some(format!("{e:#}")),
+                }
+            }
+        };
+        items.push(item);
+    }
+
+    Ok(RestoreReport { items, summary })
 }
 
 fn ensure_simple_id(id: &str) -> Result<()> {
