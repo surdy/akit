@@ -95,6 +95,12 @@ enum Commands {
         /// Remote source: owner/repo/path[#ref].
         source: String,
     },
+    /// Re-fetch every remote item recorded in the collection manifest (apm.yml).
+    Restore {
+        /// Overwrite collection items that differ from their recorded source.
+        #[arg(long)]
+        force: bool,
+    },
 }
 
 fn main() {
@@ -287,6 +293,18 @@ fn run() -> Result<()> {
                 println!("{}", pull_report_line(&report));
             }
         }
+        Commands::Restore { force } => {
+            let collection = Collection::locate()?;
+            let report = ops::restore_collection(&collection, &remote_base_url(), *force)?;
+            if cli.json {
+                println!("{}", serde_json::to_string(&report)?);
+            } else {
+                print_restore_report(&report);
+            }
+            if report.summary.errors > 0 {
+                std::process::exit(1);
+            }
+        }
     }
     Ok(())
 }
@@ -391,6 +409,53 @@ fn pull_report_line(report: &ops::PullReport) -> String {
         source,
         report.path
     )
+}
+
+fn restore_status_label(status: ops::RestoreStatus) -> &'static str {
+    match status {
+        ops::RestoreStatus::Pulled => "pulled",
+        ops::RestoreStatus::AlreadyPresent => "already present",
+        ops::RestoreStatus::Overwritten => "overwritten",
+        ops::RestoreStatus::Error => "error",
+    }
+}
+
+fn print_restore_report(report: &ops::RestoreReport) {
+    if report.items.is_empty() {
+        println!("Nothing to restore; collection manifest has no remote items.");
+        return;
+    }
+    for item in &report.items {
+        let source = match &item.git_ref {
+            Some(git_ref) => format!("{}#{git_ref}", item.source),
+            None => item.source.clone(),
+        };
+        match &item.error {
+            Some(error) => eprintln!(
+                "  {} {} '{}' from {}: {error}",
+                restore_status_label(item.status),
+                type_name(item.item_type),
+                item.id,
+                source
+            ),
+            None => println!(
+                "  {} {} '{}' from {}",
+                restore_status_label(item.status),
+                type_name(item.item_type),
+                item.id,
+                source
+            ),
+        }
+    }
+    let s = &report.summary;
+    println!(
+        "Restored {} item(s): {} pulled, {} already present, {} overwritten, {} error(s).",
+        report.items.len(),
+        s.pulled,
+        s.already_present,
+        s.overwritten,
+        s.errors
+    );
 }
 
 fn remove_report_line(report: &ops::RemoveReport) -> String {

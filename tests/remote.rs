@@ -340,3 +340,65 @@ fn pull_remote_into_collection_via_local_bare_repo() {
             .is_file()
     );
 }
+
+#[test]
+fn pull_records_manifest_and_restore_rebootstraps() {
+    let tmp = test_tempdir();
+    let base = tmp.path();
+    let git_base = make_local_bare_remote(base);
+    let cache = base.join("cache");
+    let collection = base.join("collection");
+    let base_url = format!("file://{}", git_base.display());
+
+    // Pull a default-id skill and a custom-id (`--as`) skill.
+    for args in [
+        vec!["pull", "acme/kit-skills/deploy-to-vercel#main"],
+        vec![
+            "pull",
+            "--as",
+            "vercel",
+            "acme/kit-skills/deploy-to-vercel#main",
+        ],
+    ] {
+        let output = run_ckit_pull(&args, &collection, &cache, &base_url);
+        assert!(
+            output.status.success(),
+            "ckit pull failed\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    // The manifest records both items (shorthand for the default id, object form for `--as`).
+    let manifest = fs::read_to_string(collection.join("apm.yml")).unwrap();
+    assert!(
+        manifest.contains("acme/kit-skills/deploy-to-vercel#main"),
+        "{manifest}"
+    );
+    assert!(manifest.contains("alias: vercel"), "{manifest}");
+
+    // Simulate a fresh machine: wipe the materialized items but keep the manifest.
+    fs::remove_dir_all(collection.join("skills")).unwrap();
+    assert!(!collection.join("skills/deploy-to-vercel").exists());
+
+    // Restore re-fetches everything in the manifest.
+    let output = run_ckit_pull(&["restore"], &collection, &cache, &base_url);
+    assert!(
+        output.status.success(),
+        "ckit restore failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(json["summary"]["pulled"], 2);
+    assert_eq!(json["summary"]["errors"], 0);
+    assert!(collection.join("skills/deploy-to-vercel/SKILL.md").is_file());
+    assert!(collection.join("skills/vercel/SKILL.md").is_file());
+
+    // Restore is idempotent: a second run reports everything already present.
+    let output = run_ckit_pull(&["restore"], &collection, &cache, &base_url);
+    assert!(output.status.success());
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(json["summary"]["already_present"], 2);
+    assert_eq!(json["summary"]["pulled"], 0);
+}

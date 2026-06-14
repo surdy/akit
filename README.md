@@ -42,10 +42,12 @@ See [`docs/design.md`](docs/design.md) for the full design, decisions, and Phase
 ## Shared contracts (frozen by issue #1, the walking skeleton)
 
 - **Collection layout:** `$KIT_COLLECTION_DIR` (default `~/.copilot-kit/collection`) with
-  `skills/<name>/SKILL.md`, `agents/<name>.agent.md`, and `bundles/<name>.yml`.
+  `skills/<name>/SKILL.md`, `agents/<name>.agent.md`, `bundles/<name>.yml`, and an `apm.yml`
+  manifest of remotely-pulled items.
 - **Lockfile:** `<project>/.copilot/kit.lock.json` (gitignored):
   `{ "version": 1, "items": [ { "id", "type", "source", "ref", "mode", "target", "bundle"? } ] }`.
 - **fs helpers:** `materialize(item, mode)`, `addExclude`/`removeExclude` on `.git/info/exclude`.
 - **CLI scaffold:** `ckit <cmd> [--project <dir>] [--json]`; commands include `add [--copy]`, `rm`,
-  `add --bundle`, `rm --bundle`, `ls`/`status`, `search`, `show`, `sync`, `doctor`, and
-  `pull` (fetch a remote source into the collection).
+  `add --bundle`, `rm --bundle`, `ls`/`status`, `search`, `show`, `sync`, `doctor`,
+  `pull` (fetch a remote source into the collection), and `restore` (rebootstrap the collection
+  from `apm.yml`).

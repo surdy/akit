@@ -13,6 +13,7 @@ pub mod doctor;
 pub mod fsops;
 pub mod gitexclude;
 pub mod lockfile;
+pub mod manifest;
 pub mod ops;
 pub mod project;
 pub mod remote;
