@@ -360,6 +360,62 @@ For `search`, `--json` emits a stable array of objects:
 `type` is `"skill"` or `"agent"`. Missing `description` and `category` serialize as empty
 strings. Empty-query results use score `0`.
 
+### `show` — preview a collection item
+
+```bash
+ckit show [--agent] <id>
+```
+
+- Reads a single item from the collection and prints its frontmatter and raw content,
+  without touching the project.
+- Defaults to a skill (`<collection>/skills/<id>/SKILL.md`); pass `--agent` to read an
+  agent (`<collection>/agents/<id>.agent.md`).
+- Reuses the same frontmatter parsing as `search` (`name`, `description`, `category`); a
+  missing `name` falls back to the `<id>`, and malformed frontmatter warns to stderr and
+  falls back to available fields.
+- Exits non-zero with an error when the id or its markdown file is missing.
+- Supports the global `--json` flag. The global `--project` flag is accepted but `show`
+  reads only the collection.
+
+Human output is a header (`type · name · category`), the description and source path, then
+the raw file content:
+
+```text
+$ ckit show deploy-helper
+skill · Deploy Helper · ops
+Ship apps safely
+/home/you/.copilot-kit/collection/skills/deploy-helper/SKILL.md
+
+---
+name: Deploy Helper
+description: Ship apps safely
+category: ops
+---
+# Deploy Helper
+...
+```
+
+For `show`, `--json` emits a stable object:
+
+```json
+{
+  "type": "skill",
+  "id": "deploy-helper",
+  "name": "Deploy Helper",
+  "description": "Ship apps safely",
+  "category": "ops",
+  "path": "/home/you/.copilot-kit/collection/skills/deploy-helper/SKILL.md",
+  "content": "---\nname: Deploy Helper\n...\n"
+}
+```
+
+`type` is `"skill"` or `"agent"`. `name` falls back to `id`; missing `description` and
+`category` serialize as empty strings. `path` is the absolute source path and `content` is
+the full file (frontmatter included).
+
+> Remote-source and bundle-member preview are not yet supported — `show` reads local
+> collection items only.
+
 ## How it stays out of your repo
 
 Pulls live under `.github/skills/`, `.github/agents/`, and `.copilot/kit.lock.json`, all added to

@@ -17,3 +17,4 @@ pub mod ops;
 pub mod project;
 pub mod remote;
 pub mod search;
+pub mod show;

@@ -13,6 +13,7 @@ use ckit::ops::{HealthStatus, ListItem};
 use ckit::project::Project;
 use ckit::remote::{self, SourceSpec};
 use ckit::search::{self, SearchHit};
+use ckit::show;
 
 #[derive(Parser)]
 #[command(
@@ -71,6 +72,14 @@ enum Commands {
     Search {
         /// Query to fuzzy-match against name and description (empty lists everything).
         query: Option<String>,
+    },
+    /// Print a read-only preview of a collection item (frontmatter + content).
+    Show {
+        /// Show an agent (`agents/<id>.agent.md`) instead of a skill.
+        #[arg(long)]
+        agent: bool,
+        /// Item id: a skill directory name, or an agent file stem.
+        id: String,
     },
 }
 
@@ -229,6 +238,15 @@ fn run() -> Result<()> {
                 println!("{}", serde_json::to_string(&hits)?);
             } else {
                 print_search_hits(&hits);
+            }
+        }
+        Commands::Show { agent, id } => {
+            let collection = Collection::locate()?;
+            let preview = show::show(&collection, id, item_type(*agent))?;
+            if cli.json {
+                println!("{}", serde_json::to_string(&preview)?);
+            } else {
+                print_item_preview(&preview);
             }
         }
     }
@@ -538,5 +556,23 @@ fn print_search_hits(hits: &[SearchHit]) {
         } else {
             println!("{}  {}  — {}", type_name(hit.item_type), hit.name, details);
         }
+    }
+}
+
+fn print_item_preview(preview: &show::ItemPreview) {
+    let mut header = format!("{} · {}", type_name(preview.item_type), preview.name);
+    if !preview.category.is_empty() {
+        header.push_str(" · ");
+        header.push_str(&preview.category);
+    }
+    println!("{header}");
+    if !preview.description.is_empty() {
+        println!("{}", preview.description);
+    }
+    println!("{}", preview.path.display());
+    println!();
+    print!("{}", preview.content);
+    if !preview.content.ends_with('\n') {
+        println!();
     }
 }

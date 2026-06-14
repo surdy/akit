@@ -23,10 +23,10 @@ pub struct SearchHit {
 }
 
 #[derive(Debug, Default)]
-struct Frontmatter {
-    name: Option<String>,
-    description: Option<String>,
-    category: Option<String>,
+pub(crate) struct Frontmatter {
+    pub(crate) name: Option<String>,
+    pub(crate) description: Option<String>,
+    pub(crate) category: Option<String>,
 }
 
 /// Search collection skills and agents by frontmatter name and description.
@@ -131,7 +131,7 @@ fn read_frontmatter(path: &Path) -> Frontmatter {
     }
 }
 
-fn parse_frontmatter(path: &Path, content: &str) -> Frontmatter {
+pub(crate) fn parse_frontmatter(path: &Path, content: &str) -> Frontmatter {
     let mut lines = content.lines();
     if lines.next() != Some("---") {
         eprintln!(
