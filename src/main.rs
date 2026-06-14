@@ -61,9 +61,11 @@ enum Commands {
         /// Name of the item to remove.
         name: Option<String>,
     },
-    /// List installed items and their health.
-    #[command(alias = "status")]
+    /// List every skill and agent in your catalog.
+    #[command(alias = "catalog")]
     Ls,
+    /// List items installed in this project and their health.
+    Status,
     /// Repair missing materializations and git-exclude lines from the lockfile.
     Sync,
     /// Read-only reconcile report for lockfile, files, and git-exclude lines.
@@ -109,18 +111,6 @@ enum Commands {
         /// Catalog id to unpull.
         id: String,
     },
-    /// Inspect your catalog (the local store of skills and agents).
-    Catalog {
-        #[command(subcommand)]
-        command: CatalogCommands,
-    },
-}
-
-#[derive(Subcommand)]
-enum CatalogCommands {
-    /// List every skill and agent in your catalog.
-    #[command(alias = "list")]
-    Ls,
 }
 
 fn main() {
@@ -243,6 +233,15 @@ fn run() -> Result<()> {
             }
         },
         Commands::Ls => {
+            let catalog = Catalog::locate()?;
+            let items = ops::list_catalog(&catalog)?;
+            if cli.json {
+                println!("{}", serde_json::to_string(&items)?);
+            } else {
+                print_catalog_table(&items);
+            }
+        }
+        Commands::Status => {
             let project = Project::locate(cli.project.clone())?;
             let items = ops::list_items(&project)?;
             if cli.json {
@@ -334,17 +333,6 @@ fn run() -> Result<()> {
                 println!("{}", unpull_report_line(&report));
             }
         }
-        Commands::Catalog { command } => match command {
-            CatalogCommands::Ls => {
-                let catalog = Catalog::locate()?;
-                let items = ops::list_catalog(&catalog)?;
-                if cli.json {
-                    println!("{}", serde_json::to_string(&items)?);
-                } else {
-                    print_catalog_table(&items);
-                }
-            }
-        },
     }
     Ok(())
 }

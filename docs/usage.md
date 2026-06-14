@@ -326,11 +326,9 @@ Removed bundle 'web' (3 items)
   Removed agent 'code-reviewer' -> .github/agents/code-reviewer.agent.md (removed)
 ```
 
-### `ls` / `status` — list installed items
+### `status` — list installed items
 
 ```bash
-akit ls
-# alias:
 akit status
 ```
 
@@ -345,7 +343,7 @@ show `-`. Health values:
 Example:
 
 ```bash
-$ akit ls
+$ akit status
 BUNDLE  TYPE   ID                MODE     TARGET                                      STATUS
 web     skill  deploy-to-vercel  symlink  .github/skills/deploy-to-vercel             ok
 web     agent  code-reviewer     symlink  .github/agents/code-reviewer.agent.md       ok
@@ -355,6 +353,9 @@ web     agent  code-reviewer     symlink  .github/agents/code-reviewer.agent.md 
 With `--json`, `status` is serialized as lowercase (`"ok"`, `"orphaned"`, `"missing"`, or
 `"drifted"`), `mode` is `"symlink"` or `"copy"`, and every item includes `bundle` (`null` for
 standalone items).
+
+> `status` lists what's **installed into the current project**. To list everything **available
+> in your catalog**, use [`akit ls`](#ls--list-everything-in-the-catalog).
 
 ### `doctor` — read-only reconcile report
 
@@ -598,38 +599,39 @@ the full file (frontmatter included).
 > Remote-source and bundle-member preview are not yet supported — `show` reads local
 > catalog items only.
 
-### `catalog ls` — list everything in the catalog
+### `ls` — list everything in the catalog
 
 ```bash
-akit catalog ls
+akit ls
 # alias:
-akit catalog list
+akit catalog
 ```
 
 Lists every skill and agent in your catalog, with the **id** you pass to `add`, `show`, and
 `unpull`. Unlike [`search`](#search--search-the-catalog) (which fuzzy-matches and shows each
-item's frontmatter `name`), `catalog ls` is the catalog-wide inventory keyed by id, and it
+item's frontmatter `name`), `ls` is the catalog-wide inventory keyed by id, and it
 records each item's provenance:
 
-- `ls` (project scope) lists what's **installed into the current project**; `catalog ls`
-  (catalog scope) lists what's **available in your catalog**.
+- `ls` (catalog scope) lists what's **available in your catalog**;
+  [`status`](#status--list-installed-items) (project scope) lists what's **installed into the
+  current project**.
 - The `ORIGIN` column shows `owner/repo/path[#ref]` for items recorded as pulled in the
   manifest (`akit.yml`), or `local` for hand-authored items.
 - Sorted skills-first, then by id.
-- Supports the global `--json` flag. The global `--project` flag is accepted but `catalog ls`
+- Supports the global `--json` flag. The global `--project` flag is accepted but `ls`
   reads only the catalog.
 
 Example:
 
 ```bash
-$ akit catalog ls
+$ akit ls
 TYPE   ID             ORIGIN                              DESCRIPTION
 skill  deploy-helper  local                               Ship apps safely
 skill  grill-me       mattpocock/skills/.../grill-me      Stress-test a plan
 agent  reviewer       local                               Review code
 ```
 
-For `catalog ls`, `--json` emits a stable array of objects:
+For `ls`, `--json` emits a stable array of objects:
 
 ```json
 [

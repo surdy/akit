@@ -48,7 +48,7 @@ See [`docs/design.md`](docs/design.md) for the full design, decisions, and Phase
   `{ "version": 1, "items": [ { "id", "type", "source", "ref", "mode", "target", "bundle"? } ] }`.
 - **fs helpers:** `materialize(item, mode)`, `addExclude`/`removeExclude` on `.git/info/exclude`.
 - **CLI scaffold:** `akit <cmd> [--project <dir>] [--json]`; commands include `add [--copy]`, `rm`,
-  `add --bundle`, `rm --bundle`, `ls`/`status` (project scope), `catalog ls` (catalog scope),
-  `search`, `show`, `sync`, `doctor`, `pull` (fetch a remote source into the catalog), `unpull`
-  (remove a pulled item + prune its manifest entry), and `restore` (rebootstrap the catalog from
-  `akit.yml`).
+  `add --bundle`, `rm --bundle`, `ls` (list the whole catalog), `status` (list items installed in
+  the project), `search`, `show`, `sync`, `doctor`, `pull` (fetch a remote source into the
+  catalog), `unpull` (remove a pulled item + prune its manifest entry), and `restore` (rebootstrap
+  the catalog from `akit.yml`).

@@ -80,3 +80,28 @@ fn list_catalog_is_empty_for_a_missing_catalog() {
     let catalog = Catalog::with_root(tmp.path().join("does-not-exist"));
     assert!(ops::list_catalog(&catalog).unwrap().is_empty());
 }
+
+#[test]
+fn cli_ls_lists_the_catalog() {
+    let tmp = tempfile::tempdir().unwrap();
+    let catalog_root = tmp.path().join("catalog");
+    make_skill(
+        &catalog_root,
+        "grill-me",
+        "---\nname: Grill Me\ndescription: Stress-test a plan\n---\nbody\n",
+    );
+
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_akit"))
+        .env("KIT_CATALOG_DIR", &catalog_root)
+        .args(["--json", "ls"])
+        .output()
+        .expect("akit binary should run");
+
+    assert!(
+        output.status.success(),
+        "akit failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("\"id\":\"grill-me\""), "{stdout}");
+}

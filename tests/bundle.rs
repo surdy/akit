@@ -339,7 +339,7 @@ fn cli_add_and_rm_bundle_apply_copy_mode() {
 }
 
 #[test]
-fn cli_ls_labels_and_groups_bundle_items() {
+fn cli_status_labels_and_groups_bundle_items() {
     let tmp = tempfile::tempdir().unwrap();
     let base = tmp.path();
     let catalog_root = base.join("catalog");
@@ -364,7 +364,7 @@ fn cli_ls_labels_and_groups_bundle_items() {
     ops::add_bundle(&project, &catalog, "alpha", Mode::Symlink).unwrap();
 
     let output = Command::new(env!("CARGO_BIN_EXE_akit"))
-        .args(["--project", proj.to_str().unwrap(), "ls"])
+        .args(["--project", proj.to_str().unwrap(), "status"])
         .output()
         .expect("akit binary should run");
 
