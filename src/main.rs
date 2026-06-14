@@ -95,7 +95,7 @@ enum Commands {
         /// Remote source: owner/repo/path[#ref].
         source: String,
     },
-    /// Re-fetch every remote item recorded in the collection manifest (apm.yml).
+    /// Re-fetch every remote item recorded in the collection manifest (akit.yml).
     Restore {
         /// Overwrite collection items that differ from their recorded source.
         #[arg(long)]

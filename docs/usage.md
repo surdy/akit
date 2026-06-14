@@ -21,7 +21,7 @@ cargo build --release
 
   ```text
   <collection>/
-    apm.yml                  # manifest of remotely-pulled items (for `akit restore`)
+    akit.yml                 # manifest of remotely-pulled items (for `akit restore`)
     skills/<name>/SKILL.md
     agents/<name>.agent.md
     bundles/<name>.yml
@@ -34,7 +34,7 @@ project.
 
 You can populate the collection by hand (move/copy files into the layout above) or fetch a
 remote source straight into it with [`akit pull`](#pull--fetch-a-remote-source-into-the-collection).
-Each `pull` records its source in a collection manifest (`apm.yml`) so a new machine can be
+Each `pull` records its source in a collection manifest (`akit.yml`) so a new machine can be
 rebootstrapped with [`akit restore`](#restore--rebootstrap-the-collection-from-the-manifest).
 
 Bundles are named YAML manifests that install a set of skills and agents together:
@@ -191,8 +191,8 @@ $ akit add deploy-to-vercel   # materialize it into a project
 akit restore [--force]
 ```
 
-Re-fetches every remotely-pulled item recorded in the collection manifest (`apm.yml`), so you
-can recreate your collection on a new machine. Run it after copying just `apm.yml` to a fresh
+Re-fetches every remotely-pulled item recorded in the collection manifest (`akit.yml`), so you
+can recreate your collection on a new machine. Run it after copying just `akit.yml` to a fresh
 `~/.akit/collection/`:
 
 ```bash
@@ -210,9 +210,9 @@ Restored 2 item(s): 2 pulled, 0 already present, 0 overwritten, 0 error(s).
 - The manifest only tracks remote pulls. Hand-authored skills/agents are your own content —
   keep those under version control yourself.
 
-#### The manifest (`apm.yml`)
+#### The manifest (`akit.yml`)
 
-`pull` records each remote item in `<collection>/apm.yml`, using the
+`pull` records each remote item in `<collection>/akit.yml`, using the
 [APM](https://github.com/microsoft/apm) manifest shape:
 
 ```yaml

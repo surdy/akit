@@ -42,7 +42,7 @@ See [`docs/design.md`](docs/design.md) for the full design, decisions, and Phase
 ## Shared contracts (frozen by issue #1, the walking skeleton)
 
 - **Collection layout:** `$KIT_COLLECTION_DIR` (default `~/.akit/collection`) with
-  `skills/<name>/SKILL.md`, `agents/<name>.agent.md`, `bundles/<name>.yml`, and an `apm.yml`
+  `skills/<name>/SKILL.md`, `agents/<name>.agent.md`, `bundles/<name>.yml`, and an `akit.yml`
   manifest of remotely-pulled items.
 - **Lockfile:** `<project>/.copilot/kit.lock.json` (gitignored):
   `{ "version": 1, "items": [ { "id", "type", "source", "ref", "mode", "target", "bundle"? } ] }`.
@@ -50,4 +50,4 @@ See [`docs/design.md`](docs/design.md) for the full design, decisions, and Phase
 - **CLI scaffold:** `akit <cmd> [--project <dir>] [--json]`; commands include `add [--copy]`, `rm`,
   `add --bundle`, `rm --bundle`, `ls`/`status`, `search`, `show`, `sync`, `doctor`,
   `pull` (fetch a remote source into the collection), `unpull` (remove a pulled item +
-  prune its manifest entry), and `restore` (rebootstrap the collection from `apm.yml`).
+  prune its manifest entry), and `restore` (rebootstrap the collection from `akit.yml`).

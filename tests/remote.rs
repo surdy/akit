@@ -370,7 +370,7 @@ fn pull_records_manifest_and_restore_rebootstraps() {
     }
 
     // The manifest records both items (shorthand for the default id, object form for `--as`).
-    let manifest = fs::read_to_string(collection.join("apm.yml")).unwrap();
+    let manifest = fs::read_to_string(collection.join("akit.yml")).unwrap();
     assert!(
         manifest.contains("acme/kit-skills/deploy-to-vercel#main"),
         "{manifest}"
@@ -435,7 +435,7 @@ fn unpull_removes_collection_item_and_prunes_manifest() {
 
     // Collection item is gone and the manifest no longer lists it.
     assert!(!collection.join("skills/deploy-to-vercel").exists());
-    let manifest = fs::read_to_string(collection.join("apm.yml")).unwrap();
+    let manifest = fs::read_to_string(collection.join("akit.yml")).unwrap();
     assert!(!manifest.contains("deploy-to-vercel"), "{manifest}");
 
     // Restore now has nothing to do for that item.
