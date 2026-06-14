@@ -402,3 +402,55 @@ fn pull_records_manifest_and_restore_rebootstraps() {
     assert_eq!(json["summary"]["already_present"], 2);
     assert_eq!(json["summary"]["pulled"], 0);
 }
+
+#[test]
+fn unpull_removes_collection_item_and_prunes_manifest() {
+    let tmp = test_tempdir();
+    let base = tmp.path();
+    let git_base = make_local_bare_remote(base);
+    let cache = base.join("cache");
+    let collection = base.join("collection");
+    let base_url = format!("file://{}", git_base.display());
+
+    // Pull a skill, then unpull it.
+    let output = run_akit_pull(
+        &["pull", "acme/kit-skills/deploy-to-vercel#main"],
+        &collection,
+        &cache,
+        &base_url,
+    );
+    assert!(output.status.success());
+    assert!(collection.join("skills/deploy-to-vercel/SKILL.md").is_file());
+
+    let output = run_akit_pull(&["unpull", "deploy-to-vercel"], &collection, &cache, &base_url);
+    assert!(
+        output.status.success(),
+        "akit unpull failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(json["id"], "deploy-to-vercel");
+    assert_eq!(json["item_removed"], true);
+
+    // Collection item is gone and the manifest no longer lists it.
+    assert!(!collection.join("skills/deploy-to-vercel").exists());
+    let manifest = fs::read_to_string(collection.join("apm.yml")).unwrap();
+    assert!(!manifest.contains("deploy-to-vercel"), "{manifest}");
+
+    // Restore now has nothing to do for that item.
+    let output = run_akit_pull(&["restore"], &collection, &cache, &base_url);
+    assert!(output.status.success());
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(json["summary"]["pulled"], 0);
+    assert!(!collection.join("skills/deploy-to-vercel").exists());
+
+    // Unpulling something that was never pulled fails and touches nothing.
+    let output = run_akit_pull(&["unpull", "never-pulled"], &collection, &cache, &base_url);
+    assert!(!output.status.success());
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("nothing to unpull"),
+        "stderr:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}

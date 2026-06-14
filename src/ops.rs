@@ -340,6 +340,63 @@ pub fn restore_collection(
     Ok(RestoreReport { items, summary })
 }
 
+/// Outcome of an `unpull` operation (the inverse of [`pull_into_collection`]).
+#[derive(Debug, Serialize)]
+pub struct UnpullReport {
+    pub id: String,
+    #[serde(rename = "type")]
+    pub item_type: ItemType,
+    /// `owner/repo/path` source the item had been pulled from.
+    pub source: String,
+    #[serde(rename = "ref", skip_serializing_if = "Option::is_none")]
+    pub git_ref: Option<String>,
+    /// Collection path that was (or would have been) removed.
+    pub path: String,
+    /// Whether files were actually removed from disk (false if already absent).
+    pub item_removed: bool,
+}
+
+/// Remove a previously pulled item from the collection and prune its manifest entry.
+///
+/// The inverse of [`pull_into_collection`]: it deletes the collection copy
+/// (`skills/<id>/` or `agents/<id>.agent.md`) and removes the matching manifest entry.
+///
+/// Only items recorded in the manifest can be unpulled. If `id` has no manifest entry this
+/// fails without touching the filesystem, so hand-authored skills/agents are never deleted
+/// this way.
+pub fn unpull_from_collection(
+    collection: &Collection,
+    item_type: ItemType,
+    id: &str,
+) -> Result<UnpullReport> {
+    ensure_simple_id(id)?;
+    let entry = manifest::entries(collection)?
+        .into_iter()
+        .find(|e| e.item_type == item_type && e.id == id)
+        .with_context(|| {
+            format!(
+                "no pulled {} '{id}' in the collection manifest; nothing to unpull",
+                type_label(item_type)
+            )
+        })?;
+
+    let dst = match item_type {
+        ItemType::Skill => collection.skill_source(id),
+        ItemType::Agent => collection.agent_source(id),
+    };
+    let item_removed = fsops::remove(&dst)?;
+    manifest::remove(collection, item_type, id)?;
+
+    Ok(UnpullReport {
+        id: id.to_string(),
+        item_type,
+        source: entry.spec.source(),
+        git_ref: entry.spec.ref_,
+        path: dst.display().to_string(),
+        item_removed,
+    })
+}
+
 fn ensure_simple_id(id: &str) -> Result<()> {
     if id.is_empty() || id == "." || id == ".." || id.contains('/') || id.contains('\\') {
         anyhow::bail!("invalid collection id '{id}'; expected a single path segment");

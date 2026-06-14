@@ -254,6 +254,46 @@ With `--json`, `restore` emits a stable object:
 `status` is one of `pulled`, `already-present`, `overwritten`, or `error`; failed items add an
 `error` string.
 
+### `unpull` — remove a pulled item from the collection
+
+```text
+akit unpull [--agent] <id>
+```
+
+The inverse of [`pull`](#pull--fetch-a-remote-source-into-the-collection): it deletes the
+collection item (`skills/<id>/` or `agents/<id>.agent.md`) **and** prunes its entry from the
+manifest, so [`restore`](#restore--rebootstrap-the-collection-from-the-manifest) won't bring it
+back.
+
+```bash
+$ akit unpull deploy-to-vercel
+Unpulled skill 'deploy-to-vercel' (from vercel-labs/agent-skills/deploy-to-vercel#main) -> /home/you/.akit/collection/skills/deploy-to-vercel (removed)
+
+$ akit unpull --agent reviewer
+Unpulled agent 'reviewer' (from acme/kits/reviewer.agent.md#main) -> /home/you/.akit/collection/agents/reviewer.agent.md (removed)
+```
+
+- Only **recorded pulls** can be unpulled. If `<id>` has no manifest entry, `unpull` errors and
+  touches nothing — so hand-authored skills/agents are never deleted this way (remove those by
+  hand).
+- It still prunes the manifest entry when the files are already gone (reported as
+  `manifest entry pruned; files were already absent`).
+- The global `--project` flag is accepted but unused — `unpull` only touches the collection.
+
+With `--json`, `unpull` emits a stable object (`item_removed` is `false` when the files were
+already absent):
+
+```json
+{
+  "id": "deploy-to-vercel",
+  "type": "skill",
+  "source": "vercel-labs/agent-skills/deploy-to-vercel",
+  "ref": "main",
+  "path": "/home/you/.akit/collection/skills/deploy-to-vercel",
+  "item_removed": true
+}
+```
+
 ### `rm` — remove a skill or agent from the project
 
 ```bash
