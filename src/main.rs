@@ -81,6 +81,20 @@ enum Commands {
         /// Item id: a skill directory name, or an agent file stem.
         id: String,
     },
+    /// Fetch a remote owner/repo/path[#ref] source into your local collection.
+    Pull {
+        /// Pull an agent (`.agent.md`) instead of a skill.
+        #[arg(long)]
+        agent: bool,
+        /// Store under this id instead of the source's last path segment.
+        #[arg(long = "as")]
+        as_id: Option<String>,
+        /// Overwrite an existing collection item that differs from the source.
+        #[arg(long)]
+        force: bool,
+        /// Remote source: owner/repo/path[#ref].
+        source: String,
+    },
 }
 
 fn main() {
@@ -249,6 +263,30 @@ fn run() -> Result<()> {
                 print_item_preview(&preview);
             }
         }
+        Commands::Pull {
+            agent,
+            as_id,
+            force,
+            source,
+        } => {
+            let Some(spec) = SourceSpec::parse(source) else {
+                bail!("invalid remote source spec '{source}'; expected owner/repo/path[#ref]")
+            };
+            let collection = Collection::locate()?;
+            let report = ops::pull_into_collection(
+                &collection,
+                &spec,
+                item_type(*agent),
+                as_id.as_deref(),
+                &remote_base_url(),
+                *force,
+            )?;
+            if cli.json {
+                println!("{}", serde_json::to_string(&report)?);
+            } else {
+                println!("{}", pull_report_line(&report));
+            }
+        }
     }
     Ok(())
 }
@@ -331,6 +369,27 @@ fn add_report_line(report: &ops::AddReport) -> String {
         type_name(report.item_type),
         report.id,
         report.target
+    )
+}
+
+fn pull_report_line(report: &ops::PullReport) -> String {
+    let action = if report.overwritten {
+        "overwritten"
+    } else if report.created {
+        "copied"
+    } else {
+        "already present"
+    };
+    let source = match &report.git_ref {
+        Some(git_ref) => format!("{}#{git_ref}", report.source),
+        None => report.source.clone(),
+    };
+    format!(
+        "Pulled {} '{}' from {} -> {} ({action})",
+        type_name(report.item_type),
+        report.id,
+        source,
+        report.path
     )
 }
 

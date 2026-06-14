@@ -248,3 +248,95 @@ fn live_vercel_skill_can_be_added() {
             .is_file()
     );
 }
+
+fn run_ckit_pull(
+    args: &[&str],
+    collection: &Path,
+    cache: &Path,
+    base_url: &str,
+) -> std::process::Output {
+    Command::new(env!("CARGO_BIN_EXE_ckit"))
+        .args(["--json"])
+        .args(args)
+        .env(remote::ENV_CACHE_DIR, cache)
+        .env("KIT_COLLECTION_DIR", collection)
+        .env(remote::ENV_REMOTE_BASE_URL, base_url)
+        .output()
+        .expect("ckit binary should run")
+}
+
+#[test]
+fn pull_remote_into_collection_via_local_bare_repo() {
+    let tmp = test_tempdir();
+    let base = tmp.path();
+    let git_base = make_local_bare_remote(base);
+    let cache = base.join("cache");
+    let collection = base.join("collection");
+    let base_url = format!("file://{}", git_base.display());
+
+    // First pull copies the remote skill into the collection.
+    let output = run_ckit_pull(
+        &["pull", "acme/kit-skills/deploy-to-vercel#main"],
+        &collection,
+        &cache,
+        &base_url,
+    );
+    assert!(
+        output.status.success(),
+        "ckit pull failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(json["id"], "deploy-to-vercel");
+    assert_eq!(json["type"], "skill");
+    assert_eq!(json["source"], "acme/kit-skills/deploy-to-vercel");
+    assert_eq!(json["ref"], "main");
+    assert_eq!(json["created"], true);
+    assert_eq!(json["overwritten"], false);
+
+    let skill_dir = collection.join("skills/deploy-to-vercel");
+    assert!(skill_dir.join("SKILL.md").is_file());
+    // It is a standalone copy, not a symlink into the cache.
+    assert!(
+        !fs::symlink_metadata(&skill_dir)
+            .unwrap()
+            .file_type()
+            .is_symlink()
+    );
+
+    // Re-pulling an identical item is an idempotent no-op.
+    let output = run_ckit_pull(
+        &["pull", "acme/kit-skills/deploy-to-vercel#main"],
+        &collection,
+        &cache,
+        &base_url,
+    );
+    assert!(output.status.success());
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(json["created"], false);
+    assert_eq!(json["overwritten"], false);
+
+    // A custom id stores a second copy under that name.
+    let output = run_ckit_pull(
+        &[
+            "pull",
+            "--as",
+            "vercel-deploy",
+            "acme/kit-skills/deploy-to-vercel#main",
+        ],
+        &collection,
+        &cache,
+        &base_url,
+    );
+    assert!(output.status.success());
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(json["id"], "vercel-deploy");
+    assert_eq!(json["created"], true);
+    assert!(
+        collection
+            .join("skills/vercel-deploy/SKILL.md")
+            .is_file()
+    );
+}

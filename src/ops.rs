@@ -128,6 +128,100 @@ pub fn add_item(
     )
 }
 
+/// Outcome of a `pull` operation (fetch a remote source into the local collection).
+#[derive(Debug, Serialize)]
+pub struct PullReport {
+    pub id: String,
+    #[serde(rename = "type")]
+    pub item_type: ItemType,
+    /// `owner/repo/path` source the item was fetched from.
+    pub source: String,
+    /// Source ref, when one was supplied.
+    #[serde(rename = "ref", skip_serializing_if = "Option::is_none")]
+    pub git_ref: Option<String>,
+    /// Absolute path written in the collection.
+    pub path: String,
+    /// Whether files were written (false when an identical copy was already present).
+    pub created: bool,
+    /// Whether an existing, differing item was overwritten (requires `force`).
+    pub overwritten: bool,
+}
+
+/// Fetch a remote `owner/repo/path[#ref]` source and copy it into the local collection.
+///
+/// Unlike [`add_remote`], which materializes a remote source straight into a project, this
+/// seeds a reusable **collection** item (`skills/<id>/` or `agents/<id>.agent.md`) so it can
+/// later be added, searched, and previewed like any other local item. The copy is standalone,
+/// independent of the git-fetch cache.
+pub fn pull_into_collection(
+    collection: &Collection,
+    spec: &SourceSpec,
+    item_type: ItemType,
+    as_id: Option<&str>,
+    base_url: &str,
+    force: bool,
+) -> Result<PullReport> {
+    let src = remote::fetch(spec, base_url)?;
+    let default_id = remote_id(item_type, spec);
+    let id = as_id.unwrap_or(&default_id);
+    ensure_simple_id(id)?;
+    validate_remote_source(item_type, id, &src)?;
+
+    let dst = match item_type {
+        ItemType::Skill => collection.skill_source(id),
+        ItemType::Agent => collection.agent_source(id),
+    };
+
+    let existed = std::fs::symlink_metadata(&dst).is_ok();
+    let mut overwritten = false;
+    let created;
+    if existed {
+        if fsops::drifted(&src, &dst)? {
+            if !force {
+                anyhow::bail!(
+                    "collection already has {} '{id}' at {} and it differs from the source; \
+                     pass --force to overwrite",
+                    type_label(item_type),
+                    dst.display()
+                );
+            }
+            fsops::remove(&dst)?;
+            fsops::materialize(Mode::Copy, &src, &dst)?;
+            overwritten = true;
+            created = true;
+        } else {
+            created = false;
+        }
+    } else {
+        fsops::materialize(Mode::Copy, &src, &dst)?;
+        created = true;
+    }
+
+    Ok(PullReport {
+        id: id.to_string(),
+        item_type,
+        source: spec.source(),
+        git_ref: spec.ref_.clone(),
+        path: dst.display().to_string(),
+        created,
+        overwritten,
+    })
+}
+
+fn ensure_simple_id(id: &str) -> Result<()> {
+    if id.is_empty() || id == "." || id == ".." || id.contains('/') || id.contains('\\') {
+        anyhow::bail!("invalid collection id '{id}'; expected a single path segment");
+    }
+    Ok(())
+}
+
+fn type_label(item_type: ItemType) -> &'static str {
+    match item_type {
+        ItemType::Skill => "skill",
+        ItemType::Agent => "agent",
+    }
+}
+
 /// Pull a remote item into the project through the same materialize/gitignore/lockfile pipeline.
 pub fn add_remote(
     project: &Project,
