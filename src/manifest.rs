@@ -80,6 +80,35 @@ pub fn record(collection: &Collection, entry: &ManifestEntry) -> Result<()> {
     write_value(&path, &root)
 }
 
+/// Remove the manifest entry matching `(item_type, id)`, if present.
+///
+/// Returns whether an entry was removed. Other keys and entries are preserved.
+pub fn remove(collection: &Collection, item_type: ItemType, id: &str) -> Result<bool> {
+    let path = manifest_path(collection);
+    let mut root = load_value(&path)?;
+    let Some(map) = root.as_mapping_mut() else {
+        return Ok(false);
+    };
+    let Some(apm) = map
+        .get_mut("dependencies")
+        .and_then(Value::as_mapping_mut)
+        .and_then(|deps| deps.get_mut("apm"))
+        .and_then(Value::as_sequence_mut)
+    else {
+        return Ok(false);
+    };
+    let before = apm.len();
+    apm.retain(|value| match parse_entry(value) {
+        Some(existing) => !(existing.item_type == item_type && existing.id == id),
+        None => true,
+    });
+    if apm.len() == before {
+        return Ok(false);
+    }
+    write_value(&path, &root)?;
+    Ok(true)
+}
+
 /// Read all remote items recorded in the collection manifest.
 pub fn entries(collection: &Collection) -> Result<Vec<ManifestEntry>> {
     let root = load_value(&manifest_path(collection))?;
@@ -377,5 +406,38 @@ mod tests {
         assert!(text.contains("name: mine"), "{text}");
         assert!(text.contains("version: 1.2.3"), "{text}");
         assert!(text.contains("author: surdy"), "{text}");
+    }
+
+    #[test]
+    fn remove_prunes_matching_entry_and_preserves_others() {
+        let tmp = TempDir::new().unwrap();
+        let c = collection(&tmp);
+        let skill = ManifestEntry {
+            spec: spec("acme/repo/deploy#main"),
+            item_type: ItemType::Skill,
+            id: "deploy".to_string(),
+        };
+        let agent = ManifestEntry {
+            spec: spec("acme/repo/reviewer#main"),
+            item_type: ItemType::Agent,
+            id: "reviewer".to_string(),
+        };
+        record(&c, &skill).unwrap();
+        record(&c, &agent).unwrap();
+
+        // Removing by (type, id) prunes only the matching entry.
+        assert!(remove(&c, ItemType::Skill, "deploy").unwrap());
+        let remaining = entries(&c).unwrap();
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(remaining[0].item_type, ItemType::Agent);
+        assert_eq!(remaining[0].id, "reviewer");
+
+        // A same-id but different-type entry is left untouched.
+        assert!(!remove(&c, ItemType::Skill, "reviewer").unwrap());
+        assert!(remove(&c, ItemType::Agent, "reviewer").unwrap());
+        assert!(entries(&c).unwrap().is_empty());
+
+        // Removing something absent is a no-op.
+        assert!(!remove(&c, ItemType::Skill, "deploy").unwrap());
     }
 }

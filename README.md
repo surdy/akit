@@ -49,5 +49,5 @@ See [`docs/design.md`](docs/design.md) for the full design, decisions, and Phase
 - **fs helpers:** `materialize(item, mode)`, `addExclude`/`removeExclude` on `.git/info/exclude`.
 - **CLI scaffold:** `akit <cmd> [--project <dir>] [--json]`; commands include `add [--copy]`, `rm`,
   `add --bundle`, `rm --bundle`, `ls`/`status`, `search`, `show`, `sync`, `doctor`,
-  `pull` (fetch a remote source into the collection), and `restore` (rebootstrap the collection
-  from `apm.yml`).
+  `pull` (fetch a remote source into the collection), `unpull` (remove a pulled item +
+  prune its manifest entry), and `restore` (rebootstrap the collection from `apm.yml`).

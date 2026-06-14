@@ -101,6 +101,14 @@ enum Commands {
         #[arg(long)]
         force: bool,
     },
+    /// Remove a pulled item from the collection and prune its manifest entry (inverse of pull).
+    Unpull {
+        /// Unpull an agent (`.agent.md`) instead of a skill.
+        #[arg(long)]
+        agent: bool,
+        /// Collection id to unpull.
+        id: String,
+    },
 }
 
 fn main() {
@@ -305,6 +313,15 @@ fn run() -> Result<()> {
                 std::process::exit(1);
             }
         }
+        Commands::Unpull { agent, id } => {
+            let collection = Collection::locate()?;
+            let report = ops::unpull_from_collection(&collection, item_type(*agent), id)?;
+            if cli.json {
+                println!("{}", serde_json::to_string(&report)?);
+            } else {
+                println!("{}", unpull_report_line(&report));
+            }
+        }
     }
     Ok(())
 }
@@ -404,6 +421,25 @@ fn pull_report_line(report: &ops::PullReport) -> String {
     };
     format!(
         "Pulled {} '{}' from {} -> {} ({action})",
+        type_name(report.item_type),
+        report.id,
+        source,
+        report.path
+    )
+}
+
+fn unpull_report_line(report: &ops::UnpullReport) -> String {
+    let source = match &report.git_ref {
+        Some(git_ref) => format!("{}#{git_ref}", report.source),
+        None => report.source.clone(),
+    };
+    let action = if report.item_removed {
+        "removed"
+    } else {
+        "manifest entry pruned; files were already absent"
+    };
+    format!(
+        "Unpulled {} '{}' (from {}) -> {} ({action})",
         type_name(report.item_type),
         report.id,
         source,
