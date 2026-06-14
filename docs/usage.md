@@ -31,6 +31,9 @@ project). Skills are directories containing `SKILL.md`; agents are single
 `agents/<name>.agent.md` files. `ckit` then materializes only the ones you select into a given
 project.
 
+You can populate the collection by hand (move/copy files into the layout above) or fetch a
+remote source straight into it with [`ckit pull`](#pull--fetch-a-remote-source-into-the-collection).
+
 Bundles are named YAML manifests that install a set of skills and agents together:
 
 ```yaml
@@ -110,6 +113,73 @@ Added bundle 'web' (3 items)
   Added skill 'deploy-to-vercel' -> .github/skills/deploy-to-vercel (linked)
   Added skill 'lint-fix' -> .github/skills/lint-fix (linked)
   Added agent 'code-reviewer' -> .github/agents/code-reviewer.agent.md (linked)
+```
+
+### `pull` — fetch a remote source into the collection
+
+```bash
+ckit pull [--agent] [--as <id>] [--force] owner/repo/path[#ref]
+```
+
+Where `add` materializes items *into a project*, `pull` copies a remote source *into your local
+collection* so it becomes a reusable item you can later `add`, `search`, and `show` like any
+hand-authored kit. This is how you populate the collection from shared repositories without
+cloning and copying by hand.
+
+- Fetches `owner/repo/path[#ref]` through the same git-fetch cache as `add` (honoring
+  `$KIT_CACHE_DIR` and `$KIT_REMOTE_BASE_URL`), then **copies** the resolved item into the
+  collection — a standalone copy, independent of the cache.
+- By default the source is a **skill** (`<collection>/skills/<id>/`); with `--agent` it is an
+  agent (`<collection>/agents/<id>.agent.md`). The same path resolution as `add` applies, so a
+  single-segment `path` like `deploy-to-vercel` resolves to `skills/deploy-to-vercel` (or, with
+  `--agent`, `agents/deploy-to-vercel.agent.md`) in the source repo.
+- The collection **id** defaults to the source's last path segment; `--as <id>` stores it under
+  a different name. Ids must be a single path segment (no `/`).
+- Validates the fetched source before writing: a skill must be a directory containing `SKILL.md`;
+  an agent must be a `.agent.md` file.
+- Creates the `skills/` / `agents/` directories if the collection does not exist yet.
+- **Idempotent and safe:** an identical existing item is a no-op (`"created": false`); an item
+  that already exists and *differs* from the source is left untouched and the command errors
+  unless you pass `--force` to overwrite it.
+- The global `--project` flag is accepted but unused — `pull` only touches the collection.
+
+With `--json`, `pull` emits a stable object:
+
+```json
+{
+  "id": "deploy-to-vercel",
+  "type": "skill",
+  "source": "vercel-labs/agent-skills/deploy-to-vercel",
+  "ref": "main",
+  "path": "/home/you/.copilot-kit/collection/skills/deploy-to-vercel",
+  "created": true,
+  "overwritten": false
+}
+```
+
+`type` is `"skill"` or `"agent"`; `ref` is omitted when no `#ref` was supplied. `created` is
+`false` when an identical copy was already present; `overwritten` is `true` only when `--force`
+replaced a differing item.
+
+Example:
+
+```bash
+$ ckit pull vercel-labs/agent-skills/deploy-to-vercel#main
+Pulled skill 'deploy-to-vercel' from vercel-labs/agent-skills/deploy-to-vercel#main -> /home/you/.copilot-kit/collection/skills/deploy-to-vercel (copied)
+
+$ ckit pull --agent acme/kits/reviewer#main
+Pulled agent 'reviewer' from acme/kits/reviewer#main -> /home/you/.copilot-kit/collection/agents/reviewer.agent.md (copied)
+
+$ ckit pull --as vercel vercel-labs/agent-skills/deploy-to-vercel#main
+Pulled skill 'vercel' from vercel-labs/agent-skills/deploy-to-vercel#main -> /home/you/.copilot-kit/collection/skills/vercel (copied)
+```
+
+Once pulled, the item is just another collection entry:
+
+```bash
+$ ckit search deploy
+skill  Deploy to Vercel  — Ship apps to Vercel (ops)
+$ ckit add deploy-to-vercel   # materialize it into a project
 ```
 
 ### `rm` — remove a skill or agent from the project
