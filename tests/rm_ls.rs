@@ -167,7 +167,7 @@ fn ls_reports_orphaned_and_missing_targets() {
 }
 
 #[test]
-fn cli_status_alias_outputs_json_without_catalog() {
+fn cli_status_outputs_json_without_catalog() {
     let tmp = tempfile::tempdir().unwrap();
     let base = tmp.path();
     let (proj, _project) = init_project(base);
