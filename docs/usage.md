@@ -144,6 +144,10 @@ cloning and copying by hand.
 - **Idempotent and safe:** an identical existing item is a no-op (`"created": false`); an item
   that already exists and *differs* from the source is left untouched and the command errors
   unless you pass `--force` to overwrite it.
+- Records the **resolved commit** (the SHA the ref pointed at) in the catalog manifest alongside
+  the symbolic ref, so [`restore`](#restore--rebootstrap-the-catalog-from-the-manifest) is
+  reproducible and [`update`](#update--refresh-pulled-items-to-the-latest-upstream-commit) can
+  report precise `old → new` diffs.
 - The global `--project` flag is accepted but unused — `pull` only touches the catalog.
 
 With `--json`, `pull` emits a stable object:
@@ -156,13 +160,14 @@ With `--json`, `pull` emits a stable object:
   "ref": "main",
   "path": "/home/you/.akit/catalog/skills/deploy-to-vercel",
   "created": true,
-  "overwritten": false
+  "overwritten": false,
+  "commit": "9f3c1a2e…"
 }
 ```
 
 `type` is `"skill"` or `"agent"`; `ref` is omitted when no `#ref` was supplied. `created` is
 `false` when an identical copy was already present; `overwritten` is `true` only when `--force`
-replaced a differing item.
+replaced a differing item. `commit` is the resolved SHA when it could be determined.
 
 Example:
 
@@ -188,7 +193,7 @@ $ akit add deploy-to-vercel   # materialize it into a project
 ### `restore` — rebootstrap the catalog from the manifest
 
 ```text
-akit restore [--force]
+akit restore [--force] [--latest]
 ```
 
 Re-fetches every remotely-pulled item recorded in the catalog manifest (`akit.yml`), so you
@@ -203,6 +208,11 @@ Restored 2 item(s): 2 pulled, 0 already present, 0 overwritten, 0 error(s).
 ```
 
 - Each entry is re-pulled under its recorded id, so `--as` aliases are reproduced exactly.
+- **Reproducible by default.** When an entry records a resolved `commit` (see below), `restore`
+  checks out that exact commit rather than wherever the branch points now — two machines
+  restored a week apart get the same content. Pass `--latest` to instead follow each item's
+  symbolic ref to its newest commit and rewrite the recorded commit. Legacy entries without a
+  recorded commit always follow the ref (and gain a recorded commit on the next restore).
 - Items already present and identical are left untouched (idempotent). `--force` overwrites a
   catalog item that has drifted from its recorded source.
 - A failed item does not abort the run; remaining items are still restored. `restore` exits
@@ -220,19 +230,30 @@ name: akit-catalog
 version: 0.0.0
 dependencies:
   apm:
-    - vercel-labs/agent-skills/deploy-to-vercel#main   # skill (string shorthand)
-    - acme/kits/reviewer.agent.md#main                 # agent (.agent.md file primitive)
+    - acme/kits/reviewer.agent.md#main                 # agent, no recorded commit (legacy form)
+    - git: vercel-labs/agent-skills                    # skill with a resolved commit
+      path: deploy-to-vercel
+      ref: main
+      commit: 9f3c1a2e…                                # exact commit `main` resolved to
     - git: acme/kits                                   # custom id via object form
       path: skills/deploy-to-vercel
       ref: main
+      commit: 1b8d4c0f…
       alias: vercel
 ```
 
-Skills are recorded as the APM string shorthand `owner/repo/path[#ref]`; agents use the same
-shorthand with the `.agent.md` extension (APM's file-primitive convention); a `--as <id>` pull
-is stored as the APM object form carrying the custom id as `alias`. Entries are upserted by
-`(type, id)`, and unknown keys (`name`, `author`, …) are preserved across rewrites. `restore`
-classifies an entry as an agent when its path ends in `.agent.md`, otherwise a skill.
+An entry is stored as the APM **string shorthand** `owner/repo/path[#ref]` (agents use the
+`.agent.md` extension, APM's file-primitive convention) only when it has no recorded commit and
+the default id. As soon as a resolved **`commit`** is recorded — which every `pull`/`update`
+does now — the entry switches to the **object form** (`git` + `path` + `ref` + `commit`, plus
+`alias` for a `--as <id>` pull), because a single string can't carry both the symbolic ref and
+the commit. The loader still accepts the legacy string form, so older `akit.yml` files keep
+working. Entries are upserted by `(type, id)`, and unknown keys (`name`, `author`, …) are
+preserved across rewrites. `restore` classifies an entry as an agent when its path ends in
+`.agent.md`, otherwise a skill.
+
+The recorded `commit` is what makes `restore` reproducible and `update` diffs precise; see those
+commands for how it is consumed and refreshed.
 
 With `--json`, `restore` emits a stable object:
 
@@ -267,7 +288,7 @@ recreate missing items, `update` always contacts the remote so it picks up upstr
 
 ```bash
 $ akit update
-  updated skill 'deploy-to-vercel' from vercel-labs/agent-skills/deploy-to-vercel#main
+  updated skill 'deploy-to-vercel' from vercel-labs/agent-skills/deploy-to-vercel#main (9f3c1a2 → 4b7e0d1)
   up to date agent 'reviewer' from acme/kits/reviewer.agent.md#main
 Updated 2 item(s): 1 updated, 1 up to date, 0 pinned, 0 error(s).
 ```
@@ -278,6 +299,8 @@ Updated 2 item(s): 1 updated, 1 up to date, 0 pinned, 0 error(s).
   or `up to date`. Use it in scripts or before a bulk update.
 - Items pinned to an immutable full commit **SHA** are reported as `pinned` and never refetched
   (a SHA can't move). Branch and tag refs are always re-checked.
+- When an item advances, `update` rewrites the recorded `commit` in the manifest and shows the
+  short `old → new` SHA. Legacy entries without a recorded commit gain one on the first update.
 - Items sharing the same `owner/repo/ref` are fetched from the network only once.
 - A failed item does not abort the run; `update` exits non-zero if **any** item failed.
 
@@ -291,7 +314,9 @@ With `--json`, `update` emits a stable object:
       "type": "skill",
       "source": "vercel-labs/agent-skills/deploy-to-vercel",
       "ref": "main",
-      "status": "updated"
+      "status": "updated",
+      "previous_commit": "9f3c1a2e…",
+      "commit": "4b7e0d1a…"
     }
   ],
   "summary": { "updated": 1, "outdated": 0, "up_to_date": 0, "pinned": 0, "errors": 0 }
@@ -299,7 +324,7 @@ With `--json`, `update` emits a stable object:
 ```
 
 `status` is one of `updated`, `outdated`, `up-to-date`, `pinned`, or `error`; failed items add
-an `error` string.
+an `error` string. `previous_commit`/`commit` are included when known.
 
 ### `drop` — remove an item from the catalog
 

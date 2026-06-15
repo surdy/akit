@@ -53,4 +53,5 @@ See [`docs/design.md`](docs/design.md) for the full design, decisions, and Phase
   catalog), `drop` (remove an item from the catalog + prune its manifest entry if it was
   pulled), `update` (refresh pulled items to the latest upstream commit; `--check` to preview),
   and `restore` (rebootstrap
-  the catalog from `akit.yml`).
+  the catalog from `akit.yml`, pinning each item to its recorded commit; `--latest` to move to
+  the head of its ref).

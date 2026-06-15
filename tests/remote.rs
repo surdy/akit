@@ -381,12 +381,14 @@ fn pull_records_manifest_and_restore_rebootstraps() {
         );
     }
 
-    // The manifest records both items (shorthand for the default id, object form for `--as`).
+    // Recording the resolved commit forces the object form (a string shorthand can't carry both
+    // ref and commit); the `--as` pull additionally carries the alias.
     let manifest = fs::read_to_string(catalog.join("akit.yml")).unwrap();
     assert!(
-        manifest.contains("acme/kit-skills/deploy-to-vercel#main"),
+        manifest.contains("git: acme/kit-skills") && manifest.contains("ref: main"),
         "{manifest}"
     );
+    assert!(manifest.contains("commit: "), "{manifest}");
     assert!(manifest.contains("alias: vercel"), "{manifest}");
 
     // Simulate a fresh machine: wipe the materialized items but keep the manifest.
@@ -599,4 +601,125 @@ fn update_skips_sha_pinned_items() {
     assert_eq!(json["summary"]["pinned"], 1);
     assert_eq!(json["summary"]["outdated"], 0);
     assert_eq!(json["items"][0]["status"], "pinned");
+}
+
+/// The commit SHA currently at the tip of the upstream work tree.
+fn remote_head(base: &Path) -> String {
+    let out = git(&["rev-parse", "HEAD"], &base.join("remote-work"));
+    assert!(out.status.success());
+    String::from_utf8_lossy(&out.stdout).trim().to_string()
+}
+
+#[test]
+fn pull_records_resolved_commit() {
+    let tmp = test_tempdir();
+    let base = tmp.path();
+    let git_base = make_local_bare_remote(base);
+    let cache = base.join("cache");
+    let catalog = base.join("catalog");
+    let base_url = format!("file://{}", git_base.display());
+
+    let output = run_akit_pull(
+        &["pull", "acme/kit-skills/deploy-to-vercel#main"],
+        &catalog,
+        &cache,
+        &base_url,
+    );
+    assert!(output.status.success());
+
+    // The manifest records the exact commit the ref resolved to.
+    let head = remote_head(base);
+    let manifest = fs::read_to_string(catalog.join("akit.yml")).unwrap();
+    assert!(manifest.contains(&format!("commit: {head}")), "{manifest}");
+
+    // ...and `pull --json` surfaces the same commit.
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(json["commit"], head);
+}
+
+#[test]
+fn restore_pins_to_recorded_commit_until_latest() {
+    let tmp = test_tempdir();
+    let base = tmp.path();
+    let git_base = make_local_bare_remote(base);
+    let cache = base.join("cache");
+    let catalog = base.join("catalog");
+    let base_url = format!("file://{}", git_base.display());
+    let skill_md = catalog.join("skills/deploy-to-vercel/SKILL.md");
+
+    // Pull pins the catalog to commit C1 ("body").
+    let output = run_akit_pull(
+        &["pull", "acme/kit-skills/deploy-to-vercel#main"],
+        &catalog,
+        &cache,
+        &base_url,
+    );
+    assert!(output.status.success());
+    let c1 = remote_head(base);
+
+    // Upstream advances to C2 ("updated body").
+    push_remote_change(base, &git_base, "updated body");
+    let c2 = remote_head(base);
+    assert_ne!(c1, c2);
+
+    // Simulate a fresh machine: keep only the manifest.
+    fs::remove_dir_all(catalog.join("skills")).unwrap();
+
+    // Default restore reproduces the *recorded* commit C1, not the upstream head.
+    let output = run_akit_pull(&["restore"], &catalog, &cache, &base_url);
+    assert!(
+        output.status.success(),
+        "akit restore failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let body = fs::read_to_string(&skill_md).unwrap();
+    assert!(body.contains("body") && !body.contains("updated body"), "{body}");
+    let manifest = fs::read_to_string(catalog.join("akit.yml")).unwrap();
+    assert!(manifest.contains(&format!("commit: {c1}")), "{manifest}");
+
+    // `restore --latest` moves to the head of the ref (C2) and rewrites the recorded commit.
+    let output = run_akit_pull(&["restore", "--latest", "--force"], &catalog, &cache, &base_url);
+    assert!(
+        output.status.success(),
+        "akit restore --latest failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(fs::read_to_string(&skill_md).unwrap().contains("updated body"));
+    let manifest = fs::read_to_string(catalog.join("akit.yml")).unwrap();
+    assert!(manifest.contains(&format!("commit: {c2}")), "{manifest}");
+}
+
+#[test]
+fn update_advances_and_records_commit() {
+    let tmp = test_tempdir();
+    let base = tmp.path();
+    let git_base = make_local_bare_remote(base);
+    let cache = base.join("cache");
+    let catalog = base.join("catalog");
+    let base_url = format!("file://{}", git_base.display());
+
+    let output = run_akit_pull(
+        &["pull", "acme/kit-skills/deploy-to-vercel#main"],
+        &catalog,
+        &cache,
+        &base_url,
+    );
+    assert!(output.status.success());
+    let c1 = remote_head(base);
+
+    push_remote_change(base, &git_base, "updated body");
+    let c2 = remote_head(base);
+
+    let output = run_akit_pull(&["update"], &catalog, &cache, &base_url);
+    assert!(output.status.success());
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(json["items"][0]["status"], "updated");
+    assert_eq!(json["items"][0]["previous_commit"], c1);
+    assert_eq!(json["items"][0]["commit"], c2);
+
+    // The manifest now records the advanced commit.
+    let manifest = fs::read_to_string(catalog.join("akit.yml")).unwrap();
+    assert!(manifest.contains(&format!("commit: {c2}")), "{manifest}");
 }

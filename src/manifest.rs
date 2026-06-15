@@ -45,6 +45,12 @@ pub struct ManifestEntry {
     pub item_type: ItemType,
     /// Catalog id the item is stored under (after any `--as`).
     pub id: String,
+    /// Commit SHA the symbolic ref resolved to at pull/update time, when known.
+    ///
+    /// Recorded so `restore` can reproduce the exact commit and `update` can report precise
+    /// `old → new` diffs. `None` for legacy entries written before SHA recording and for
+    /// items that could not be resolved to a commit.
+    pub commit: Option<String>,
 }
 
 /// Path to the catalog manifest (may not exist).
@@ -198,29 +204,37 @@ fn canonical_path(entry: &ManifestEntry) -> String {
 fn entry_to_value(entry: &ManifestEntry) -> Value {
     let path = canonical_path(entry);
     let default_id = default_id_for(entry.item_type, &path);
+    let is_default_id = entry.id == default_id;
 
-    if entry.id == default_id {
-        // String shorthand: [owner]/[repo]/[path][#ref].
+    // String shorthand stays the canonical form when there is nothing extra to record: the id is
+    // the default and no resolved commit needs persisting. A recorded commit forces the object
+    // form because a single string can't carry both the symbolic ref and the commit.
+    if is_default_id && entry.commit.is_none() {
         let base = format!("{}/{}/{}", entry.spec.owner, entry.spec.repo, path);
         let shorthand = match &entry.spec.ref_ {
             Some(git_ref) => format!("{base}#{git_ref}"),
             None => base,
         };
-        Value::String(shorthand)
-    } else {
-        // Object form carries the custom id as an APM `alias`.
-        let mut object = Mapping::new();
-        object.insert(
-            string("git"),
-            string(&format!("{}/{}", entry.spec.owner, entry.spec.repo)),
-        );
-        object.insert(string("path"), string(&path));
-        if let Some(git_ref) = &entry.spec.ref_ {
-            object.insert(string("ref"), string(git_ref));
-        }
-        object.insert(string("alias"), string(&entry.id));
-        Value::Mapping(object)
+        return Value::String(shorthand);
     }
+
+    // Object form: APM `git`/`path`/`ref`, plus our `commit` and (for `--as`) `alias`.
+    let mut object = Mapping::new();
+    object.insert(
+        string("git"),
+        string(&format!("{}/{}", entry.spec.owner, entry.spec.repo)),
+    );
+    object.insert(string("path"), string(&path));
+    if let Some(git_ref) = &entry.spec.ref_ {
+        object.insert(string("ref"), string(git_ref));
+    }
+    if let Some(commit) = &entry.commit {
+        object.insert(string("commit"), string(commit));
+    }
+    if !is_default_id {
+        object.insert(string("alias"), string(&entry.id));
+    }
+    Value::Mapping(object)
 }
 
 fn parse_entry(value: &Value) -> Option<ManifestEntry> {
@@ -233,6 +247,7 @@ fn parse_entry(value: &Value) -> Option<ManifestEntry> {
                 spec,
                 item_type,
                 id,
+                commit: None,
             })
         }
         Value::Mapping(object) => {
@@ -240,6 +255,10 @@ fn parse_entry(value: &Value) -> Option<ManifestEntry> {
             let path = object.get("path").and_then(Value::as_str);
             let git_ref = object
                 .get("ref")
+                .and_then(Value::as_str)
+                .map(str::to_string);
+            let commit = object
+                .get("commit")
                 .and_then(Value::as_str)
                 .map(str::to_string);
             let alias = object
@@ -261,6 +280,7 @@ fn parse_entry(value: &Value) -> Option<ManifestEntry> {
                 spec,
                 item_type,
                 id,
+                commit,
             })
         }
         _ => None,
@@ -313,6 +333,7 @@ mod tests {
             spec: spec("acme/repo/deploy#main"),
             item_type: ItemType::Skill,
             id: "deploy".to_string(),
+            commit: None,
         };
         record(&c, &entry).unwrap();
 
@@ -330,6 +351,7 @@ mod tests {
             spec: spec("acme/repo/reviewer#main"),
             item_type: ItemType::Agent,
             id: "reviewer".to_string(),
+            commit: None,
         };
         record(&c, &entry).unwrap();
 
@@ -350,6 +372,7 @@ mod tests {
             spec: spec("acme/repo/deploy#main"),
             item_type: ItemType::Skill,
             id: "vercel".to_string(),
+            commit: None,
         };
         record(&c, &entry).unwrap();
 
@@ -357,6 +380,48 @@ mod tests {
         assert!(text.contains("git: acme/repo"), "{text}");
         assert!(text.contains("alias: vercel"), "{text}");
         assert_eq!(entries(&c).unwrap(), vec![entry]);
+    }
+
+    #[test]
+    fn commit_roundtrips_via_object_form() {
+        let tmp = TempDir::new().unwrap();
+        let c = catalog(&tmp);
+        let entry = ManifestEntry {
+            spec: spec("acme/repo/deploy#main"),
+            item_type: ItemType::Skill,
+            id: "deploy".to_string(),
+            commit: Some("0123456789abcdef0123456789abcdef01234567".to_string()),
+        };
+        record(&c, &entry).unwrap();
+
+        // A recorded commit forces the object form (a string can't carry ref + commit) and is
+        // serialized without an `alias` since the id is the default.
+        let text = std::fs::read_to_string(manifest_path(&c)).unwrap();
+        assert!(text.contains("git: acme/repo"), "{text}");
+        assert!(text.contains("ref: main"), "{text}");
+        assert!(
+            text.contains("commit: 0123456789abcdef0123456789abcdef01234567"),
+            "{text}"
+        );
+        assert!(!text.contains("alias:"), "{text}");
+        assert_eq!(entries(&c).unwrap(), vec![entry]);
+    }
+
+    #[test]
+    fn legacy_string_entry_loads_without_commit() {
+        let tmp = TempDir::new().unwrap();
+        let c = catalog(&tmp);
+        std::fs::create_dir_all(&c.root).unwrap();
+        std::fs::write(
+            manifest_path(&c),
+            "name: akit-catalog\nversion: 0.0.0\ndependencies:\n  apm:\n    - acme/repo/deploy#main\n",
+        )
+        .unwrap();
+
+        let got = entries(&c).unwrap();
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].id, "deploy");
+        assert_eq!(got[0].commit, None);
     }
 
     #[test]
@@ -369,6 +434,7 @@ mod tests {
                 spec: spec("acme/repo/deploy#main"),
                 item_type: ItemType::Skill,
                 id: "deploy".to_string(),
+                commit: None,
             },
         )
         .unwrap();
@@ -376,6 +442,7 @@ mod tests {
             spec: spec("acme/repo/deploy#v2"),
             item_type: ItemType::Skill,
             id: "deploy".to_string(),
+            commit: None,
         };
         record(&c, &updated).unwrap();
 
@@ -399,6 +466,7 @@ mod tests {
                 spec: spec("acme/repo/deploy#main"),
                 item_type: ItemType::Skill,
                 id: "deploy".to_string(),
+                commit: None,
             },
         )
         .unwrap();
@@ -417,11 +485,13 @@ mod tests {
             spec: spec("acme/repo/deploy#main"),
             item_type: ItemType::Skill,
             id: "deploy".to_string(),
+            commit: None,
         };
         let agent = ManifestEntry {
             spec: spec("acme/repo/reviewer#main"),
             item_type: ItemType::Agent,
             id: "reviewer".to_string(),
+            commit: None,
         };
         record(&c, &skill).unwrap();
         record(&c, &agent).unwrap();
