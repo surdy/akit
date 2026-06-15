@@ -103,6 +103,17 @@ enum Commands {
         #[arg(long)]
         force: bool,
     },
+    /// Update pulled catalog items to the latest upstream commit of their recorded ref.
+    Update {
+        /// Update an agent (`.agent.md`) instead of a skill (only meaningful with `id`).
+        #[arg(long)]
+        agent: bool,
+        /// Report what would change without writing anything.
+        #[arg(long)]
+        check: bool,
+        /// Catalog id to update; omit to update every pulled item.
+        id: Option<String>,
+    },
     /// Remove a skill or agent from the catalog (prunes its manifest entry if it was pulled).
     Drop {
         /// Drop an agent (`.agent.md`) instead of a skill.
@@ -324,6 +335,19 @@ fn run() -> Result<()> {
                 std::process::exit(1);
             }
         }
+        Commands::Update { agent, check, id } => {
+            let catalog = Catalog::locate()?;
+            let only = id.as_deref().map(|id| (item_type(*agent), id));
+            let report = ops::update_catalog(&catalog, only, &remote_base_url(), *check)?;
+            if cli.json {
+                println!("{}", serde_json::to_string(&report)?);
+            } else {
+                print_update_report(&report, *check);
+            }
+            if report.summary.errors > 0 {
+                std::process::exit(1);
+            }
+        }
         Commands::Drop { agent, id } => {
             let catalog = Catalog::locate()?;
             let report = ops::drop_from_catalog(&catalog, item_type(*agent), id)?;
@@ -505,6 +529,65 @@ fn print_restore_report(report: &ops::RestoreReport) {
         s.overwritten,
         s.errors
     );
+}
+
+fn update_status_label(status: ops::UpdateStatus) -> &'static str {
+    match status {
+        ops::UpdateStatus::Updated => "updated",
+        ops::UpdateStatus::Outdated => "outdated",
+        ops::UpdateStatus::UpToDate => "up to date",
+        ops::UpdateStatus::Pinned => "pinned",
+        ops::UpdateStatus::Error => "error",
+    }
+}
+
+fn print_update_report(report: &ops::UpdateReport, check: bool) {
+    if report.items.is_empty() {
+        println!("Nothing to update; catalog manifest has no remote items.");
+        return;
+    }
+    for item in &report.items {
+        let source = match &item.git_ref {
+            Some(git_ref) => format!("{}#{git_ref}", item.source),
+            None => item.source.clone(),
+        };
+        match &item.error {
+            Some(error) => eprintln!(
+                "  {} {} '{}' from {}: {error}",
+                update_status_label(item.status),
+                type_name(item.item_type),
+                item.id,
+                source
+            ),
+            None => println!(
+                "  {} {} '{}' from {}",
+                update_status_label(item.status),
+                type_name(item.item_type),
+                item.id,
+                source
+            ),
+        }
+    }
+    let s = &report.summary;
+    if check {
+        println!(
+            "Checked {} item(s): {} outdated, {} up to date, {} pinned, {} error(s).",
+            report.items.len(),
+            s.outdated,
+            s.up_to_date,
+            s.pinned,
+            s.errors
+        );
+    } else {
+        println!(
+            "Updated {} item(s): {} updated, {} up to date, {} pinned, {} error(s).",
+            report.items.len(),
+            s.updated,
+            s.up_to_date,
+            s.pinned,
+            s.errors
+        );
+    }
 }
 
 fn remove_report_line(report: &ops::RemoveReport) -> String {

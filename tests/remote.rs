@@ -89,6 +89,18 @@ fn make_local_bare_remote(base: &Path) -> PathBuf {
         ],
         base,
     );
+    // Mirror github.com, which permits fetching any reachable commit by SHA so
+    // SHA-pinned sources can be pulled.
+    assert_git(
+        &[
+            "--git-dir",
+            bare.to_str().unwrap(),
+            "config",
+            "uploadpack.allowReachableSHA1InWant",
+            "true",
+        ],
+        base,
+    );
     git_base
 }
 
@@ -454,4 +466,137 @@ fn drop_removes_catalog_item_and_prunes_manifest() {
         "stderr:\n{}",
         String::from_utf8_lossy(&output.stderr)
     );
+}
+
+/// Commit a new SKILL.md body upstream and push it to the bare remote's `main`.
+fn push_remote_change(base: &Path, git_base: &Path, body: &str) {
+    let work = base.join("remote-work");
+    fs::write(
+        work.join("skills/deploy-to-vercel/SKILL.md"),
+        format!("---\nname: deploy-to-vercel\ndescription: remote test skill\n---\n{body}\n"),
+    )
+    .unwrap();
+    assert_git(&["add", "."], &work);
+    assert_git(
+        &[
+            "-c",
+            "user.email=223556219+Copilot@users.noreply.github.com",
+            "-c",
+            "user.name=surdy",
+            "commit",
+            "-q",
+            "-m",
+            "upstream change",
+        ],
+        &work,
+    );
+    let bare = git_base.join("acme").join("kit-skills");
+    assert_git(&["push", "-q", bare.to_str().unwrap(), "main"], &work);
+}
+
+#[test]
+fn update_refreshes_outdated_catalog_items() {
+    let tmp = test_tempdir();
+    let base = tmp.path();
+    let git_base = make_local_bare_remote(base);
+    let cache = base.join("cache");
+    let catalog = base.join("catalog");
+    let base_url = format!("file://{}", git_base.display());
+    let skill_md = catalog.join("skills/deploy-to-vercel/SKILL.md");
+
+    // Pull a branch-tracking skill.
+    let output = run_akit_pull(
+        &["pull", "acme/kit-skills/deploy-to-vercel#main"],
+        &catalog,
+        &cache,
+        &base_url,
+    );
+    assert!(output.status.success());
+    assert!(fs::read_to_string(&skill_md).unwrap().contains("body"));
+
+    // Nothing changed upstream yet: check reports up-to-date and writes nothing.
+    let output = run_akit_pull(&["update", "--check"], &catalog, &cache, &base_url);
+    assert!(output.status.success());
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(json["summary"]["outdated"], 0);
+    assert_eq!(json["summary"]["up_to_date"], 1);
+
+    // Move upstream forward.
+    push_remote_change(base, &git_base, "updated body");
+
+    // Check now flags the item as outdated without touching the catalog copy.
+    let output = run_akit_pull(&["update", "--check"], &catalog, &cache, &base_url);
+    assert!(output.status.success());
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(json["summary"]["outdated"], 1);
+    assert_eq!(json["items"][0]["status"], "outdated");
+    assert!(fs::read_to_string(&skill_md).unwrap().contains("body"));
+    assert!(!fs::read_to_string(&skill_md).unwrap().contains("updated body"));
+
+    // Applying the update rewrites the catalog copy to the latest commit.
+    let output = run_akit_pull(&["update"], &catalog, &cache, &base_url);
+    assert!(
+        output.status.success(),
+        "akit update failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(json["summary"]["updated"], 1);
+    assert_eq!(json["items"][0]["status"], "updated");
+    assert!(fs::read_to_string(&skill_md).unwrap().contains("updated body"));
+
+    // A second run is a no-op now that the copy matches upstream.
+    let output = run_akit_pull(&["update"], &catalog, &cache, &base_url);
+    assert!(output.status.success());
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(json["summary"]["updated"], 0);
+    assert_eq!(json["summary"]["up_to_date"], 1);
+
+    // Targeting an unknown id is an error.
+    let output = run_akit_pull(&["update", "never-existed"], &catalog, &cache, &base_url);
+    assert!(!output.status.success());
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("nothing to update"),
+        "stderr:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn update_skips_sha_pinned_items() {
+    let tmp = test_tempdir();
+    let base = tmp.path();
+    let git_base = make_local_bare_remote(base);
+    let cache = base.join("cache");
+    let catalog = base.join("catalog");
+    let base_url = format!("file://{}", git_base.display());
+
+    // Resolve the initial commit SHA and pull pinned to it.
+    let head = git(&["rev-parse", "HEAD"], &base.join("remote-work"));
+    assert!(head.status.success());
+    let sha = String::from_utf8_lossy(&head.stdout).trim().to_string();
+    let source = format!("acme/kit-skills/deploy-to-vercel#{sha}");
+
+    let output = run_akit_pull(
+        &["pull", "--as", "pinned", &source],
+        &catalog,
+        &cache,
+        &base_url,
+    );
+    assert!(
+        output.status.success(),
+        "akit pull failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    // Even after upstream moves, a SHA-pinned item is reported as pinned and never refetched.
+    push_remote_change(base, &git_base, "moved on");
+    let output = run_akit_pull(&["update", "--check"], &catalog, &cache, &base_url);
+    assert!(output.status.success());
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(json["summary"]["pinned"], 1);
+    assert_eq!(json["summary"]["outdated"], 0);
+    assert_eq!(json["items"][0]["status"], "pinned");
 }
