@@ -254,6 +254,53 @@ With `--json`, `restore` emits a stable object:
 `status` is one of `pulled`, `already-present`, `overwritten`, or `error`; failed items add an
 `error` string.
 
+### `update` — refresh pulled items to the latest upstream commit
+
+```text
+akit update [--check] [<id> [--agent]]
+```
+
+Re-fetches remotely-pulled catalog items and rewrites them to the **latest commit** of their
+recorded ref (or the repository's default branch when the manifest records no ref). Where
+[`restore`](#restore--rebootstrap-the-catalog-from-the-manifest) reuses the cached checkout to
+recreate missing items, `update` always contacts the remote so it picks up upstream changes:
+
+```bash
+$ akit update
+  updated skill 'deploy-to-vercel' from vercel-labs/agent-skills/deploy-to-vercel#main
+  up to date agent 'reviewer' from acme/kits/reviewer.agent.md#main
+Updated 2 item(s): 1 updated, 1 up to date, 0 pinned, 0 error(s).
+```
+
+- With no `id`, every pulled item is considered; pass an `id` (add `--agent` for an agent) to
+  update just one. An `id` that was never pulled is an error.
+- `--check` reports what would change **without writing anything** — items show as `outdated`
+  or `up to date`. Use it in scripts or before a bulk update.
+- Items pinned to an immutable full commit **SHA** are reported as `pinned` and never refetched
+  (a SHA can't move). Branch and tag refs are always re-checked.
+- Items sharing the same `owner/repo/ref` are fetched from the network only once.
+- A failed item does not abort the run; `update` exits non-zero if **any** item failed.
+
+With `--json`, `update` emits a stable object:
+
+```json
+{
+  "items": [
+    {
+      "id": "deploy-to-vercel",
+      "type": "skill",
+      "source": "vercel-labs/agent-skills/deploy-to-vercel",
+      "ref": "main",
+      "status": "updated"
+    }
+  ],
+  "summary": { "updated": 1, "outdated": 0, "up_to_date": 0, "pinned": 0, "errors": 0 }
+}
+```
+
+`status` is one of `updated`, `outdated`, `up-to-date`, `pinned`, or `error`; failed items add
+an `error` string.
+
 ### `drop` — remove an item from the catalog
 
 ```text

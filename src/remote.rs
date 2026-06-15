@@ -140,6 +140,53 @@ pub fn cached_item_path(spec: &SourceSpec) -> PathBuf {
     resolved_item_path(&checkout_dir(&cache_root(), spec), spec)
 }
 
+/// Force-refresh a cached source to the latest commit of its recorded ref (or the
+/// repository's default branch when no ref was recorded), then return the resolved
+/// item path.
+///
+/// Unlike [`fetch`], which returns an already-cached item without contacting the
+/// remote, this always re-fetches so it picks up upstream commits. It backs
+/// `akit update`.
+pub fn refresh(spec: &SourceSpec, base_url: &str) -> Result<PathBuf> {
+    refresh_with_cache_root(spec, base_url, &cache_root())
+}
+
+/// Refresh using an explicit cache root. Useful for hermetic callers and tests.
+pub fn refresh_with_cache_root(
+    spec: &SourceSpec,
+    base_url: &str,
+    cache_root: &Path,
+) -> Result<PathBuf> {
+    let checkout = checkout_dir(cache_root, spec);
+
+    if is_git_checkout(&checkout) {
+        fetch_latest(&checkout, spec).with_context(|| {
+            format!(
+                "refreshing cached source {} in {}",
+                spec.source(),
+                checkout.display()
+            )
+        })?;
+    } else if checkout.exists() {
+        bail!(
+            "cache path {} exists but is not a git checkout",
+            checkout.display()
+        );
+    } else {
+        clone_checkout(spec, base_url, &checkout)?;
+    }
+
+    let item = resolved_item_path(&checkout, spec);
+    if !item.exists() {
+        bail!(
+            "remote source '{}' not found at {}",
+            spec.source(),
+            item.display()
+        );
+    }
+    Ok(item)
+}
+
 fn valid_path_segment(segment: &str) -> bool {
     !segment.is_empty() && segment != "." && segment != ".." && !segment.contains('\\')
 }
@@ -221,7 +268,10 @@ fn clone_checkout(spec: &SourceSpec, base_url: &str, checkout: &Path) -> Result<
             ],
             None,
         );
-        if branch_clone.is_ok() {
+        // `run_git_status` only errors if git couldn't be spawned, so check the
+        // exit status too: a `--branch <sha>` clone exits non-zero (a SHA isn't a
+        // branch) and must fall through to a plain clone + fetch of the ref.
+        if matches!(&branch_clone, Ok(output) if output.status.success()) {
             return Ok(());
         }
         cleanup_failed_checkout(checkout)?;
@@ -262,6 +312,32 @@ fn fetch_ref(checkout: &Path, spec: &SourceSpec) -> Result<()> {
     let Some(ref_) = spec.ref_.as_deref() else {
         return Ok(());
     };
+    run_git(
+        &[
+            "fetch".into(),
+            "--depth".into(),
+            "1".into(),
+            "origin".into(),
+            ref_.into(),
+        ],
+        Some(checkout),
+    )?;
+    run_git(
+        &[
+            "checkout".into(),
+            "-q".into(),
+            "--detach".into(),
+            "FETCH_HEAD".into(),
+        ],
+        Some(checkout),
+    )
+}
+
+/// Fetch the latest commit of the spec's ref — or the remote's default branch
+/// (`HEAD`) when no ref was recorded — and check it out, replacing the cached
+/// working tree. Unlike [`fetch_ref`], this updates default-branch items too.
+fn fetch_latest(checkout: &Path, spec: &SourceSpec) -> Result<()> {
+    let ref_ = spec.ref_.as_deref().unwrap_or("HEAD");
     run_git(
         &[
             "fetch".into(),

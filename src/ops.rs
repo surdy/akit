@@ -3,8 +3,9 @@
 
 use anyhow::{Context, Result};
 use serde::Serialize;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::ErrorKind;
+use std::path::PathBuf;
 
 use crate::bundle;
 use crate::catalog::Catalog;
@@ -181,7 +182,15 @@ pub fn pull_into_catalog(
     base_url: &str,
     force: bool,
 ) -> Result<PullReport> {
-    let report = pull_copy(catalog, spec, item_type, as_id, base_url, force)?;
+    let report = pull_copy(
+        catalog,
+        spec,
+        item_type,
+        as_id,
+        base_url,
+        FetchMode::Cached,
+        force,
+    )?;
     manifest::record(
         catalog,
         &manifest::ManifestEntry {
@@ -193,6 +202,24 @@ pub fn pull_into_catalog(
     Ok(report)
 }
 
+/// Whether to reuse the source cache as-is or re-fetch the latest commit first.
+#[derive(Debug, Clone, Copy)]
+enum FetchMode {
+    /// Reuse the cached checkout (clone on first use); the default for `pull`/`restore`.
+    Cached,
+    /// Force a re-fetch of the latest commit of the ref before copying; used by `update`.
+    Refresh,
+}
+
+impl FetchMode {
+    fn fetch(self, spec: &SourceSpec, base_url: &str) -> Result<PathBuf> {
+        match self {
+            FetchMode::Cached => remote::fetch(spec, base_url),
+            FetchMode::Refresh => remote::refresh(spec, base_url),
+        }
+    }
+}
+
 /// Copy a remote source into the catalog without touching the manifest.
 fn pull_copy(
     catalog: &Catalog,
@@ -200,9 +227,10 @@ fn pull_copy(
     item_type: ItemType,
     as_id: Option<&str>,
     base_url: &str,
+    fetch_mode: FetchMode,
     force: bool,
 ) -> Result<PullReport> {
-    let src = remote::fetch(spec, base_url)?;
+    let src = fetch_mode.fetch(spec, base_url)?;
     let default_id = remote_id(item_type, spec);
     let id = as_id.unwrap_or(&default_id);
     ensure_simple_id(id)?;
@@ -315,6 +343,7 @@ pub fn restore_catalog(
             entry.item_type,
             Some(&entry.id),
             base_url,
+            FetchMode::Cached,
             force,
         );
         let item = match result {
@@ -354,6 +383,222 @@ pub fn restore_catalog(
     }
 
     Ok(RestoreReport { items, summary })
+}
+
+/// Status of a single item processed by [`update_catalog`].
+#[derive(Debug, Clone, Copy, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum UpdateStatus {
+    /// The catalog copy was refreshed to a newer upstream commit.
+    Updated,
+    /// Upstream has newer content (check mode only; nothing was written).
+    Outdated,
+    /// Already at the latest upstream content; nothing changed.
+    UpToDate,
+    /// Pinned to an immutable full commit SHA; never re-fetched.
+    Pinned,
+    /// Could not be updated (see `error`).
+    Error,
+}
+
+/// Per-item result of an update.
+#[derive(Debug, Serialize)]
+pub struct UpdateItem {
+    pub id: String,
+    #[serde(rename = "type")]
+    pub item_type: ItemType,
+    /// `owner/repo/path` source the item is fetched from.
+    pub source: String,
+    #[serde(rename = "ref", skip_serializing_if = "Option::is_none")]
+    pub git_ref: Option<String>,
+    pub status: UpdateStatus,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+/// Aggregate counts for an update.
+#[derive(Debug, Default, Serialize)]
+pub struct UpdateSummary {
+    pub updated: usize,
+    pub outdated: usize,
+    pub up_to_date: usize,
+    pub pinned: usize,
+    pub errors: usize,
+}
+
+/// Outcome of an `update` operation.
+#[derive(Debug, Serialize)]
+pub struct UpdateReport {
+    pub items: Vec<UpdateItem>,
+    pub summary: UpdateSummary,
+}
+
+/// Whether a ref is an immutable full commit SHA (40 hex for SHA-1, 64 for SHA-256).
+///
+/// Such refs can never move upstream, so `update` reports them as `Pinned` and skips the
+/// network. Tags are also immutable but indistinguishable from branches without a probe;
+/// re-fetching a tag is harmless (it reports `up-to-date`), so only full SHAs get the skip.
+fn is_full_sha(ref_: &str) -> bool {
+    matches!(ref_.len(), 40 | 64) && ref_.bytes().all(|b| b.is_ascii_hexdigit())
+}
+
+/// Fetch the latest source and report whether the catalog copy is outdated, without writing.
+///
+/// A missing destination counts as outdated so `update --check` flags items that need a pull.
+fn pull_check(
+    catalog: &Catalog,
+    spec: &SourceSpec,
+    item_type: ItemType,
+    as_id: Option<&str>,
+    base_url: &str,
+    fetch_mode: FetchMode,
+) -> Result<bool> {
+    let src = fetch_mode.fetch(spec, base_url)?;
+    let default_id = remote_id(item_type, spec);
+    let id = as_id.unwrap_or(&default_id);
+    ensure_simple_id(id)?;
+    validate_remote_source(item_type, id, &src)?;
+
+    let dst = match item_type {
+        ItemType::Skill => catalog.skill_source(id),
+        ItemType::Agent => catalog.agent_source(id),
+    };
+    if std::fs::symlink_metadata(&dst).is_err() {
+        return Ok(true);
+    }
+    fsops::drifted(&src, &dst)
+}
+
+/// Re-fetch the latest upstream content for catalog items recorded in the manifest.
+///
+/// With `only = None`, every recorded item is considered; otherwise only the entry matching the
+/// given `(type, id)` is, and a non-match is an error. Items sharing an `(owner, repo, ref)` are
+/// network-refreshed once (the rest reuse the warmed cache). Full-SHA refs are immutable and
+/// reported as `Pinned` without contacting the remote.
+///
+/// In `check` mode nothing is written; items are reported as `Outdated`/`UpToDate`. Otherwise the
+/// catalog copy is overwritten in place when upstream moved (`Updated`) or left as-is (`UpToDate`).
+/// Per-item failures are collected rather than aborting; the caller reacts to `summary.errors`.
+pub fn update_catalog(
+    catalog: &Catalog,
+    only: Option<(ItemType, &str)>,
+    base_url: &str,
+    check: bool,
+) -> Result<UpdateReport> {
+    let entries = manifest::entries(catalog)?;
+    let mut items = Vec::new();
+    let mut summary = UpdateSummary::default();
+    let mut matched = false;
+    let mut refreshed: HashSet<(String, String, Option<String>)> = HashSet::new();
+
+    for entry in entries {
+        if let Some((ty, id)) = only
+            && (entry.item_type != ty || entry.id != id)
+        {
+            continue;
+        }
+        matched = true;
+
+        if entry.spec.ref_.as_deref().is_some_and(is_full_sha) {
+            summary.pinned += 1;
+            items.push(UpdateItem {
+                id: entry.id,
+                item_type: entry.item_type,
+                source: entry.spec.source(),
+                git_ref: entry.spec.ref_.clone(),
+                status: UpdateStatus::Pinned,
+                error: None,
+            });
+            continue;
+        }
+
+        // Refresh each shared checkout from the network only once.
+        let key = (
+            entry.spec.owner.clone(),
+            entry.spec.repo.clone(),
+            entry.spec.ref_.clone(),
+        );
+        let mode = if refreshed.insert(key) {
+            FetchMode::Refresh
+        } else {
+            FetchMode::Cached
+        };
+
+        let result: Result<UpdateStatus> = if check {
+            pull_check(
+                catalog,
+                &entry.spec,
+                entry.item_type,
+                Some(&entry.id),
+                base_url,
+                mode,
+            )
+            .map(|outdated| {
+                if outdated {
+                    UpdateStatus::Outdated
+                } else {
+                    UpdateStatus::UpToDate
+                }
+            })
+        } else {
+            pull_copy(
+                catalog,
+                &entry.spec,
+                entry.item_type,
+                Some(&entry.id),
+                base_url,
+                mode,
+                true,
+            )
+            .map(|report| {
+                if report.created {
+                    UpdateStatus::Updated
+                } else {
+                    UpdateStatus::UpToDate
+                }
+            })
+        };
+
+        let item = match result {
+            Ok(status) => {
+                match status {
+                    UpdateStatus::Updated => summary.updated += 1,
+                    UpdateStatus::Outdated => summary.outdated += 1,
+                    UpdateStatus::UpToDate => summary.up_to_date += 1,
+                    UpdateStatus::Pinned => summary.pinned += 1,
+                    UpdateStatus::Error => summary.errors += 1,
+                }
+                UpdateItem {
+                    id: entry.id,
+                    item_type: entry.item_type,
+                    source: entry.spec.source(),
+                    git_ref: entry.spec.ref_.clone(),
+                    status,
+                    error: None,
+                }
+            }
+            Err(e) => {
+                summary.errors += 1;
+                UpdateItem {
+                    id: entry.id,
+                    item_type: entry.item_type,
+                    source: entry.spec.source(),
+                    git_ref: entry.spec.ref_.clone(),
+                    status: UpdateStatus::Error,
+                    error: Some(format!("{e:#}")),
+                }
+            }
+        };
+        items.push(item);
+    }
+
+    if let Some((_, id)) = only
+        && !matched
+    {
+        anyhow::bail!("nothing to update: no catalog item with id '{id}' was pulled from a source");
+    }
+
+    Ok(UpdateReport { items, summary })
 }
 
 /// Outcome of a `drop` operation (removing an item from the catalog).
