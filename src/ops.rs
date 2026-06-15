@@ -356,60 +356,69 @@ pub fn restore_catalog(
     Ok(RestoreReport { items, summary })
 }
 
-/// Outcome of an `unpull` operation (the inverse of [`pull_into_catalog`]).
+/// Outcome of a `drop` operation (removing an item from the catalog).
 #[derive(Debug, Serialize)]
-pub struct UnpullReport {
+pub struct DropReport {
     pub id: String,
     #[serde(rename = "type")]
     pub item_type: ItemType,
-    /// `owner/repo/path` source the item had been pulled from.
-    pub source: String,
+    /// `owner/repo/path` source, when the item had been pulled and recorded in
+    /// the manifest; `None` for hand-authored (local) items.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
     #[serde(rename = "ref", skip_serializing_if = "Option::is_none")]
     pub git_ref: Option<String>,
     /// Catalog path that was (or would have been) removed.
     pub path: String,
     /// Whether files were actually removed from disk (false if already absent).
     pub item_removed: bool,
+    /// Whether a manifest entry was pruned (false for items not recorded as pulled).
+    pub manifest_pruned: bool,
 }
 
-/// Remove a previously pulled item from the catalog and prune its manifest entry.
+/// Remove an item from the catalog, pruning its manifest entry when present.
 ///
-/// The inverse of [`pull_into_catalog`]: it deletes the catalog copy
-/// (`skills/<id>/` or `agents/<id>.agent.md`) and removes the matching manifest entry.
-///
-/// Only items recorded in the manifest can be unpulled. If `id` has no manifest entry this
-/// fails without touching the filesystem, so hand-authored skills/agents are never deleted
-/// this way.
-pub fn unpull_from_catalog(
+/// Deletes the catalog copy (`skills/<id>/` or `agents/<id>.agent.md`) and, if the
+/// item was recorded as a pull, removes its manifest entry so `restore` won't bring
+/// it back. Works on both pulled and hand-authored (local) items. Errors only when
+/// `id` exists neither on disk nor in the manifest.
+pub fn drop_from_catalog(
     catalog: &Catalog,
     item_type: ItemType,
     id: &str,
-) -> Result<UnpullReport> {
+) -> Result<DropReport> {
     ensure_simple_id(id)?;
     let entry = manifest::entries(catalog)?
         .into_iter()
-        .find(|e| e.item_type == item_type && e.id == id)
-        .with_context(|| {
-            format!(
-                "no pulled {} '{id}' in the catalog manifest; nothing to unpull",
-                type_label(item_type)
-            )
-        })?;
+        .find(|e| e.item_type == item_type && e.id == id);
 
     let dst = match item_type {
         ItemType::Skill => catalog.skill_source(id),
         ItemType::Agent => catalog.agent_source(id),
     };
     let item_removed = fsops::remove(&dst)?;
-    manifest::remove(catalog, item_type, id)?;
+    let manifest_pruned = manifest::remove(catalog, item_type, id)?;
 
-    Ok(UnpullReport {
+    if !item_removed && !manifest_pruned {
+        anyhow::bail!(
+            "no {} '{id}' in the catalog; nothing to drop",
+            type_label(item_type)
+        );
+    }
+
+    let (source, git_ref) = match entry {
+        Some(e) => (Some(e.spec.source()), e.spec.ref_),
+        None => (None, None),
+    };
+
+    Ok(DropReport {
         id: id.to_string(),
         item_type,
-        source: entry.spec.source(),
-        git_ref: entry.spec.ref_,
+        source,
+        git_ref,
         path: dst.display().to_string(),
         item_removed,
+        manifest_pruned,
     })
 }
 

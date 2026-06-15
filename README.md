@@ -50,5 +50,6 @@ See [`docs/design.md`](docs/design.md) for the full design, decisions, and Phase
 - **CLI scaffold:** `akit <cmd> [--project <dir>] [--json]`; commands include `add [--copy]`, `rm`,
   `add --bundle`, `rm --bundle`, `ls` (list the whole catalog), `status` (list items installed in
   the project), `search`, `show`, `sync`, `doctor`, `pull` (fetch a remote source into the
-  catalog), `unpull` (remove a pulled item + prune its manifest entry), and `restore` (rebootstrap
+  catalog), `drop` (remove an item from the catalog + prune its manifest entry if it was
+  pulled), and `restore` (rebootstrap
   the catalog from `akit.yml`).

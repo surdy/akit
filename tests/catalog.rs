@@ -105,3 +105,35 @@ fn cli_ls_lists_the_catalog() {
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("\"id\":\"grill-me\""), "{stdout}");
 }
+
+#[test]
+fn cli_drop_removes_a_local_catalog_item() {
+    // A hand-authored skill that was never pulled (no manifest entry) can still be dropped.
+    let tmp = tempfile::tempdir().unwrap();
+    let catalog_root = tmp.path().join("catalog");
+    make_skill(
+        &catalog_root,
+        "local-skill",
+        "---\nname: Local\ndescription: hand-authored\n---\nbody\n",
+    );
+
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_akit"))
+        .env("KIT_CATALOG_DIR", &catalog_root)
+        .args(["--json", "drop", "local-skill"])
+        .output()
+        .expect("akit binary should run");
+
+    assert!(
+        output.status.success(),
+        "drop failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(json["item_removed"], true);
+    assert_eq!(json["manifest_pruned"], false, "local item has no manifest entry");
+    assert!(json.get("source").is_none(), "local item has no source");
+    assert!(
+        !catalog_root.join("skills/local-skill").exists(),
+        "local skill should be deleted"
+    );
+}

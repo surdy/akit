@@ -254,34 +254,38 @@ With `--json`, `restore` emits a stable object:
 `status` is one of `pulled`, `already-present`, `overwritten`, or `error`; failed items add an
 `error` string.
 
-### `unpull` — remove a pulled item from the catalog
+### `drop` — remove an item from the catalog
 
 ```text
-akit unpull [--agent] <id>
+akit drop [--agent] <id>
 ```
 
-The inverse of [`pull`](#pull--fetch-a-remote-source-into-the-catalog): it deletes the
-catalog item (`skills/<id>/` or `agents/<id>.agent.md`) **and** prunes its entry from the
-manifest, so [`restore`](#restore--rebootstrap-the-catalog-from-the-manifest) won't bring it
-back.
+Removes a skill or agent from your catalog (`skills/<id>/` or `agents/<id>.agent.md`). If the
+item was pulled, it also prunes its entry from the manifest, so
+[`restore`](#restore--rebootstrap-the-catalog-from-the-manifest) won't bring it back. It's the
+inverse of [`pull`](#pull--fetch-a-remote-source-into-the-catalog), but unlike the old behavior
+it works on **both pulled and hand-authored (local)** items.
 
 ```bash
-$ akit unpull deploy-to-vercel
-Unpulled skill 'deploy-to-vercel' (from vercel-labs/agent-skills/deploy-to-vercel#main) -> /home/you/.akit/catalog/skills/deploy-to-vercel (removed)
+$ akit drop deploy-to-vercel
+Dropped skill 'deploy-to-vercel' (from vercel-labs/agent-skills/deploy-to-vercel#main) -> /home/you/.akit/catalog/skills/deploy-to-vercel (removed)
 
-$ akit unpull --agent reviewer
-Unpulled agent 'reviewer' (from acme/kits/reviewer.agent.md#main) -> /home/you/.akit/catalog/agents/reviewer.agent.md (removed)
+$ akit drop --agent reviewer
+Dropped agent 'reviewer' (from acme/kits/reviewer.agent.md#main) -> /home/you/.akit/catalog/agents/reviewer.agent.md (removed)
+
+$ akit drop my-local-skill
+Dropped skill 'my-local-skill' -> /home/you/.akit/catalog/skills/my-local-skill (removed)
 ```
 
-- Only **recorded pulls** can be unpulled. If `<id>` has no manifest entry, `unpull` errors and
-  touches nothing — so hand-authored skills/agents are never deleted this way (remove those by
-  hand).
+- Works on any catalog item. If `<id>` exists neither on disk nor in the manifest, `drop` errors
+  and touches nothing.
+- For a hand-authored (local) item there's no manifest entry to prune and no source to report.
 - It still prunes the manifest entry when the files are already gone (reported as
   `manifest entry pruned; files were already absent`).
-- The global `--project` flag is accepted but unused — `unpull` only touches the catalog.
+- The global `--project` flag is accepted but unused — `drop` only touches the catalog.
 
-With `--json`, `unpull` emits a stable object (`item_removed` is `false` when the files were
-already absent):
+With `--json`, `drop` emits a stable object (`source`/`ref` appear only for pulled items;
+`item_removed` is `false` when the files were already absent):
 
 ```json
 {
@@ -290,7 +294,8 @@ already absent):
   "source": "vercel-labs/agent-skills/deploy-to-vercel",
   "ref": "main",
   "path": "/home/you/.akit/catalog/skills/deploy-to-vercel",
-  "item_removed": true
+  "item_removed": true,
+  "manifest_pruned": true
 }
 ```
 
@@ -608,7 +613,7 @@ akit catalog
 ```
 
 Lists every skill and agent in your catalog, with the **id** you pass to `add`, `show`, and
-`unpull`. Unlike [`search`](#search--search-the-catalog) (which fuzzy-matches and shows each
+`drop`. Unlike [`search`](#search--search-the-catalog) (which fuzzy-matches and shows each
 item's frontmatter `name`), `ls` is the catalog-wide inventory keyed by id, and it
 records each item's provenance:
 

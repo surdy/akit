@@ -404,7 +404,7 @@ fn pull_records_manifest_and_restore_rebootstraps() {
 }
 
 #[test]
-fn unpull_removes_catalog_item_and_prunes_manifest() {
+fn drop_removes_catalog_item_and_prunes_manifest() {
     let tmp = test_tempdir();
     let base = tmp.path();
     let git_base = make_local_bare_remote(base);
@@ -412,7 +412,7 @@ fn unpull_removes_catalog_item_and_prunes_manifest() {
     let catalog = base.join("catalog");
     let base_url = format!("file://{}", git_base.display());
 
-    // Pull a skill, then unpull it.
+    // Pull a skill, then drop it.
     let output = run_akit_pull(
         &["pull", "acme/kit-skills/deploy-to-vercel#main"],
         &catalog,
@@ -422,16 +422,17 @@ fn unpull_removes_catalog_item_and_prunes_manifest() {
     assert!(output.status.success());
     assert!(catalog.join("skills/deploy-to-vercel/SKILL.md").is_file());
 
-    let output = run_akit_pull(&["unpull", "deploy-to-vercel"], &catalog, &cache, &base_url);
+    let output = run_akit_pull(&["drop", "deploy-to-vercel"], &catalog, &cache, &base_url);
     assert!(
         output.status.success(),
-        "akit unpull failed\nstdout:\n{}\nstderr:\n{}",
+        "akit drop failed\nstdout:\n{}\nstderr:\n{}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
     let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(json["id"], "deploy-to-vercel");
     assert_eq!(json["item_removed"], true);
+    assert_eq!(json["manifest_pruned"], true);
 
     // Catalog item is gone and the manifest no longer lists it.
     assert!(!catalog.join("skills/deploy-to-vercel").exists());
@@ -445,11 +446,11 @@ fn unpull_removes_catalog_item_and_prunes_manifest() {
     assert_eq!(json["summary"]["pulled"], 0);
     assert!(!catalog.join("skills/deploy-to-vercel").exists());
 
-    // Unpulling something that was never pulled fails and touches nothing.
-    let output = run_akit_pull(&["unpull", "never-pulled"], &catalog, &cache, &base_url);
+    // Dropping something that exists nowhere fails and touches nothing.
+    let output = run_akit_pull(&["drop", "never-existed"], &catalog, &cache, &base_url);
     assert!(!output.status.success());
     assert!(
-        String::from_utf8_lossy(&output.stderr).contains("nothing to unpull"),
+        String::from_utf8_lossy(&output.stderr).contains("nothing to drop"),
         "stderr:\n{}",
         String::from_utf8_lossy(&output.stderr)
     );
