@@ -103,12 +103,12 @@ enum Commands {
         #[arg(long)]
         force: bool,
     },
-    /// Remove a pulled item from the catalog and prune its manifest entry (inverse of pull).
-    Unpull {
-        /// Unpull an agent (`.agent.md`) instead of a skill.
+    /// Remove a skill or agent from the catalog (prunes its manifest entry if it was pulled).
+    Drop {
+        /// Drop an agent (`.agent.md`) instead of a skill.
         #[arg(long)]
         agent: bool,
-        /// Catalog id to unpull.
+        /// Catalog id to drop.
         id: String,
     },
 }
@@ -324,13 +324,13 @@ fn run() -> Result<()> {
                 std::process::exit(1);
             }
         }
-        Commands::Unpull { agent, id } => {
+        Commands::Drop { agent, id } => {
             let catalog = Catalog::locate()?;
-            let report = ops::unpull_from_catalog(&catalog, item_type(*agent), id)?;
+            let report = ops::drop_from_catalog(&catalog, item_type(*agent), id)?;
             if cli.json {
                 println!("{}", serde_json::to_string(&report)?);
             } else {
-                println!("{}", unpull_report_line(&report));
+                println!("{}", drop_report_line(&report));
             }
         }
     }
@@ -439,10 +439,13 @@ fn pull_report_line(report: &ops::PullReport) -> String {
     )
 }
 
-fn unpull_report_line(report: &ops::UnpullReport) -> String {
-    let source = match &report.git_ref {
-        Some(git_ref) => format!("{}#{git_ref}", report.source),
-        None => report.source.clone(),
+fn drop_report_line(report: &ops::DropReport) -> String {
+    let origin = match &report.source {
+        Some(source) => match &report.git_ref {
+            Some(git_ref) => format!(" (from {source}#{git_ref})"),
+            None => format!(" (from {source})"),
+        },
+        None => String::new(),
     };
     let action = if report.item_removed {
         "removed"
@@ -450,10 +453,9 @@ fn unpull_report_line(report: &ops::UnpullReport) -> String {
         "manifest entry pruned; files were already absent"
     };
     format!(
-        "Unpulled {} '{}' (from {}) -> {} ({action})",
+        "Dropped {} '{}'{origin} -> {} ({action})",
         type_name(report.item_type),
         report.id,
-        source,
         report.path
     )
 }
