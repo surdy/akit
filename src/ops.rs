@@ -163,6 +163,9 @@ pub struct PullReport {
     pub created: bool,
     /// Whether an existing, differing item was overwritten (requires `force`).
     pub overwritten: bool,
+    /// Commit SHA the source resolved to, when it could be determined.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub commit: Option<String>,
 }
 
 /// Fetch a remote `owner/repo/path[#ref]` source and copy it into the local catalog.
@@ -197,6 +200,7 @@ pub fn pull_into_catalog(
             spec: spec.clone(),
             item_type,
             id: report.id.clone(),
+            commit: report.commit.clone(),
         },
     )?;
     Ok(report)
@@ -274,6 +278,7 @@ fn pull_copy(
         path: dst.display().to_string(),
         created,
         overwritten,
+        commit: remote::resolved_commit(spec),
     })
 }
 
@@ -324,30 +329,65 @@ pub struct RestoreReport {
 
 /// Re-fetch every item recorded in the catalog manifest.
 ///
-/// Each entry is pulled with its recorded id (`--as` semantics) for an exact reproduction.
-/// Per-item failures are collected rather than aborting the whole run; the caller decides how
-/// to react to a non-zero `summary.errors`.
+/// Each entry is pulled under its recorded id (`--as` semantics) for an exact reproduction. When
+/// the entry records a resolved `commit` and `latest` is false, that exact commit is checked out
+/// so restores are reproducible across machines; with `latest = true` (or for legacy entries
+/// without a recorded commit) the head of the symbolic ref is fetched instead, and the freshly
+/// resolved commit is written back to the manifest.
+///
+/// Per-item failures are collected rather than aborting the whole run; the caller decides how to
+/// react to a non-zero `summary.errors`.
 pub fn restore_catalog(
     catalog: &Catalog,
     base_url: &str,
     force: bool,
+    latest: bool,
 ) -> Result<RestoreReport> {
     let entries = manifest::entries(catalog)?;
     let mut items = Vec::with_capacity(entries.len());
     let mut summary = RestoreSummary::default();
 
     for entry in entries {
+        // Pin to the recorded commit for reproducibility unless the caller asked for the latest
+        // (or no commit was ever recorded), in which case follow the symbolic ref.
+        let pin_to_commit = !latest && entry.commit.is_some();
+        let fetch_spec = match &entry.commit {
+            Some(commit) if pin_to_commit => SourceSpec {
+                ref_: Some(commit.clone()),
+                ..entry.spec.clone()
+            },
+            _ => entry.spec.clone(),
+        };
+        let fetch_mode = if latest {
+            FetchMode::Refresh
+        } else {
+            FetchMode::Cached
+        };
+
         let result = pull_copy(
             catalog,
-            &entry.spec,
+            &fetch_spec,
             entry.item_type,
             Some(&entry.id),
             base_url,
-            FetchMode::Cached,
+            fetch_mode,
             force,
         );
         let item = match result {
             Ok(report) => {
+                // When following the ref, persist the commit it resolved to (records SHAs for
+                // legacy entries and advances them under `--latest`).
+                if !pin_to_commit && report.commit != entry.commit {
+                    manifest::record(
+                        catalog,
+                        &manifest::ManifestEntry {
+                            spec: entry.spec.clone(),
+                            item_type: entry.item_type,
+                            id: entry.id.clone(),
+                            commit: report.commit.clone(),
+                        },
+                    )?;
+                }
                 let status = if report.overwritten {
                     summary.overwritten += 1;
                     RestoreStatus::Overwritten
@@ -362,7 +402,7 @@ pub fn restore_catalog(
                     id: report.id,
                     item_type: report.item_type,
                     source: report.source,
-                    git_ref: report.git_ref,
+                    git_ref: entry.spec.ref_.clone(),
                     status,
                     error: None,
                 }
@@ -412,6 +452,12 @@ pub struct UpdateItem {
     #[serde(rename = "ref", skip_serializing_if = "Option::is_none")]
     pub git_ref: Option<String>,
     pub status: UpdateStatus,
+    /// Commit recorded before the update, when one was known.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub previous_commit: Option<String>,
+    /// Commit the source resolves to now, when it could be determined.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub commit: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
 }
@@ -507,6 +553,8 @@ pub fn update_catalog(
                 source: entry.spec.source(),
                 git_ref: entry.spec.ref_.clone(),
                 status: UpdateStatus::Pinned,
+                previous_commit: entry.commit.clone(),
+                commit: entry.commit.clone(),
                 error: None,
             });
             continue;
@@ -524,7 +572,8 @@ pub fn update_catalog(
             FetchMode::Cached
         };
 
-        let result: Result<UpdateStatus> = if check {
+        // Each branch resolves the status plus the commit the ref now points at.
+        let outcome: Result<(UpdateStatus, Option<String>)> = if check {
             pull_check(
                 catalog,
                 &entry.spec,
@@ -534,11 +583,12 @@ pub fn update_catalog(
                 mode,
             )
             .map(|outdated| {
-                if outdated {
+                let status = if outdated {
                     UpdateStatus::Outdated
                 } else {
                     UpdateStatus::UpToDate
-                }
+                };
+                (status, remote::resolved_commit(&entry.spec))
             })
         } else {
             pull_copy(
@@ -551,16 +601,23 @@ pub fn update_catalog(
                 true,
             )
             .map(|report| {
-                if report.created {
+                // Prefer the recorded SHA for the verdict; fall back to content drift for legacy
+                // entries (or when the commit couldn't be resolved).
+                let advanced = match (&entry.commit, &report.commit) {
+                    (Some(old), Some(new)) => old != new,
+                    _ => report.created,
+                };
+                let status = if advanced {
                     UpdateStatus::Updated
                 } else {
                     UpdateStatus::UpToDate
-                }
+                };
+                (status, report.commit)
             })
         };
 
-        let item = match result {
-            Ok(status) => {
+        let item = match outcome {
+            Ok((status, new_commit)) => {
                 match status {
                     UpdateStatus::Updated => summary.updated += 1,
                     UpdateStatus::Outdated => summary.outdated += 1,
@@ -568,12 +625,27 @@ pub fn update_catalog(
                     UpdateStatus::Pinned => summary.pinned += 1,
                     UpdateStatus::Error => summary.errors += 1,
                 }
+                // Persist the resolved commit when applying (records SHAs for legacy entries and
+                // advances them when the ref moved). `--check` never writes.
+                if !check && new_commit != entry.commit {
+                    manifest::record(
+                        catalog,
+                        &manifest::ManifestEntry {
+                            spec: entry.spec.clone(),
+                            item_type: entry.item_type,
+                            id: entry.id.clone(),
+                            commit: new_commit.clone(),
+                        },
+                    )?;
+                }
                 UpdateItem {
                     id: entry.id,
                     item_type: entry.item_type,
                     source: entry.spec.source(),
                     git_ref: entry.spec.ref_.clone(),
                     status,
+                    previous_commit: entry.commit.clone(),
+                    commit: new_commit,
                     error: None,
                 }
             }
@@ -585,6 +657,8 @@ pub fn update_catalog(
                     source: entry.spec.source(),
                     git_ref: entry.spec.ref_.clone(),
                     status: UpdateStatus::Error,
+                    previous_commit: entry.commit.clone(),
+                    commit: None,
                     error: Some(format!("{e:#}")),
                 }
             }

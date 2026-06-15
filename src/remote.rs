@@ -140,6 +140,31 @@ pub fn cached_item_path(spec: &SourceSpec) -> PathBuf {
     resolved_item_path(&checkout_dir(&cache_root(), spec), spec)
 }
 
+/// Resolve the commit SHA currently checked out for a cached source.
+///
+/// Call right after a successful [`fetch`]/[`refresh`]: it reads `HEAD` of the cache checkout so
+/// the manifest can record the exact commit a symbolic ref resolved to. Returns `None` when the
+/// checkout is missing or `git rev-parse` fails, so a transient hiccup degrades to "no commit
+/// recorded" rather than failing the pull.
+pub fn resolved_commit(spec: &SourceSpec) -> Option<String> {
+    resolved_commit_with_cache_root(spec, &cache_root())
+}
+
+/// [`resolved_commit`] with an explicit cache root, for hermetic callers and tests.
+pub fn resolved_commit_with_cache_root(spec: &SourceSpec, cache_root: &Path) -> Option<String> {
+    let checkout = checkout_dir(cache_root, spec);
+    let output = run_git_status(
+        &["rev-parse".into(), "HEAD".into()],
+        Some(checkout.as_path()),
+    )
+    .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let sha = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if sha.is_empty() { None } else { Some(sha) }
+}
+
 /// Force-refresh a cached source to the latest commit of its recorded ref (or the
 /// repository's default branch when no ref was recorded), then return the resolved
 /// item path.

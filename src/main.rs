@@ -102,6 +102,10 @@ enum Commands {
         /// Overwrite catalog items that differ from their recorded source.
         #[arg(long)]
         force: bool,
+        /// Follow each item's symbolic ref to its latest commit instead of the
+        /// recorded one, and rewrite the recorded commit.
+        #[arg(long)]
+        latest: bool,
     },
     /// Update pulled catalog items to the latest upstream commit of their recorded ref.
     Update {
@@ -323,9 +327,9 @@ fn run() -> Result<()> {
                 println!("{}", pull_report_line(&report));
             }
         }
-        Commands::Restore { force } => {
+        Commands::Restore { force, latest } => {
             let catalog = Catalog::locate()?;
-            let report = ops::restore_catalog(&catalog, &remote_base_url(), *force)?;
+            let report = ops::restore_catalog(&catalog, &remote_base_url(), *force, *latest)?;
             if cli.json {
                 println!("{}", serde_json::to_string(&report)?);
             } else {
@@ -541,6 +545,11 @@ fn update_status_label(status: ops::UpdateStatus) -> &'static str {
     }
 }
 
+/// Short, display-friendly commit prefix.
+fn short_sha(sha: &str) -> &str {
+    sha.get(..7).unwrap_or(sha)
+}
+
 fn print_update_report(report: &ops::UpdateReport, check: bool) {
     if report.items.is_empty() {
         println!("Nothing to update; catalog manifest has no remote items.");
@@ -551,6 +560,16 @@ fn print_update_report(report: &ops::UpdateReport, check: bool) {
             Some(git_ref) => format!("{}#{git_ref}", item.source),
             None => item.source.clone(),
         };
+        // Append a short `old → new` (or `→ new`) commit hint when the SHA moved.
+        let shas = match (&item.previous_commit, &item.commit) {
+            (Some(old), Some(new)) if old != new => {
+                format!(" ({} → {})", short_sha(old), short_sha(new))
+            }
+            (None, Some(new)) if matches!(item.status, ops::UpdateStatus::Updated) => {
+                format!(" (→ {})", short_sha(new))
+            }
+            _ => String::new(),
+        };
         match &item.error {
             Some(error) => eprintln!(
                 "  {} {} '{}' from {}: {error}",
@@ -560,7 +579,7 @@ fn print_update_report(report: &ops::UpdateReport, check: bool) {
                 source
             ),
             None => println!(
-                "  {} {} '{}' from {}",
+                "  {} {} '{}' from {}{shas}",
                 update_status_label(item.status),
                 type_name(item.item_type),
                 item.id,
