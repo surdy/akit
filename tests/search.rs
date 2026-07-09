@@ -37,7 +37,29 @@ fn partial_query_ranks_matching_item_first() {
 
     assert!(!hits.is_empty());
     assert_eq!(hits[0].item_type, ItemType::Skill);
+    assert_eq!(hits[0].id, "deploy-helper");
     assert_eq!(hits[0].name, "Deploy Helper");
+    assert!(hits[0].score > 0);
+}
+
+#[test]
+fn query_matches_the_catalog_id_handle() {
+    let tmp = tempfile::tempdir().unwrap();
+    let catalog_root = tmp.path().join("catalog");
+    // Frontmatter name deliberately differs from the directory handle so this
+    // only matches via `id`.
+    make_skill(
+        &catalog_root,
+        "deploy-helper",
+        "---\nname: Rocket\ndescription: Ship apps safely\ncategory: ops\n---\nbody\n",
+    );
+
+    let catalog = Catalog::with_root(&catalog_root);
+    let hits = search::search(&catalog, "deploy-helper").unwrap();
+
+    assert!(!hits.is_empty());
+    assert_eq!(hits[0].id, "deploy-helper");
+    assert_eq!(hits[0].name, "Rocket");
     assert!(hits[0].score > 0);
 }
 
@@ -63,6 +85,8 @@ fn empty_query_returns_all_items() {
     assert!(hits.iter().all(|hit| hit.score == 0));
     assert!(hits.iter().any(|hit| hit.name == "Deploy Helper"));
     assert!(hits.iter().any(|hit| hit.name == "Reviewer"));
+    assert!(hits.iter().any(|hit| hit.id == "deploy-helper"));
+    assert!(hits.iter().any(|hit| hit.id == "reviewer"));
 }
 
 #[test]

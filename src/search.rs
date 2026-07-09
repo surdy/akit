@@ -14,6 +14,9 @@ use crate::lockfile::ItemType;
 /// One ranked catalog search result.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct SearchHit {
+    /// Catalog id: the directory/file handle used by `add`, `show`, and
+    /// `unpull` (independent of the frontmatter `name`).
+    pub id: String,
     #[serde(rename = "type")]
     pub item_type: ItemType,
     pub name: String,
@@ -108,6 +111,7 @@ fn scan_agents(catalog: &Catalog, items: &mut Vec<SearchHit>) -> Result<()> {
 fn hit_from_file(item_type: ItemType, fallback_name: &str, path: &Path) -> SearchHit {
     let frontmatter = read_frontmatter(path);
     SearchHit {
+        id: fallback_name.to_string(),
         item_type,
         name: frontmatter
             .name
@@ -230,9 +234,20 @@ fn match_score(matcher: &SkimMatcherV2, query: &str, item: &SearchHit) -> Option
     let name_score = matcher
         .fuzzy_match(&item.name, query)
         .map(|score| score + 10_000);
+    let id_score = matcher
+        .fuzzy_match(&item.id, query)
+        .map(|score| score + 5_000);
+    let category_score = matcher
+        .fuzzy_match(&item.category, query)
+        .map(|score| score + 2_000);
     let description_score = matcher.fuzzy_match(&item.description, query);
 
-    name_score.into_iter().chain(description_score).max()
+    name_score
+        .into_iter()
+        .chain(id_score)
+        .chain(category_score)
+        .chain(description_score)
+        .max()
 }
 
 fn compare_hits(a: &SearchHit, b: &SearchHit) -> Ordering {
