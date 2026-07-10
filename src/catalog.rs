@@ -77,4 +77,27 @@ impl Catalog {
         }
         Ok(file)
     }
+
+    /// Path to a native-agent package directory (`agents/<id>/`, may not exist).
+    pub fn agent_package_dir(&self, id: &str) -> PathBuf {
+        self.root.join("agents").join(id)
+    }
+
+    /// Resolve a harness-aware native-agent package by id (#35), validating its
+    /// `agent.yml` descriptor and every declared variant file.
+    pub fn resolve_agent_package(&self, id: &str) -> Result<crate::agentpkg::AgentPackage> {
+        let dir = self.agent_package_dir(id);
+        if !dir.is_dir() {
+            bail!(
+                "agent package '{id}' not found in catalog (looked in {})",
+                dir.display()
+            );
+        }
+        crate::agentpkg::AgentPackage::load(id, &dir)
+    }
+
+    /// Load a skill's harness compatibility (#35). Portable when no `skill.yml`.
+    pub fn skill_compat(&self, name: &str) -> Result<crate::agentpkg::SkillCompat> {
+        crate::agentpkg::SkillCompat::load(&self.skill_source(name))
+    }
 }
