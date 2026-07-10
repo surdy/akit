@@ -12,6 +12,7 @@ pub mod catalog;
 pub mod doctor;
 pub mod fsops;
 pub mod gitexclude;
+pub mod harness;
 pub mod lockfile;
 pub mod manifest;
 pub mod ops;
