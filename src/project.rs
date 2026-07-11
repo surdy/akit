@@ -58,6 +58,23 @@ impl Project {
         self.root.join(".copilot").join("kit.lock.json")
     }
 
+    /// `<root>/.akit` — the harness-aware ownership directory (#32). Holds the
+    /// v2 lockfile and optional local config. Local-only (git-excluded).
+    pub fn akit_dir(&self) -> PathBuf {
+        self.root.join(".akit")
+    }
+
+    /// `<root>/.akit/kit.lock.json` — the harness-aware ownership lockfile (#32).
+    pub fn akit_lockfile_path(&self) -> PathBuf {
+        self.akit_dir().join("kit.lock.json")
+    }
+
+    /// `<root>/.akit/config.json` — optional local defaults (e.g. default
+    /// harnesses). May not exist.
+    pub fn akit_config_path(&self) -> PathBuf {
+        self.akit_dir().join("config.json")
+    }
+
     /// `<git_dir>/info/exclude`, if this is a git repo.
     pub fn git_info_exclude_path(&self) -> Option<PathBuf> {
         self.git_dir

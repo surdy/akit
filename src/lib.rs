@@ -17,6 +17,8 @@ pub mod harness;
 pub mod lockfile;
 pub mod manifest;
 pub mod ops;
+pub mod ownership;
+pub mod plan;
 pub mod project;
 pub mod remote;
 pub mod search;
