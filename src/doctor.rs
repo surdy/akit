@@ -151,7 +151,7 @@ pub fn sync(project: &Project, catalog: &Catalog) -> Result<SyncReport> {
     for item in &lockfile.items {
         let target_line = exclude_line(&item.target);
         let exclude_added = if let Some(path) = exclude_path.as_ref() {
-            let added = gitexclude::add_line(path, &target_line)?;
+            let added = gitexclude::add_line(&crate::transport::LocalFs, path, &target_line)?;
             if added {
                 target_lines_added.push(target_line);
             }
@@ -165,7 +165,7 @@ pub fn sync(project: &Project, catalog: &Catalog) -> Result<SyncReport> {
 
     let lockfile_added = if should_expect_lockfile_line(&lockfile.items, lockfile_exists) {
         if let Some(path) = exclude_path.as_ref() {
-            gitexclude::add_line(path, &lockfile_exclude_line())?
+            gitexclude::add_line(&crate::transport::LocalFs, path, &lockfile_exclude_line())?
         } else {
             false
         }
@@ -244,13 +244,7 @@ fn sync_item(
     }
 
     let target_present_after = std::fs::symlink_metadata(project.root.join(&item.target)).is_ok();
-    let status_after = item_health(
-        project,
-        catalog,
-        item,
-        source_present,
-        target_present_after,
-    )?;
+    let status_after = item_health(project, catalog, item, source_present, target_present_after)?;
     Ok(SyncItem {
         id: item.id.clone(),
         item_type: item.item_type,

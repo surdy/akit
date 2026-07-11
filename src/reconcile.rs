@@ -77,8 +77,8 @@ pub fn health_with(
     catalog: &Catalog,
 ) -> Result<HealthReport> {
     let lf_path = project.akit_lockfile_path();
-    let lockfile_present = lf_path.exists();
-    let lock = AkitLockfile::load(&lf_path)?;
+    let lockfile_present = fs.exists(&lf_path)?;
+    let lock = AkitLockfile::load_with(fs, &lf_path)?;
 
     let mut items = Vec::new();
     let mut healthy = true;
@@ -116,7 +116,7 @@ pub fn health_with(
         });
     }
 
-    let stale_excludes = stale_exclude_lines(project, &lock);
+    let stale_excludes = stale_exclude_lines(fs, project, &lock);
     if !stale_excludes.is_empty() {
         healthy = false;
     }
@@ -154,7 +154,7 @@ pub fn repair_with(
     catalog: &Catalog,
 ) -> Result<RepairReport> {
     let lf_path = project.akit_lockfile_path();
-    let lock = AkitLockfile::load(&lf_path)?;
+    let lock = AkitLockfile::load_with(fs, &lf_path)?;
     let mut report = RepairReport::default();
 
     for inst in &lock.items {
@@ -191,7 +191,7 @@ pub fn repair_with(
     }
 
     // Restore any missing managed exclude lines (and prune stale ones).
-    install::sync_excludes(project, &lock)?;
+    install::sync_excludes(fs, project, &lock)?;
     Ok(report)
 }
 
@@ -211,19 +211,44 @@ pub struct DetachReport {
 /// its managed exclude lines so Git can see the now-unmanaged files. Use when a
 /// user wants to keep a materialized skill/agent but stop akit from managing it.
 pub fn detach(project: &Project, item_type: ItemType, id: &str) -> Result<DetachReport> {
-    drop_ownership(project, item_type, id)
+    detach_with(&LocalFs, project, item_type, id)
+}
+
+/// [`detach`] against an explicit transport.
+pub fn detach_with(
+    fs: &dyn FsTransport,
+    project: &Project,
+    item_type: ItemType,
+    id: &str,
+) -> Result<DetachReport> {
+    drop_ownership(fs, project, item_type, id)
 }
 
 /// Drop an ownership record without touching files or excludes-of-others. Use to
 /// clear a stale/orphaned record (e.g. its files were manually deleted). The
 /// managed exclude block is resynced so the item's now-unowned lines are pruned.
 pub fn forget(project: &Project, item_type: ItemType, id: &str) -> Result<DetachReport> {
-    drop_ownership(project, item_type, id)
+    forget_with(&LocalFs, project, item_type, id)
 }
 
-fn drop_ownership(project: &Project, item_type: ItemType, id: &str) -> Result<DetachReport> {
+/// [`forget`] against an explicit transport.
+pub fn forget_with(
+    fs: &dyn FsTransport,
+    project: &Project,
+    item_type: ItemType,
+    id: &str,
+) -> Result<DetachReport> {
+    drop_ownership(fs, project, item_type, id)
+}
+
+fn drop_ownership(
+    fs: &dyn FsTransport,
+    project: &Project,
+    item_type: ItemType,
+    id: &str,
+) -> Result<DetachReport> {
     let lf_path = project.akit_lockfile_path();
-    let mut lock = AkitLockfile::load(&lf_path)?;
+    let mut lock = AkitLockfile::load_with(fs, &lf_path)?;
     let Some(removed) = lock.remove(item_type, id) else {
         return Ok(DetachReport {
             id: id.to_string(),
@@ -237,10 +262,10 @@ fn drop_ownership(project: &Project, item_type: ItemType, id: &str) -> Result<De
         .iter()
         .map(|m| m.path.clone())
         .collect();
-    lock.save(&lf_path)?;
+    lock.save_with(fs, &lf_path)?;
     // Recompute the managed exclude block: the dropped item's lines disappear,
     // so its (preserved) files become visible to Git.
-    install::sync_excludes(project, &lock)?;
+    install::sync_excludes(fs, project, &lock)?;
     Ok(DetachReport {
         id: id.to_string(),
         item_type,
@@ -252,10 +277,15 @@ fn drop_ownership(project: &Project, item_type: ItemType, id: &str) -> Result<De
 /// Prune managed exclude lines that no longer correspond to an owned path,
 /// returning the removed lines. Never touches user-authored exclude entries.
 pub fn remove_stale_excludes(project: &Project) -> Result<Vec<String>> {
-    let lock = AkitLockfile::load(&project.akit_lockfile_path())?;
-    let stale = stale_exclude_lines(project, &lock);
+    remove_stale_excludes_with(&LocalFs, project)
+}
+
+/// [`remove_stale_excludes`] against an explicit transport.
+pub fn remove_stale_excludes_with(fs: &dyn FsTransport, project: &Project) -> Result<Vec<String>> {
+    let lock = AkitLockfile::load_with(fs, &project.akit_lockfile_path())?;
+    let stale = stale_exclude_lines(fs, project, &lock);
     if !stale.is_empty() {
-        install::sync_excludes(project, &lock)?;
+        install::sync_excludes(fs, project, &lock)?;
     }
     Ok(stale)
 }
@@ -341,7 +371,7 @@ pub fn adopt_with(
     let harnesses = served_by(&adopted);
     if !adopted.is_empty() {
         let lf_path = project.akit_lockfile_path();
-        let mut lock = AkitLockfile::load(&lf_path)?;
+        let mut lock = AkitLockfile::load_with(fs, &lf_path)?;
         lock.upsert(Installation {
             id: id.to_string(),
             item_type,
@@ -351,8 +381,8 @@ pub fn adopt_with(
             harnesses: harnesses.clone(),
             materializations: adopted.clone(),
         });
-        lock.save(&lf_path)?;
-        install::sync_excludes(project, &lock)?;
+        lock.save_with(fs, &lf_path)?;
+        install::sync_excludes(fs, project, &lock)?;
     }
 
     Ok(AdoptReport {
@@ -382,11 +412,15 @@ fn source_exists(catalog: &Catalog, inst: &Installation) -> bool {
 
 /// Managed exclude lines present on disk that no longer map to an owned path or
 /// the lockfile itself.
-fn stale_exclude_lines(project: &Project, lock: &AkitLockfile) -> Vec<String> {
+fn stale_exclude_lines(
+    fs: &dyn FsTransport,
+    project: &Project,
+    lock: &AkitLockfile,
+) -> Vec<String> {
     let Some(excl) = project.git_info_exclude_path() else {
         return Vec::new();
     };
-    let current = gitexclude::managed_lines(&excl).unwrap_or_default();
+    let current = gitexclude::managed_lines(fs, &excl).unwrap_or_default();
     let desired = install::desired_excludes(lock);
     current
         .into_iter()
@@ -463,7 +497,7 @@ mod tests {
     }
 
     fn excludes(project: &Project) -> Vec<String> {
-        gitexclude::managed_lines(&project.git_info_exclude_path().unwrap()).unwrap()
+        gitexclude::managed_lines(&LocalFs, &project.git_info_exclude_path().unwrap()).unwrap()
     }
 
     #[test]
@@ -520,9 +554,9 @@ mod tests {
         install_skill(&f, "deploy", &[HarnessId::Copilot]);
         // Inject a bogus managed line as if left behind by an old install.
         let excl = f.project.git_info_exclude_path().unwrap();
-        let mut lines = gitexclude::managed_lines(&excl).unwrap();
+        let mut lines = gitexclude::managed_lines(&LocalFs, &excl).unwrap();
         lines.push("/.orphaned/skills/ghost".to_string());
-        gitexclude::set_managed_lines(&excl, &lines).unwrap();
+        gitexclude::set_managed_lines(&LocalFs, &excl, &lines).unwrap();
 
         let r = health(&f.project, &f.catalog).unwrap();
         assert!(!r.healthy);
@@ -613,9 +647,9 @@ mod tests {
         let f = setup();
         install_skill(&f, "deploy", &[HarnessId::Copilot]);
         let excl = f.project.git_info_exclude_path().unwrap();
-        let mut lines = gitexclude::managed_lines(&excl).unwrap();
+        let mut lines = gitexclude::managed_lines(&LocalFs, &excl).unwrap();
         lines.push("/.orphaned/skills/ghost".to_string());
-        gitexclude::set_managed_lines(&excl, &lines).unwrap();
+        gitexclude::set_managed_lines(&LocalFs, &excl, &lines).unwrap();
 
         let removed = remove_stale_excludes(&f.project).unwrap();
         assert_eq!(removed, vec!["/.orphaned/skills/ghost".to_string()]);

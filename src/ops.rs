@@ -701,11 +701,7 @@ pub struct DropReport {
 /// item was recorded as a pull, removes its manifest entry so `restore` won't bring
 /// it back. Works on both pulled and hand-authored (local) items. Errors only when
 /// `id` exists neither on disk nor in the manifest.
-pub fn drop_from_catalog(
-    catalog: &Catalog,
-    item_type: ItemType,
-    id: &str,
-) -> Result<DropReport> {
+pub fn drop_from_catalog(catalog: &Catalog, item_type: ItemType, id: &str) -> Result<DropReport> {
     ensure_simple_id(id)?;
     let entry = manifest::entries(catalog)?
         .into_iter()
@@ -811,8 +807,13 @@ fn record_materialized(project: &Project, input: MaterializeRecord<'_>) -> Resul
     let mut exclude_added = false;
     let not_a_git_repo = project.git_dir.is_none();
     if let Some(excl) = project.git_info_exclude_path() {
-        exclude_added |= gitexclude::add_line(&excl, &format!("/{target_rel}"))?;
-        exclude_added |= gitexclude::add_line(&excl, &format!("/{LOCKFILE_REL}"))?;
+        exclude_added |=
+            gitexclude::add_line(&crate::transport::LocalFs, &excl, &format!("/{target_rel}"))?;
+        exclude_added |= gitexclude::add_line(
+            &crate::transport::LocalFs,
+            &excl,
+            &format!("/{LOCKFILE_REL}"),
+        )?;
     }
 
     let lf_path = project.lockfile_path();
@@ -883,14 +884,7 @@ fn remote_id(item_type: ItemType, spec: &SourceSpec) -> String {
 
 /// Pull a skill from the catalog into the project (symlink, gitignore, record).
 pub fn add_skill(project: &Project, catalog: &Catalog, name: &str) -> Result<AddReport> {
-    add_item(
-        project,
-        catalog,
-        ItemType::Skill,
-        name,
-        Mode::Symlink,
-        None,
-    )
+    add_item(project, catalog, ItemType::Skill, name, Mode::Symlink, None)
 }
 
 /// Pull every item in a named catalog bundle into the project.
@@ -986,7 +980,8 @@ fn remove_item_from_lockfile(
     let mut exclude_removed = false;
     let not_a_git_repo = project.git_dir.is_none();
     if lock_removed && let Some(excl) = project.git_info_exclude_path() {
-        exclude_removed = gitexclude::remove_line(&excl, &format!("/{target}"))?;
+        exclude_removed =
+            gitexclude::remove_line(&crate::transport::LocalFs, &excl, &format!("/{target}"))?;
     }
 
     Ok(RemoveReport {
@@ -1007,10 +1002,7 @@ pub fn list_items(project: &Project) -> Result<Vec<ListItem>> {
 }
 
 /// List lockfile items using an explicit catalog root for copy drift checks.
-pub fn list_items_with_catalog(
-    project: &Project,
-    catalog: &Catalog,
-) -> Result<Vec<ListItem>> {
+pub fn list_items_with_catalog(project: &Project, catalog: &Catalog) -> Result<Vec<ListItem>> {
     list_items_with_optional_catalog(project, Some(catalog))
 }
 
@@ -1132,7 +1124,12 @@ fn scan_catalog_agents(
         let Some(id) = file_name.strip_suffix(".agent.md") else {
             continue;
         };
-        items.push(catalog_item(ItemType::Agent, id.to_string(), &path, sources));
+        items.push(catalog_item(
+            ItemType::Agent,
+            id.to_string(),
+            &path,
+            sources,
+        ));
     }
     Ok(())
 }
@@ -1195,11 +1192,7 @@ pub(crate) fn health(
     }
 }
 
-pub(crate) fn source_for(
-    catalog: &Catalog,
-    item_type: ItemType,
-    id: &str,
-) -> std::path::PathBuf {
+pub(crate) fn source_for(catalog: &Catalog, item_type: ItemType, id: &str) -> std::path::PathBuf {
     match item_type {
         ItemType::Skill => catalog.skill_source(id),
         ItemType::Agent => catalog.agent_source(id),

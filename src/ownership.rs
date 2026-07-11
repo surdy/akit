@@ -16,6 +16,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::harness::HarnessId;
 use crate::lockfile::{ItemType, Mode};
+use crate::transport::{FsTransport, LocalFs};
 
 /// Current on-disk schema version for `.akit/kit.lock.json`.
 pub const AKIT_LOCKFILE_VERSION: u32 = 2;
@@ -95,13 +96,19 @@ impl AkitLockfile {
     /// A version mismatch is a hard error rather than a silent reset: the caller
     /// must decide how to handle an unknown schema (there is no v1 migration).
     pub fn load(path: &Path) -> Result<Self> {
-        let text = match std::fs::read_to_string(path) {
-            Ok(text) => text,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                return Ok(Self::default());
-            }
-            Err(e) => return Err(e).with_context(|| format!("reading {}", path.display())),
-        };
+        Self::load_with(&LocalFs, path)
+    }
+
+    /// [`load`] against an explicit transport (for embedding hosts / remote roots).
+    pub fn load_with(fs: &dyn FsTransport, path: &Path) -> Result<Self> {
+        if !fs.exists(path)? {
+            return Ok(Self::default());
+        }
+        let bytes = fs
+            .read(path)
+            .with_context(|| format!("reading {}", path.display()))?;
+        let text = String::from_utf8(bytes)
+            .with_context(|| format!("{} is not valid UTF-8", path.display()))?;
         let doc: AkitLockfile =
             serde_json::from_str(&text).with_context(|| format!("parsing {}", path.display()))?;
         if doc.version != AKIT_LOCKFILE_VERSION {
@@ -117,13 +124,15 @@ impl AkitLockfile {
     /// Persist the lockfile to `path`, creating the `.akit` directory as needed.
     /// Written pretty + trailing newline for readable diffs.
     pub fn save(&self, path: &Path) -> Result<()> {
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)
-                .with_context(|| format!("creating {}", parent.display()))?;
-        }
+        self.save_with(&LocalFs, path)
+    }
+
+    /// [`save`] against an explicit transport.
+    pub fn save_with(&self, fs: &dyn FsTransport, path: &Path) -> Result<()> {
         let mut text = serde_json::to_string_pretty(self).context("serializing lockfile")?;
         text.push('\n');
-        std::fs::write(path, text).with_context(|| format!("writing {}", path.display()))
+        fs.write(path, text.as_bytes())
+            .with_context(|| format!("writing {}", path.display()))
     }
 
     /// The installation matching `(item_type, id)`, if present.

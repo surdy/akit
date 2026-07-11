@@ -148,7 +148,7 @@ pub fn remove_with(
     scope: RemoveScope,
 ) -> Result<RemoveReport> {
     let lf_path = project.akit_lockfile_path();
-    let lock = AkitLockfile::load(&lf_path)?;
+    let lock = AkitLockfile::load_with(fs, &lf_path)?;
     let Some(existing) = lock.get(item_type, id).cloned() else {
         return Ok(RemoveReport {
             id: id.to_string(),
@@ -180,8 +180,8 @@ pub fn remove_with(
             }
         }
         prune_empty_owned_dirs(fs, project, &removed.materializations);
-        lock.save(&lf_path)?;
-        sync_excludes(project, &lock)?;
+        lock.save_with(fs, &lf_path)?;
+        sync_excludes(fs, project, &lock)?;
         Ok(RemoveReport {
             id: id.to_string(),
             item_type,
@@ -228,7 +228,7 @@ pub fn reset(project: &Project) -> Result<ResetReport> {
 /// [`reset`] against an explicit transport.
 pub fn reset_with(fs: &dyn FsTransport, project: &Project) -> Result<ResetReport> {
     let lf_path = project.akit_lockfile_path();
-    let mut lock = AkitLockfile::load(&lf_path)?;
+    let mut lock = AkitLockfile::load_with(fs, &lf_path)?;
     let mut report = ResetReport::default();
     let mut all_removed: Vec<MaterializationRecord> = Vec::new();
     for item in &lock.items {
@@ -242,15 +242,20 @@ pub fn reset_with(fs: &dyn FsTransport, project: &Project) -> Result<ResetReport
     }
     prune_empty_owned_dirs(fs, project, &all_removed);
     lock.items.clear();
-    lock.save(&lf_path)?;
+    lock.save_with(fs, &lf_path)?;
     // Empty lockfile → the managed exclude block is removed entirely.
-    sync_excludes(project, &lock)?;
+    sync_excludes(fs, project, &lock)?;
     Ok(report)
 }
 
 /// Read-only status of every installed item, with per-materialization drift.
 pub fn status(project: &Project) -> Result<Vec<Installation>> {
-    let lock = AkitLockfile::load(&project.akit_lockfile_path())?;
+    status_with(&LocalFs, project)
+}
+
+/// [`status`] against an explicit transport.
+pub fn status_with(fs: &dyn FsTransport, project: &Project) -> Result<Vec<Installation>> {
+    let lock = AkitLockfile::load_with(fs, &project.akit_lockfile_path())?;
     Ok(lock.items)
 }
 
@@ -301,7 +306,7 @@ fn reconcile(
     resolver: &SourceResolver,
 ) -> Result<InstallReport> {
     let lf_path = project.akit_lockfile_path();
-    let mut lock = AkitLockfile::load(&lf_path)?;
+    let mut lock = AkitLockfile::load_with(fs, &lf_path)?;
     let previous = lock.get(item_type, id).cloned();
 
     // Stage + atomically commit every planned materialization as one transaction
@@ -337,8 +342,8 @@ fn reconcile(
         // Nothing servable: drop any prior installation rather than keep an empty one.
         if previous.is_some() {
             lock.remove(item_type, id);
-            lock.save(&lf_path)?;
-            sync_excludes(project, &lock)?;
+            lock.save_with(fs, &lf_path)?;
+            sync_excludes(fs, project, &lock)?;
         }
         return Ok(InstallReport {
             id: id.to_string(),
@@ -362,10 +367,10 @@ fn reconcile(
         materializations: records.clone(),
     };
     let replaced = lock.upsert(installation);
-    lock.save(&lf_path)?;
+    lock.save_with(fs, &lf_path)?;
     // Recompute the managed exclude block from the lockfile (adds new lines,
     // prunes ones the reshape dropped, and excludes the lockfile itself).
-    sync_excludes(project, &lock)?;
+    sync_excludes(fs, project, &lock)?;
 
     Ok(InstallReport {
         id: id.to_string(),
@@ -397,9 +402,13 @@ pub(crate) fn desired_excludes(lock: &AkitLockfile) -> Vec<String> {
 /// Rewrite the project's akit-managed git-exclude block to match `lock`. This is
 /// the single exclude mutation used across install, remove, reset, and cleanup:
 /// the lockfile is the source of truth and the block is derived from it.
-pub(crate) fn sync_excludes(project: &Project, lock: &AkitLockfile) -> Result<()> {
+pub(crate) fn sync_excludes(
+    fs: &dyn FsTransport,
+    project: &Project,
+    lock: &AkitLockfile,
+) -> Result<()> {
     if let Some(excl) = project.git_info_exclude_path() {
-        gitexclude::set_managed_lines(&excl, &desired_excludes(lock))?;
+        gitexclude::set_managed_lines(fs, &excl, &desired_excludes(lock))?;
     }
     Ok(())
 }
@@ -705,5 +714,113 @@ mod tests {
         );
         assert!(f.project.root.join(".github/keep.md").is_file());
         assert!(status(&f.project).unwrap().is_empty());
+    }
+
+    /// A transport that redirects every path under `from` to a sibling `to`
+    /// directory, delegating all real I/O to [`LocalFs`]. Paths outside `from`
+    /// (e.g. the catalog source) pass through untouched. Used to prove that
+    /// *all* engine I/O — materializations, the `.akit` lockfile, and the
+    /// managed git-exclude block — flows through the transport rather than
+    /// `std::fs`, which is the guarantee remote (SFTP) hosts depend on.
+    struct RedirectFs {
+        from: PathBuf,
+        to: PathBuf,
+    }
+
+    impl RedirectFs {
+        fn map(&self, p: &Path) -> PathBuf {
+            match p.strip_prefix(&self.from) {
+                Ok(rest) => self.to.join(rest),
+                Err(_) => p.to_path_buf(),
+            }
+        }
+    }
+
+    impl FsTransport for RedirectFs {
+        fn exists(&self, path: &Path) -> Result<bool> {
+            LocalFs.exists(&self.map(path))
+        }
+        fn symlink_kind(&self, path: &Path) -> Result<Option<crate::transport::FileKind>> {
+            LocalFs.symlink_kind(&self.map(path))
+        }
+        fn read(&self, path: &Path) -> Result<Vec<u8>> {
+            LocalFs.read(&self.map(path))
+        }
+        fn read_dir(&self, dir: &Path) -> Result<Vec<String>> {
+            LocalFs.read_dir(&self.map(dir))
+        }
+        fn create_dir_all(&self, path: &Path) -> Result<()> {
+            LocalFs.create_dir_all(&self.map(path))
+        }
+        fn write(&self, path: &Path, bytes: &[u8]) -> Result<()> {
+            LocalFs.write(&self.map(path), bytes)
+        }
+        fn remove_file(&self, path: &Path) -> Result<()> {
+            LocalFs.remove_file(&self.map(path))
+        }
+        fn remove_dir_all(&self, path: &Path) -> Result<()> {
+            LocalFs.remove_dir_all(&self.map(path))
+        }
+        fn rename(&self, from: &Path, to: &Path) -> Result<()> {
+            LocalFs.rename(&self.map(from), &self.map(to))
+        }
+        fn dir_is_empty(&self, path: &Path) -> Result<bool> {
+            LocalFs.dir_is_empty(&self.map(path))
+        }
+        fn symlink(&self, target: &Path, link: &Path) -> Result<()> {
+            // Targets are content sources outside `from`; only the link is remapped.
+            LocalFs.symlink(target, &self.map(link))
+        }
+        fn supports_symlink(&self) -> bool {
+            true
+        }
+    }
+
+    #[test]
+    fn engine_io_flows_through_the_transport_not_std_fs() {
+        let f = setup();
+        write_skill(&f.catalog, "deploy", None);
+        // Redirect the project root to a separate backing dir; the project's own
+        // root stays empty if (and only if) every write went through the transport.
+        let backing = f._tmp.path().join("backing");
+        let fs = RedirectFs {
+            from: f.project.root.clone(),
+            to: backing.clone(),
+        };
+
+        let report = install_with(
+            &fs,
+            &f.project,
+            &f.catalog,
+            ItemType::Skill,
+            "deploy",
+            &ctx(&HarnessId::ALL),
+        )
+        .unwrap();
+        assert_eq!(report.materializations.len(), 2);
+
+        // Everything landed in the backing dir (via the transport)…
+        assert!(backing.join(".agents/skills/deploy/SKILL.md").is_file());
+        assert!(backing.join(".akit/kit.lock.json").is_file());
+        let excl = std::fs::read_to_string(backing.join(".git/info/exclude")).unwrap();
+        assert!(excl.contains("/.akit/kit.lock.json"), "{excl}");
+        assert!(excl.contains("/.agents/skills/deploy"), "{excl}");
+
+        // …and nothing was written to the real project root via std::fs.
+        assert!(!f.project.root.join(".agents").exists());
+        assert!(!f.project.root.join(".akit").exists());
+        assert!(!f.project.root.join(".git/info/exclude").exists());
+
+        // Health, status, and reset all read/write through the transport too.
+        let health = crate::reconcile::health_with(&fs, &f.project, &f.catalog).unwrap();
+        assert!(health.healthy, "{health:?}");
+        assert_eq!(status_with(&fs, &f.project).unwrap().len(), 1);
+
+        reset_with(&fs, &f.project).unwrap();
+        assert!(!backing.join(".agents/skills/deploy").exists());
+        assert!(status_with(&fs, &f.project).unwrap().is_empty());
+        // The managed exclude block is gone once nothing is owned.
+        let excl = std::fs::read_to_string(backing.join(".git/info/exclude")).unwrap();
+        assert!(!excl.contains("/.akit/kit.lock.json"), "{excl}");
     }
 }
