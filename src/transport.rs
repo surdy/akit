@@ -56,6 +56,13 @@ pub trait FsTransport {
     /// [`FsTransport::supports_symlink`] is `true`.
     fn symlink(&self, target: &Path, link: &Path) -> Result<()>;
 
+    /// Atomically move `from` onto `to` on the same filesystem, replacing any
+    /// existing `to`. Callers stage content at a sibling temp `from` and rename
+    /// it into place so a destination is never observed half-written; the temp
+    /// therefore always shares `to`'s parent directory (and filesystem). Remote
+    /// transports (SFTP) must provide a genuine atomic rename.
+    fn rename(&self, from: &Path, to: &Path) -> Result<()>;
+
     /// Whether symlink materialization is available on this transport. Remote
     /// transports return `false`, forcing copies.
     fn supports_symlink(&self) -> bool;
@@ -143,6 +150,14 @@ impl FsTransport for LocalFs {
         }
         symlink_platform(target, link)
             .with_context(|| format!("symlinking {} -> {}", link.display(), target.display()))
+    }
+
+    fn rename(&self, from: &Path, to: &Path) -> Result<()> {
+        if let Some(parent) = to.parent() {
+            self.create_dir_all(parent)?;
+        }
+        std::fs::rename(from, to)
+            .with_context(|| format!("renaming {} -> {}", from.display(), to.display()))
     }
 
     fn supports_symlink(&self) -> bool {

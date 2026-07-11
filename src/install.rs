@@ -26,7 +26,7 @@ use crate::catalog::Catalog;
 use crate::gitexclude;
 use crate::harness::HarnessId;
 use crate::lockfile::ItemType;
-use crate::materialize::{MaterializeItem, materialize_one, remove_materialization};
+use crate::materialize::{self, MaterializeItem, remove_materialization};
 use crate::ownership::{AKIT_LOCKFILE_REL, AkitLockfile, Installation, MaterializationRecord};
 use crate::plan::{self, Plan, PlanIssue};
 use crate::project::Project;
@@ -304,21 +304,18 @@ fn reconcile(
     let mut lock = AkitLockfile::load(&lf_path)?;
     let previous = lock.get(item_type, id).cloned();
 
-    // Materialize everything the plan asks for.
-    let mut records = Vec::new();
-    for planned in &plan.materializations {
-        let source_path = resolver(planned);
-        let record = materialize_one(
-            fs,
-            &project.root,
-            &MaterializeItem {
-                source: source_path,
-                planned,
-            },
-        )
-        .with_context(|| format!("installing '{id}' at {}", planned.path))?;
-        records.push(record);
-    }
+    // Stage + atomically commit every planned materialization as one transaction
+    // (all temps validated before any destination is renamed into place).
+    let items: Vec<MaterializeItem<'_>> = plan
+        .materializations
+        .iter()
+        .map(|planned| MaterializeItem {
+            source: resolver(planned),
+            planned,
+        })
+        .collect();
+    let records = materialize::materialize_all(fs, &project.root, &items)
+        .with_context(|| format!("installing '{id}'"))?;
 
     let new_paths: Vec<&str> = records.iter().map(|r| r.path.as_str()).collect();
 

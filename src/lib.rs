@@ -12,6 +12,7 @@ pub mod bundle;
 pub mod catalog;
 pub mod config;
 pub mod doctor;
+pub mod exec;
 pub mod fsops;
 pub mod gitexclude;
 pub mod harness;

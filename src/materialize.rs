@@ -88,6 +88,11 @@ fn hex(bytes: &[u8]) -> String {
 
 /// Materialize one planned entry, returning its ownership record.
 ///
+/// Content is first staged at a sibling temp path, hash-validated, then
+/// **atomically renamed** onto the destination so the destination is never
+/// observed half-written (see [`stage_one`]/[`commit_one`]). For groups, prefer
+/// [`materialize_all`], which stages every entry before committing any.
+///
 /// The effective mode downgrades to [`Mode::Copy`] whenever the transport does
 /// not support symlinks (remote) or the plan requested a copy. Symlinked
 /// materializations record no hash (they reflect the source directly); copies
@@ -99,34 +104,116 @@ pub fn materialize_one(
     project_root: &Path,
     item: &MaterializeItem<'_>,
 ) -> Result<MaterializationRecord> {
-    let dst_abs = project_root.join(&item.planned.path);
+    let staged = stage_one(fs, project_root, item)?;
+    let record = staged.record.clone();
+    commit_one(fs, &staged).with_context(|| format!("committing {}", record.path))?;
+    Ok(record)
+}
+
+/// Transactionally materialize a whole plan: **stage** every entry to a sibling
+/// temp path (validating hashes) before **committing** any via atomic rename.
+///
+/// If staging any entry fails, previously staged temps are cleaned up and no
+/// destination is touched — the caller's prior destinations and lockfile stay
+/// intact. Commit renames are per-destination atomic; a failure mid-commit is
+/// surfaced with the offending path so the caller can report recovery state.
+pub fn materialize_all(
+    fs: &dyn FsTransport,
+    project_root: &Path,
+    items: &[MaterializeItem<'_>],
+) -> Result<Vec<MaterializationRecord>> {
+    // Phase 1 — stage all to temps; on any failure, roll back staged temps.
+    let mut staged = Vec::with_capacity(items.len());
+    for item in items {
+        match stage_one(fs, project_root, item) {
+            Ok(s) => staged.push(s),
+            Err(e) => {
+                for done in &staged {
+                    let _ = clear_destination(fs, &done.temp_abs);
+                }
+                return Err(e);
+            }
+        }
+    }
+
+    // Phase 2 — commit each staged temp via atomic rename.
+    let mut records = Vec::with_capacity(staged.len());
+    for s in &staged {
+        commit_one(fs, s).with_context(|| format!("committing {}", s.record.path))?;
+        records.push(s.record.clone());
+    }
+    Ok(records)
+}
+
+/// A materialization staged at `temp_abs`, ready to be atomically renamed onto
+/// `final_abs`. Holds the ownership record that describes the committed result.
+struct Staged {
+    temp_abs: PathBuf,
+    final_abs: PathBuf,
+    record: MaterializationRecord,
+}
+
+/// The sibling temp path used to stage `final_abs` (same parent directory, hence
+/// same filesystem, so the commit rename is atomic).
+fn temp_sibling(final_abs: &Path) -> PathBuf {
+    let name = final_abs
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "item".to_string());
+    final_abs.with_file_name(format!(".{name}.akit-stage"))
+}
+
+/// Stage one item to its sibling temp path without mutating the destination.
+/// Copies are hash-validated against their source so a truncated or corrupt
+/// (e.g. remote) write is caught before it can be committed.
+fn stage_one(
+    fs: &dyn FsTransport,
+    project_root: &Path,
+    item: &MaterializeItem<'_>,
+) -> Result<Staged> {
+    let final_abs = project_root.join(&item.planned.path);
+    let temp_abs = temp_sibling(&final_abs);
+    // Remove any leftover temp from a prior aborted run before staging.
+    clear_destination(fs, &temp_abs)?;
+
     let use_symlink = item.planned.mode == Mode::Symlink && fs.supports_symlink();
-
-    // Clear any existing managed destination so re-materialization is idempotent.
-    clear_destination(fs, &dst_abs)?;
-
-    let mode = if use_symlink {
-        fs.symlink(&item.source, &dst_abs)?;
-        Mode::Symlink
+    let (mode, hash) = if use_symlink {
+        fs.symlink(&item.source, &temp_abs)?;
+        (Mode::Symlink, None)
     } else {
-        copy_tree(fs, &item.source, &dst_abs)
-            .with_context(|| format!("materializing {}", item.planned.path))?;
-        Mode::Copy
-    };
-
-    let hash = match mode {
-        Mode::Copy => Some(content_hash(fs, &item.source)?),
-        Mode::Symlink => None,
+        copy_tree(fs, &item.source, &temp_abs)
+            .with_context(|| format!("staging {}", item.planned.path))?;
+        let staged_hash = content_hash(fs, &temp_abs)?;
+        let source_hash = content_hash(fs, &item.source)?;
+        if staged_hash != source_hash {
+            let _ = clear_destination(fs, &temp_abs);
+            anyhow::bail!(
+                "staged copy of {} does not match its source (hash mismatch)",
+                item.planned.path
+            );
+        }
+        (Mode::Copy, Some(staged_hash))
     };
 
     let mut covers = item.planned.covers.clone();
     covers.sort();
-    Ok(MaterializationRecord {
-        path: item.planned.path.clone(),
-        mode,
-        covers,
-        hash,
+    Ok(Staged {
+        temp_abs,
+        final_abs,
+        record: MaterializationRecord {
+            path: item.planned.path.clone(),
+            mode,
+            covers,
+            hash,
+        },
     })
+}
+
+/// Commit a staged materialization: clear the destination, then atomically move
+/// the temp into place.
+fn commit_one(fs: &dyn FsTransport, staged: &Staged) -> Result<()> {
+    clear_destination(fs, &staged.final_abs)?;
+    fs.rename(&staged.temp_abs, &staged.final_abs)
 }
 
 /// Determine whether a recorded materialization has drifted on disk.
@@ -356,6 +443,9 @@ mod tests {
             fn symlink(&self, _t: &Path, _l: &Path) -> Result<()> {
                 anyhow::bail!("remote transport cannot symlink")
             }
+            fn rename(&self, from: &Path, to: &Path) -> Result<()> {
+                self.0.rename(from, to)
+            }
             fn supports_symlink(&self) -> bool {
                 false
             }
@@ -446,5 +536,68 @@ mod tests {
         assert!(!root.join(".agents/skills/deploy/extra.txt").exists());
         let body = std::fs::read_to_string(root.join(".agents/skills/deploy/SKILL.md")).unwrap();
         assert_eq!(body, "v2");
+    }
+
+    #[test]
+    fn materialize_all_commits_and_leaves_no_stage_temps() {
+        let tmp = TempDir::new().unwrap();
+        let fs = LocalFs;
+        let root = tmp.path().join("project");
+        for id in ["a", "b"] {
+            let src = tmp.path().join(format!("catalog/skills/{id}"));
+            std::fs::create_dir_all(&src).unwrap();
+            std::fs::write(src.join("SKILL.md"), id).unwrap();
+        }
+        let pa = planned(".agents/skills/a", Mode::Copy, MatKind::SkillDir);
+        let pb = planned(".agents/skills/b", Mode::Copy, MatKind::SkillDir);
+        let items = vec![
+            MaterializeItem {
+                source: tmp.path().join("catalog/skills/a"),
+                planned: &pa,
+            },
+            MaterializeItem {
+                source: tmp.path().join("catalog/skills/b"),
+                planned: &pb,
+            },
+        ];
+
+        let records = materialize_all(&fs, &root, &items).unwrap();
+        assert_eq!(records.len(), 2);
+        assert!(root.join(".agents/skills/a/SKILL.md").exists());
+        assert!(root.join(".agents/skills/b/SKILL.md").exists());
+        // No staging siblings survive a successful commit.
+        assert!(!root.join(".agents/skills/.a.akit-stage").exists());
+        assert!(!root.join(".agents/skills/.b.akit-stage").exists());
+    }
+
+    #[test]
+    fn materialize_all_rolls_back_when_an_entry_fails_to_stage() {
+        let tmp = TempDir::new().unwrap();
+        let fs = LocalFs;
+        let root = tmp.path().join("project");
+        let good = tmp.path().join("catalog/skills/a");
+        std::fs::create_dir_all(&good).unwrap();
+        std::fs::write(good.join("SKILL.md"), "a").unwrap();
+        // Second source does not exist, so staging it fails.
+        let missing = tmp.path().join("catalog/skills/missing");
+
+        let pa = planned(".agents/skills/a", Mode::Copy, MatKind::SkillDir);
+        let pm = planned(".agents/skills/missing", Mode::Copy, MatKind::SkillDir);
+        let items = vec![
+            MaterializeItem {
+                source: good,
+                planned: &pa,
+            },
+            MaterializeItem {
+                source: missing,
+                planned: &pm,
+            },
+        ];
+
+        assert!(materialize_all(&fs, &root, &items).is_err());
+        // Nothing committed and no staging temps left behind (previous state intact).
+        assert!(!root.join(".agents/skills/a").exists());
+        assert!(!root.join(".agents/skills/missing").exists());
+        assert!(!root.join(".agents/skills/.a.akit-stage").exists());
     }
 }
