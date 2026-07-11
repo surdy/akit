@@ -29,3 +29,4 @@ pub mod remote;
 pub mod search;
 pub mod show;
 pub mod transport;
+pub mod verify;

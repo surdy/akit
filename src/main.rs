@@ -163,6 +163,8 @@ enum Commands {
         #[arg(long)]
         yes: bool,
     },
+    /// Probe + statically verify harness support on this host (no model/LLM).
+    Verify,
 }
 
 fn main() {
@@ -468,6 +470,17 @@ fn run() -> Result<()> {
                     report.removed_paths.len(),
                     report.cleared_items
                 );
+            }
+        }
+        Commands::Verify => {
+            let report = akit::verify::verify_all(&akit::exec::LocalRunner, "local")?;
+            if cli.json {
+                println!("{}", serde_json::to_string(&report)?);
+            } else {
+                for v in &report {
+                    let mark = if v.verified { "✓" } else { "✗" };
+                    println!("{mark} {}", v.detail);
+                }
             }
         }
     }
