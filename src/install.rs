@@ -20,6 +20,7 @@
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
+use serde::{Deserialize, Serialize};
 
 use crate::catalog::Catalog;
 use crate::gitexclude;
@@ -65,7 +66,7 @@ pub enum RemoveScope {
 }
 
 /// Outcome of an [`install`] (or a partial [`remove`] that re-plans).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct InstallReport {
     pub id: String,
     pub item_type: ItemType,
@@ -82,7 +83,7 @@ pub struct InstallReport {
 }
 
 /// Outcome of a full or scoped [`remove`].
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RemoveReport {
     pub id: String,
     pub item_type: ItemType,
@@ -95,7 +96,7 @@ pub struct RemoveReport {
 }
 
 /// Outcome of [`reset`].
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct ResetReport {
     /// Every materialization path removed, across all installations.
     pub removed_paths: Vec<String>,

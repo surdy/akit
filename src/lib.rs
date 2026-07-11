@@ -10,6 +10,7 @@
 pub mod agentpkg;
 pub mod bundle;
 pub mod catalog;
+pub mod config;
 pub mod doctor;
 pub mod fsops;
 pub mod gitexclude;

@@ -5,8 +5,11 @@ use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 
 use akit::catalog::Catalog;
+use akit::config::LocalConfig;
 use akit::doctor;
 use akit::doctor::{DoctorReport, SyncReport};
+use akit::harness::HarnessId;
+use akit::install::{self, HarnessContext, RemoveScope};
 use akit::lockfile::{ItemType, Mode};
 use akit::ops;
 use akit::ops::{CatalogItem, HealthStatus, ListItem};
@@ -125,6 +128,40 @@ enum Commands {
         agent: bool,
         /// Catalog id to drop.
         id: String,
+    },
+    /// Install a skill or agent for one or more agent harnesses (harness-aware).
+    ///
+    /// Files land in each harness's own discovery paths, sharing a path across
+    /// harnesses when that path is discoverable by all of them. Re-running with a
+    /// different `--harness` set reshapes the install to exactly that set.
+    Install {
+        /// Install an agent instead of a skill.
+        #[arg(long)]
+        agent: bool,
+        /// Target harness (repeatable). Overrides `AKIT_HARNESSES` and `.akit/config.json`.
+        #[arg(long = "harness", short = 'H', value_name = "ID")]
+        harnesses: Vec<String>,
+        /// Catalog id of the skill/agent to install.
+        id: String,
+    },
+    /// Uninstall a harness-aware install from some or all harnesses.
+    Uninstall {
+        /// Uninstall an agent instead of a skill.
+        #[arg(long)]
+        agent: bool,
+        /// Only remove from these harnesses (repeatable); omit to fully uninstall.
+        #[arg(long = "harness", short = 'H', value_name = "ID")]
+        harnesses: Vec<String>,
+        /// Catalog id of the skill/agent to uninstall.
+        id: String,
+    },
+    /// List harness-aware installs recorded in `.akit/kit.lock.json`.
+    Installed,
+    /// Remove every akit-owned file and clear the harness-aware lockfile.
+    Reset {
+        /// Skip the confirmation prompt.
+        #[arg(long)]
+        yes: bool,
     },
 }
 
@@ -361,6 +398,78 @@ fn run() -> Result<()> {
                 println!("{}", drop_report_line(&report));
             }
         }
+        Commands::Install {
+            agent,
+            harnesses,
+            id,
+        } => {
+            let project = Project::locate(cli.project.clone())?;
+            let catalog = Catalog::locate()?;
+            let ctx = resolve_install_harnesses(harnesses, &project)?;
+            let report = install::install(&project, &catalog, item_type(*agent), id, &ctx)?;
+            if cli.json {
+                println!("{}", serde_json::to_string(&report)?);
+            } else {
+                print_install_report(&project, &report);
+            }
+        }
+        Commands::Uninstall {
+            agent,
+            harnesses,
+            id,
+        } => {
+            let project = Project::locate(cli.project.clone())?;
+            let scope = if harnesses.is_empty() {
+                RemoveScope::All
+            } else {
+                RemoveScope::Harnesses(parse_harnesses(harnesses)?)
+            };
+            let report = install::remove(&project, item_type(*agent), id, scope)?;
+            if cli.json {
+                println!("{}", serde_json::to_string(&report)?);
+            } else {
+                print_uninstall_report(&report);
+            }
+        }
+        Commands::Installed => {
+            let project = Project::locate(cli.project.clone())?;
+            let lock = akit::ownership::AkitLockfile::load(&project.akit_lockfile_path())?;
+            if cli.json {
+                println!("{}", serde_json::to_string(&lock.items)?);
+            } else {
+                print_installed_table(&lock.items);
+            }
+        }
+        Commands::Reset { yes } => {
+            let project = Project::locate(cli.project.clone())?;
+            let lock = akit::ownership::AkitLockfile::load(&project.akit_lockfile_path())?;
+            let owned: usize = lock.items.iter().map(|i| i.materializations.len()).sum();
+            if lock.items.is_empty() {
+                if cli.json {
+                    println!(
+                        "{}",
+                        serde_json::to_string(&install::ResetReport::default())?
+                    );
+                } else {
+                    println!("Nothing to reset — no akit-owned files recorded.");
+                }
+                return Ok(());
+            }
+            if !yes && !cli.json && !confirm_reset(lock.items.len(), owned)? {
+                println!("Aborted.");
+                return Ok(());
+            }
+            let report = install::reset(&project)?;
+            if cli.json {
+                println!("{}", serde_json::to_string(&report)?);
+            } else {
+                println!(
+                    "Reset complete — removed {} file(s) across {} install(s).",
+                    report.removed_paths.len(),
+                    report.cleared_items
+                );
+            }
+        }
     }
     Ok(())
 }
@@ -370,6 +479,199 @@ fn item_type(agent: bool) -> ItemType {
         ItemType::Agent
     } else {
         ItemType::Skill
+    }
+}
+
+/// Env var holding a comma/space separated default harness list.
+const ENV_HARNESSES: &str = "AKIT_HARNESSES";
+
+/// Parse a list of `--harness` tokens into deduped [`HarnessId`]s.
+fn parse_harnesses(tokens: &[String]) -> Result<Vec<HarnessId>> {
+    let mut out = Vec::new();
+    for tok in tokens {
+        for part in split_harness_list(tok) {
+            let id: HarnessId = part
+                .parse()
+                .map_err(|e: akit::harness::UnknownHarness| anyhow::anyhow!("{e}"))?;
+            if !out.contains(&id) {
+                out.push(id);
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// Split a token on commas/whitespace, dropping empties.
+fn split_harness_list(s: &str) -> Vec<String> {
+    s.split([',', ' ', '\t', '\n'])
+        .map(str::trim)
+        .filter(|p| !p.is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
+/// Resolve the target harness set for an install: `--harness` flags, else the
+/// `AKIT_HARNESSES` env var, else `.akit/config.json`, else an interactive prompt.
+fn resolve_install_harnesses(flags: &[String], project: &Project) -> Result<HarnessContext> {
+    if !flags.is_empty() {
+        return HarnessContext::new(parse_harnesses(flags)?);
+    }
+    if let Ok(value) = std::env::var(ENV_HARNESSES) {
+        let toks = split_harness_list(&value);
+        if !toks.is_empty() {
+            return HarnessContext::new(parse_harnesses(&toks)?);
+        }
+    }
+    let cfg = LocalConfig::load(&project.akit_config_path())?;
+    let defaults = cfg.default_harnesses();
+    if !defaults.is_empty() {
+        return HarnessContext::new(defaults);
+    }
+    prompt_for_harnesses()
+}
+
+/// Interactively pick target harnesses. Errors (with guidance) when stdin is not
+/// a terminal, so scripts get an actionable message instead of hanging.
+fn prompt_for_harnesses() -> Result<HarnessContext> {
+    use std::io::{IsTerminal, Write};
+    if !std::io::stdin().is_terminal() {
+        bail!(
+            "no target harness specified; pass --harness <id> (repeatable), set {ENV_HARNESSES}, \
+             or add \"harnesses\" to .akit/config.json"
+        );
+    }
+    println!("Select target harness(es) for this install:");
+    for (i, h) in HarnessId::ALL.iter().enumerate() {
+        println!("  {}) {} ({})", i + 1, h.as_str(), h.label());
+    }
+    print!("Enter numbers or names (comma/space separated): ");
+    std::io::stdout().flush().ok();
+    let mut line = String::new();
+    std::io::stdin().read_line(&mut line)?;
+    let mut chosen: Vec<HarnessId> = Vec::new();
+    for tok in split_harness_list(&line) {
+        let id = if let Ok(n) = tok.parse::<usize>() {
+            *HarnessId::ALL
+                .get(n.wrapping_sub(1))
+                .ok_or_else(|| anyhow::anyhow!("selection '{tok}' out of range"))?
+        } else {
+            tok.parse()
+                .map_err(|e: akit::harness::UnknownHarness| anyhow::anyhow!("{e}"))?
+        };
+        if !chosen.contains(&id) {
+            chosen.push(id);
+        }
+    }
+    HarnessContext::new(chosen)
+}
+
+/// Confirm a destructive reset at an interactive prompt.
+fn confirm_reset(installs: usize, files: usize) -> Result<bool> {
+    use std::io::{IsTerminal, Write};
+    if !std::io::stdin().is_terminal() {
+        bail!("refusing to reset non-interactively; re-run with --yes to confirm");
+    }
+    print!("Remove {files} akit-owned file(s) across {installs} install(s)? [y/N] ");
+    std::io::stdout().flush().ok();
+    let mut line = String::new();
+    std::io::stdin().read_line(&mut line)?;
+    Ok(matches!(line.trim(), "y" | "Y" | "yes" | "Yes"))
+}
+
+fn print_install_report(project: &Project, report: &install::InstallReport) {
+    if report.not_a_git_repo {
+        warn_not_git(project);
+    }
+    let harnesses = report
+        .harnesses
+        .iter()
+        .map(|h| h.as_str())
+        .collect::<Vec<_>>()
+        .join(", ");
+    let verb = if report.replaced {
+        "Reshaped"
+    } else {
+        "Installed"
+    };
+    if report.harnesses.is_empty() {
+        println!(
+            "{} '{}' installed for no harnesses (all selected were skipped)",
+            title_case(type_name(report.item_type)),
+            report.id
+        );
+    } else {
+        println!(
+            "{verb} {} '{}' for {harnesses}",
+            type_name(report.item_type),
+            report.id
+        );
+    }
+    for m in &report.materializations {
+        let covers = m
+            .covers
+            .iter()
+            .map(|h| h.as_str())
+            .collect::<Vec<_>>()
+            .join(", ");
+        println!("  {}  ({covers})", m.path);
+    }
+    if !report.issues.is_empty() {
+        println!("skipped:");
+        for issue in &report.issues {
+            println!("  {}: {}", issue.harness.as_str(), issue.reason.message());
+        }
+    }
+}
+
+fn print_uninstall_report(report: &install::RemoveReport) {
+    if report.not_installed {
+        println!(
+            "{} '{}' is not installed",
+            title_case(type_name(report.item_type)),
+            report.id
+        );
+        return;
+    }
+    if report.remaining_harnesses.is_empty() {
+        println!(
+            "Uninstalled {} '{}' ({} file(s) removed)",
+            type_name(report.item_type),
+            report.id,
+            report.removed_paths.len()
+        );
+    } else {
+        let remaining = report
+            .remaining_harnesses
+            .iter()
+            .map(|h| h.as_str())
+            .collect::<Vec<_>>()
+            .join(", ");
+        println!(
+            "Removed {} '{}' from selected harness(es); still installed for {remaining}",
+            type_name(report.item_type),
+            report.id
+        );
+    }
+}
+
+fn print_installed_table(items: &[akit::ownership::Installation]) {
+    if items.is_empty() {
+        println!("No harness-aware installs in this project.");
+        return;
+    }
+    println!("{:<28} {:<7} HARNESSES", "ID", "TYPE");
+    for item in items {
+        let harnesses = item
+            .harnesses
+            .iter()
+            .map(|h| h.as_str())
+            .collect::<Vec<_>>()
+            .join(", ");
+        println!(
+            "{:<28} {:<7} {harnesses}",
+            item.id,
+            type_name(item.item_type)
+        );
     }
 }
 

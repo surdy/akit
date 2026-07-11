@@ -22,6 +22,8 @@
 //! agent lacking its variant, or a probe-gated/unverified target) is not
 //! silently dropped — it surfaces as a [`PlanIssue`] the caller reports.
 
+use serde::{Deserialize, Serialize};
+
 use crate::agentpkg::{AgentPackage, SkillCompat};
 use crate::harness::{self, HarnessId};
 use crate::lockfile::Mode;
@@ -53,14 +55,15 @@ pub struct PlannedMaterialization {
 }
 
 /// A selected harness that could not be served, with a machine-usable reason.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PlanIssue {
     pub harness: HarnessId,
     pub reason: PlanIssueReason,
 }
 
 /// Why a selected harness was skipped.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum PlanIssueReason {
     /// A skill declared incompatible with this harness via `skill.yml`.
     SkillIncompatible,
