@@ -170,7 +170,7 @@ pub fn remove_with(
     };
 
     if remaining.is_empty() {
-        // Full uninstall: remove every materialization + exclude line, drop entry.
+        // Full uninstall: remove every materialization, drop entry, resync excludes.
         let mut lock = lock;
         let removed = lock.remove(item_type, id).expect("checked present");
         let mut removed_paths = Vec::new();
@@ -178,9 +178,10 @@ pub fn remove_with(
             if remove_materialization(fs, &project.root, &m.path)? {
                 removed_paths.push(m.path.clone());
             }
-            remove_exclude(project, &m.path)?;
         }
+        prune_empty_owned_dirs(fs, project, &removed.materializations);
         lock.save(&lf_path)?;
+        sync_excludes(project, &lock)?;
         Ok(RemoveReport {
             id: id.to_string(),
             item_type,
@@ -229,18 +230,21 @@ pub fn reset_with(fs: &dyn FsTransport, project: &Project) -> Result<ResetReport
     let lf_path = project.akit_lockfile_path();
     let mut lock = AkitLockfile::load(&lf_path)?;
     let mut report = ResetReport::default();
+    let mut all_removed: Vec<MaterializationRecord> = Vec::new();
     for item in &lock.items {
         report.cleared_items += 1;
         for m in &item.materializations {
             if remove_materialization(fs, &project.root, &m.path)? {
                 report.removed_paths.push(m.path.clone());
             }
-            remove_exclude(project, &m.path)?;
+            all_removed.push(m.clone());
         }
     }
-    remove_exclude(project, AKIT_LOCKFILE_REL)?;
+    prune_empty_owned_dirs(fs, project, &all_removed);
     lock.items.clear();
     lock.save(&lf_path)?;
+    // Empty lockfile → the managed exclude block is removed entirely.
+    sync_excludes(project, &lock)?;
     Ok(report)
 }
 
@@ -253,9 +257,9 @@ pub fn status(project: &Project) -> Result<Vec<Installation>> {
 // ── internals ────────────────────────────────────────────────────────────────
 
 /// A closure that resolves a planned materialization to its absolute source.
-type SourceResolver = Box<dyn Fn(&plan::PlannedMaterialization) -> PathBuf>;
+pub(crate) type SourceResolver = Box<dyn Fn(&plan::PlannedMaterialization) -> PathBuf>;
 
-fn build_plan(
+pub(crate) fn build_plan(
     catalog: &Catalog,
     item_type: ItemType,
     id: &str,
@@ -320,12 +324,14 @@ fn reconcile(
 
     // Remove any prior materialization that the new plan no longer includes.
     if let Some(prev) = &previous {
+        let mut stale = Vec::new();
         for m in &prev.materializations {
             if !new_paths.contains(&m.path.as_str()) {
                 remove_materialization(fs, &project.root, &m.path)?;
-                remove_exclude(project, &m.path)?;
+                stale.push(m.clone());
             }
         }
+        prune_empty_owned_dirs(fs, project, &stale);
     }
 
     let not_a_git_repo = project.git_dir.is_none();
@@ -335,6 +341,7 @@ fn reconcile(
         if previous.is_some() {
             lock.remove(item_type, id);
             lock.save(&lf_path)?;
+            sync_excludes(project, &lock)?;
         }
         return Ok(InstallReport {
             id: id.to_string(),
@@ -345,12 +352,6 @@ fn reconcile(
             replaced: previous.is_some(),
             not_a_git_repo,
         });
-    }
-
-    // Exclude the new materializations and the lockfile itself.
-    add_exclude(project, AKIT_LOCKFILE_REL)?;
-    for r in &records {
-        add_exclude(project, &r.path)?;
     }
 
     let harnesses = plan.served();
@@ -365,6 +366,9 @@ fn reconcile(
     };
     let replaced = lock.upsert(installation);
     lock.save(&lf_path)?;
+    // Recompute the managed exclude block from the lockfile (adds new lines,
+    // prunes ones the reshape dropped, and excludes the lockfile itself).
+    sync_excludes(project, &lock)?;
 
     Ok(InstallReport {
         id: id.to_string(),
@@ -377,18 +381,60 @@ fn reconcile(
     })
 }
 
-fn add_exclude(project: &Project, rel: &str) -> Result<()> {
+/// The desired akit-managed exclude lines for `lock`: every owned materialization
+/// path plus the lockfile itself, each as a `/`-anchored line. Empty when nothing
+/// is installed (so the managed block is removed entirely).
+pub(crate) fn desired_excludes(lock: &AkitLockfile) -> Vec<String> {
+    if lock.items.is_empty() {
+        return Vec::new();
+    }
+    let mut lines: Vec<String> = lock
+        .owned_paths()
+        .into_iter()
+        .map(|p| format!("/{p}"))
+        .collect();
+    lines.push(format!("/{AKIT_LOCKFILE_REL}"));
+    lines
+}
+
+/// Rewrite the project's akit-managed git-exclude block to match `lock`. This is
+/// the single exclude mutation used across install, remove, reset, and cleanup:
+/// the lockfile is the source of truth and the block is derived from it.
+pub(crate) fn sync_excludes(project: &Project, lock: &AkitLockfile) -> Result<()> {
     if let Some(excl) = project.git_info_exclude_path() {
-        gitexclude::add_line(&excl, &format!("/{rel}"))?;
+        gitexclude::set_managed_lines(&excl, &desired_excludes(lock))?;
     }
     Ok(())
 }
 
-fn remove_exclude(project: &Project, rel: &str) -> Result<()> {
-    if let Some(excl) = project.git_info_exclude_path() {
-        gitexclude::remove_line(&excl, &format!("/{rel}"))?;
+/// After removing materializations, delete any now-empty ancestor directories
+/// akit created for them (e.g. `.agents/skills`, then `.agents`), walking up
+/// until a non-empty directory or the project root. Only *empty* directories are
+/// removed, so user files are never touched. Best-effort: failures are ignored.
+pub(crate) fn prune_empty_owned_dirs(
+    fs: &dyn FsTransport,
+    project: &Project,
+    removed: &[MaterializationRecord],
+) {
+    for m in removed {
+        let mut rel = PathBuf::from(&m.path);
+        // Walk up from the materialization's parent to the project root.
+        while rel.pop() {
+            if rel.as_os_str().is_empty() {
+                break;
+            }
+            let abs = project.root.join(&rel);
+            match fs.dir_is_empty(&abs) {
+                Ok(true) => {
+                    if fs.remove_dir_all(&abs).is_err() {
+                        break;
+                    }
+                }
+                // Non-empty or not a directory: stop climbing this branch.
+                _ => break,
+            }
+        }
     }
-    Ok(())
 }
 
 #[cfg(test)]

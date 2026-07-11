@@ -23,6 +23,7 @@ pub mod ops;
 pub mod ownership;
 pub mod plan;
 pub mod project;
+pub mod reconcile;
 pub mod remote;
 pub mod search;
 pub mod show;

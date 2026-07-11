@@ -9,6 +9,7 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::lockfile::Mode;
@@ -28,7 +29,8 @@ pub struct MaterializeItem<'a> {
 }
 
 /// The drift status of a materialized file relative to what akit recorded.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum Drift {
     /// On-disk content matches the recorded hash (or a symlink is intact).
     Clean,
