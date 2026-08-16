@@ -82,6 +82,42 @@ pub struct InstallReport {
     pub not_a_git_repo: bool,
 }
 
+/// Outcome of installing a whole catalog bundle (issue #45).
+///
+/// Each member is installed independently (its own atomic reconcile), in
+/// manifest order — skills first, then agents — and tagged with the bundle name
+/// in the lockfile. A member that serves no harnesses (all selected skipped)
+/// still appears here with an empty `harnesses` and its `issues` populated.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BundleInstallReport {
+    /// The bundle name (matches `<catalog>/bundles/<name>.yml`).
+    pub bundle: String,
+    /// Harnesses selected for the whole bundle install (sorted, deduped).
+    pub harnesses: Vec<HarnessId>,
+    /// Per-member outcomes, in manifest order.
+    pub items: Vec<InstallReport>,
+}
+
+/// A read-only preview of what [`install_bundle`] would do (`--dry-run`), and the
+/// basis for the partial-install confirmation: aggregated per-member previews.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BundleInstallPreview {
+    /// The bundle name (matches `<catalog>/bundles/<name>.yml`).
+    pub bundle: String,
+    /// Harnesses selected for the whole bundle install (sorted, deduped).
+    pub harnesses: Vec<HarnessId>,
+    /// Per-member previews, in manifest order.
+    pub items: Vec<InstallPreview>,
+}
+
+impl BundleInstallPreview {
+    /// True when any member can't be served for every selected harness — i.e.
+    /// applying would be a *partial* install (the CLI confirms before doing so).
+    pub fn is_partial(&self) -> bool {
+        self.items.iter().any(|p| !p.issues.is_empty())
+    }
+}
+
 /// Outcome of a full or scoped [`remove`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RemoveReport {
@@ -126,7 +162,7 @@ pub fn install_with(
     ctx: &HarnessContext,
 ) -> Result<InstallReport> {
     let (plan, resolver) = build_plan(catalog, item_type, id, ctx.harnesses())?;
-    reconcile(fs, project, item_type, id, "local", &plan, &resolver)
+    reconcile(fs, project, item_type, id, "local", None, &plan, &resolver)
 }
 
 /// A read-only preview of what [`install`] would do, without touching the project.
@@ -214,6 +250,95 @@ pub fn plan_install_with(
     })
 }
 
+/// Install every member of a catalog bundle for exactly the harnesses in `ctx`,
+/// tagging each installation with the bundle name.
+///
+/// Members are installed in manifest order (skills, then agents), each as its own
+/// atomic reconcile: a member that can't be served for a selected harness is
+/// skipped (reported in that member's `issues`) rather than failing the bundle.
+/// A missing/invalid manifest, or a member whose catalog source is gone, fails
+/// the whole call before any member is installed (validated by [`crate::bundle::load`]).
+pub fn install_bundle(
+    project: &Project,
+    catalog: &Catalog,
+    bundle: &str,
+    ctx: &HarnessContext,
+) -> Result<BundleInstallReport> {
+    install_bundle_with(&LocalFs, project, catalog, bundle, ctx)
+}
+
+/// [`install_bundle`] against an explicit destination transport (for embedding hosts).
+pub fn install_bundle_with(
+    fs: &dyn FsTransport,
+    project: &Project,
+    catalog: &Catalog,
+    bundle: &str,
+    ctx: &HarnessContext,
+) -> Result<BundleInstallReport> {
+    let loaded = crate::bundle::load(catalog, bundle)?;
+    let mut items = Vec::with_capacity(loaded.items.len());
+    for member in &loaded.items {
+        let (plan, resolver) = build_plan(catalog, member.item_type, &member.id, ctx.harnesses())?;
+        let report = reconcile(
+            fs,
+            project,
+            member.item_type,
+            &member.id,
+            "local",
+            Some(bundle),
+            &plan,
+            &resolver,
+        )?;
+        items.push(report);
+    }
+    Ok(BundleInstallReport {
+        bundle: bundle.to_string(),
+        harnesses: ctx.harnesses().to_vec(),
+        items,
+    })
+}
+
+/// Compute a [`BundleInstallPreview`] for `install_bundle` without applying it.
+///
+/// Powers both `--dry-run` and the partial-install confirmation. Validation of
+/// the manifest and its members happens up front, so a bad bundle errors here
+/// too (never a half-shown plan).
+pub fn plan_install_bundle(
+    project: &Project,
+    catalog: &Catalog,
+    bundle: &str,
+    ctx: &HarnessContext,
+) -> Result<BundleInstallPreview> {
+    plan_install_bundle_with(&LocalFs, project, catalog, bundle, ctx)
+}
+
+/// [`plan_install_bundle`] against an explicit transport.
+pub fn plan_install_bundle_with(
+    fs: &dyn FsTransport,
+    project: &Project,
+    catalog: &Catalog,
+    bundle: &str,
+    ctx: &HarnessContext,
+) -> Result<BundleInstallPreview> {
+    let loaded = crate::bundle::load(catalog, bundle)?;
+    let mut items = Vec::with_capacity(loaded.items.len());
+    for member in &loaded.items {
+        items.push(plan_install_with(
+            fs,
+            project,
+            catalog,
+            member.item_type,
+            &member.id,
+            ctx,
+        )?);
+    }
+    Ok(BundleInstallPreview {
+        bundle: bundle.to_string(),
+        harnesses: ctx.harnesses().to_vec(),
+        items,
+    })
+}
+
 /// Remove `id` from some or all harnesses.
 pub fn remove(
     project: &Project,
@@ -279,12 +404,15 @@ pub fn remove_with(
         let cat = Catalog::locate()?;
         let ctx = HarnessContext::new(remaining)?;
         let (plan, resolver) = build_plan(&cat, item_type, id, ctx.harnesses())?;
+        // Preserve the bundle tag across a reshape, so a partial uninstall never
+        // silently detaches a member from its bundle.
         let report = reconcile(
             fs,
             project,
             item_type,
             id,
             &existing.source,
+            existing.bundle.as_deref(),
             &plan,
             &resolver,
         )?;
@@ -381,12 +509,14 @@ pub(crate) fn build_plan(
 
 /// Materialize `plan`, remove stale materializations from a prior install, and
 /// update ownership + git excludes accordingly.
+#[allow(clippy::too_many_arguments)]
 fn reconcile(
     fs: &dyn FsTransport,
     project: &Project,
     item_type: ItemType,
     id: &str,
     source: &str,
+    bundle: Option<&str>,
     plan: &Plan,
     resolver: &SourceResolver,
 ) -> Result<InstallReport> {
@@ -453,7 +583,7 @@ fn reconcile(
         item_type,
         source: source.to_string(),
         git_ref: None,
-        bundle: None,
+        bundle: bundle.map(str::to_string),
         harnesses: harnesses.clone(),
         materializations: records.clone(),
     };
@@ -583,6 +713,12 @@ mod tests {
             &dir.join("agent.yml"),
             "variants:\n  copilot: copilot.agent.md\n  claude: claude.md\n",
         );
+    }
+
+    fn write_bundle(catalog: &Catalog, name: &str, manifest: &str) {
+        let dir = catalog.root.join("bundles");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join(format!("{name}.yml")), manifest).unwrap();
     }
 
     fn ctx(hs: &[HarnessId]) -> HarnessContext {
@@ -787,6 +923,113 @@ mod tests {
                 .is_file()
         );
         assert!(f.project.root.join(".claude/agents/reviewer.md").is_file());
+    }
+
+    #[test]
+    fn install_bundle_installs_all_members_and_tags_lockfile() {
+        let f = setup();
+        write_skill(&f.catalog, "deploy", None);
+        write_agent(&f.catalog, "reviewer");
+        write_bundle(&f.catalog, "web", "skills: [deploy]\nagents: [reviewer]\n");
+
+        let report =
+            install_bundle(&f.project, &f.catalog, "web", &ctx(&[HarnessId::Claude])).unwrap();
+
+        assert_eq!(report.bundle, "web");
+        assert_eq!(report.items.len(), 2);
+        assert!(report.items.iter().all(|i| i.issues.is_empty()));
+        assert!(
+            f.project
+                .root
+                .join(".claude/skills/deploy/SKILL.md")
+                .is_file()
+        );
+        assert!(f.project.root.join(".claude/agents/reviewer.md").is_file());
+
+        // Both installs are tagged with the bundle name in the lockfile.
+        let items = status(&f.project).unwrap();
+        assert_eq!(items.len(), 2);
+        assert!(items.iter().all(|i| i.bundle.as_deref() == Some("web")));
+    }
+
+    #[test]
+    fn install_bundle_skips_incompatible_member_but_installs_the_rest() {
+        let f = setup();
+        // A claude-only skill and a portable one, installed for claude+codex.
+        write_skill(&f.catalog, "clauded", Some("harnesses:\n  - claude\n"));
+        write_skill(&f.catalog, "portable", None);
+        write_bundle(&f.catalog, "mix", "skills: [clauded, portable]\n");
+
+        let report = install_bundle(
+            &f.project,
+            &f.catalog,
+            "mix",
+            &ctx(&[HarnessId::Claude, HarnessId::Codex]),
+        )
+        .unwrap();
+
+        let clauded = report.items.iter().find(|i| i.id == "clauded").unwrap();
+        assert_eq!(clauded.harnesses, vec![HarnessId::Claude]);
+        assert_eq!(clauded.issues.len(), 1);
+        assert_eq!(clauded.issues[0].harness, HarnessId::Codex);
+
+        let portable = report.items.iter().find(|i| i.id == "portable").unwrap();
+        assert!(portable.issues.is_empty());
+        assert!(portable.harnesses.contains(&HarnessId::Codex));
+
+        // Both members are tagged, and the partial one is still recorded.
+        let items = status(&f.project).unwrap();
+        assert_eq!(items.len(), 2);
+        assert!(items.iter().all(|i| i.bundle.as_deref() == Some("mix")));
+    }
+
+    #[test]
+    fn plan_install_bundle_flags_partial_without_touching_the_project() {
+        let f = setup();
+        write_skill(&f.catalog, "clauded", Some("harnesses:\n  - claude\n"));
+        write_skill(&f.catalog, "portable", None);
+        write_bundle(&f.catalog, "mix", "skills: [clauded, portable]\n");
+
+        let preview = plan_install_bundle(
+            &f.project,
+            &f.catalog,
+            "mix",
+            &ctx(&[HarnessId::Claude, HarnessId::Codex]),
+        )
+        .unwrap();
+
+        assert!(preview.is_partial());
+        assert_eq!(preview.items.len(), 2);
+        // Dry run: nothing was written and nothing recorded.
+        assert!(!f.project.root.join(".claude/skills").exists());
+        assert!(status(&f.project).unwrap().is_empty());
+    }
+
+    #[test]
+    fn plan_install_bundle_is_not_partial_when_all_members_fit() {
+        let f = setup();
+        write_skill(&f.catalog, "deploy", None);
+        write_skill(&f.catalog, "lint", None);
+        write_bundle(&f.catalog, "clean", "skills: [deploy, lint]\n");
+
+        let preview =
+            plan_install_bundle(&f.project, &f.catalog, "clean", &ctx(&[HarnessId::Claude]))
+                .unwrap();
+        assert!(!preview.is_partial());
+    }
+
+    #[test]
+    fn install_bundle_with_missing_member_fails_before_installing_anything() {
+        let f = setup();
+        write_skill(&f.catalog, "deploy", None);
+        write_bundle(&f.catalog, "bad", "skills: [deploy, nope]\n");
+
+        let err =
+            install_bundle(&f.project, &f.catalog, "bad", &ctx(&[HarnessId::Claude])).unwrap_err();
+        assert!(format!("{err:#}").contains("nope"), "{err:#}");
+        // Up-front validation: the valid member was never installed.
+        assert!(!f.project.root.join(".claude/skills/deploy").exists());
+        assert!(status(&f.project).unwrap().is_empty());
     }
 
     #[test]

@@ -155,8 +155,14 @@ enum Commands {
         /// Preview the plan without changing anything.
         #[arg(long)]
         dry_run: bool,
-        /// Catalog id of the skill/agent to install.
-        id: String,
+        /// Install every item listed by `bundles/<name>.yml` (harness-aware).
+        #[arg(long)]
+        bundle: Option<String>,
+        /// Skip the partial-install confirmation prompt.
+        #[arg(long)]
+        yes: bool,
+        /// Catalog id of the skill/agent to install (omit with --bundle).
+        id: Option<String>,
     },
     /// Uninstall a harness-aware install from some or all harnesses.
     Uninstall {
@@ -486,25 +492,68 @@ fn run() -> Result<()> {
             agent,
             harnesses,
             dry_run,
+            bundle,
+            yes,
             id,
         } => {
             let project = Project::locate(cli.project.clone())?;
             let catalog = Catalog::locate()?;
             let ctx = resolve_install_harnesses(harnesses, &project)?;
-            if *dry_run {
-                let preview =
-                    install::plan_install(&project, &catalog, item_type(*agent), id, &ctx)?;
-                if cli.json {
-                    println!("{}", serde_json::to_string(&preview)?);
-                } else {
-                    print_install_preview(&preview);
+            match (bundle.as_deref(), id.as_deref()) {
+                (Some(_), Some(_)) => {
+                    bail!("install accepts either <id> or --bundle <name>, not both")
                 }
-            } else {
-                let report = install::install(&project, &catalog, item_type(*agent), id, &ctx)?;
-                if cli.json {
-                    println!("{}", serde_json::to_string(&report)?);
-                } else {
-                    print_install_report(&project, &report);
+                (None, None) => bail!("install requires <id> or --bundle <name>"),
+                (Some(bundle), None) => {
+                    if *agent {
+                        bail!("install --bundle cannot be combined with --agent");
+                    }
+                    let preview = install::plan_install_bundle(&project, &catalog, bundle, &ctx)?;
+                    if *dry_run {
+                        if cli.json {
+                            println!("{}", serde_json::to_string(&preview)?);
+                        } else {
+                            print_bundle_install_preview(&preview);
+                            println!(
+                                "(dry run — nothing changed; re-run without --dry-run to apply)"
+                            );
+                        }
+                        return Ok(());
+                    }
+                    // Partial install (some member can't be served for every selected
+                    // harness): show the plan and confirm before applying.
+                    if !*yes && !cli.json && preview.is_partial() {
+                        print_bundle_install_preview(&preview);
+                        if !confirm_partial_install()? {
+                            println!("Aborted.");
+                            return Ok(());
+                        }
+                    }
+                    let report = install::install_bundle(&project, &catalog, bundle, &ctx)?;
+                    if cli.json {
+                        println!("{}", serde_json::to_string(&report)?);
+                    } else {
+                        print_bundle_install_report(&project, &report);
+                    }
+                }
+                (None, Some(id)) => {
+                    if *dry_run {
+                        let preview =
+                            install::plan_install(&project, &catalog, item_type(*agent), id, &ctx)?;
+                        if cli.json {
+                            println!("{}", serde_json::to_string(&preview)?);
+                        } else {
+                            print_install_preview(&preview);
+                        }
+                    } else {
+                        let report =
+                            install::install(&project, &catalog, item_type(*agent), id, &ctx)?;
+                        if cli.json {
+                            println!("{}", serde_json::to_string(&report)?);
+                        } else {
+                            print_install_report(&project, &report);
+                        }
+                    }
                 }
             }
         }
@@ -748,6 +797,14 @@ fn print_install_report(project: &Project, report: &install::InstallReport) {
     if report.not_a_git_repo {
         warn_not_git(project);
     }
+    print_install_report_body(report);
+    print_reload_guidance(report.item_type, &report.harnesses);
+}
+
+/// Print one install outcome (verb line, materializations, skipped) with no
+/// not-a-git-repo warning and no reload hint — the caller emits those once, for
+/// the whole run (so a bundle shows one aggregated reload block, not one per item).
+fn print_install_report_body(report: &install::InstallReport) {
     let harnesses = report
         .harnesses
         .iter()
@@ -787,7 +844,6 @@ fn print_install_report(project: &Project, report: &install::InstallReport) {
             println!("  {}: {}", issue.harness.as_str(), issue.reason.message());
         }
     }
-    print_reload_guidance(report.item_type, &report.harnesses);
 }
 
 /// Print post-install reload/restart guidance per served harness.
@@ -831,11 +887,18 @@ fn print_install_preview(preview: &install::InstallPreview) {
         type_name(preview.item_type),
         preview.id
     );
+    print_preview_sections(preview, "  ");
+    println!("(dry run — nothing changed; re-run without --dry-run to apply)");
+}
+
+/// Print the create/unchanged/remove/skipped sections of one preview at the given
+/// indent. Shared by single-item and per-bundle-member preview printing.
+fn print_preview_sections(preview: &install::InstallPreview, indent: &str) {
     if !preview.create.is_empty() {
-        println!("  create:");
+        println!("{indent}create:");
         for m in &preview.create {
             println!(
-                "    {}  ({})  [{}]",
+                "{indent}  {}  ({})  [{}]",
                 m.path,
                 covers_str(&m.covers),
                 mode_name(m.mode)
@@ -843,24 +906,106 @@ fn print_install_preview(preview: &install::InstallPreview) {
         }
     }
     if !preview.unchanged.is_empty() {
-        println!("  unchanged:");
+        println!("{indent}unchanged:");
         for m in &preview.unchanged {
-            println!("    {}  ({})", m.path, covers_str(&m.covers));
+            println!("{indent}  {}  ({})", m.path, covers_str(&m.covers));
         }
     }
     if !preview.remove.is_empty() {
-        println!("  remove (reshape):");
+        println!("{indent}remove (reshape):");
         for p in &preview.remove {
-            println!("    {p}");
+            println!("{indent}  {p}");
         }
     }
     if !preview.issues.is_empty() {
-        println!("  skipped:");
+        println!("{indent}skipped:");
         for issue in &preview.issues {
-            println!("    {}: {}", issue.harness.as_str(), issue.reason.message());
+            println!(
+                "{indent}  {}: {}",
+                issue.harness.as_str(),
+                issue.reason.message()
+            );
         }
     }
-    println!("(dry run — nothing changed; re-run without --dry-run to apply)");
+}
+
+/// Print an aggregated bundle-install plan (dry-run and partial-install confirm).
+/// The caller adds the trailing dry-run note or confirm prompt.
+fn print_bundle_install_preview(preview: &install::BundleInstallPreview) {
+    let harnesses = preview
+        .harnesses
+        .iter()
+        .map(|h| h.as_str())
+        .collect::<Vec<_>>()
+        .join(", ");
+    println!("Plan: bundle '{}' for {harnesses}", preview.bundle);
+    for item in &preview.items {
+        let suffix = if item.replaces {
+            "  (reshapes an existing install)"
+        } else {
+            ""
+        };
+        println!("  {} '{}'{suffix}:", type_name(item.item_type), item.id);
+        print_preview_sections(item, "    ");
+    }
+    if preview.is_partial() {
+        println!("(partial — some items can't be served for every selected harness)");
+    }
+}
+
+/// Print the outcome of a bundle install: a header, then each member's report.
+fn print_bundle_install_report(project: &Project, report: &install::BundleInstallReport) {
+    if report.items.iter().any(|i| i.not_a_git_repo) {
+        warn_not_git(project);
+    }
+    let harnesses = report
+        .harnesses
+        .iter()
+        .map(|h| h.as_str())
+        .collect::<Vec<_>>()
+        .join(", ");
+    println!(
+        "Installed bundle '{}' for {harnesses} ({} item(s))",
+        report.bundle,
+        report.items.len()
+    );
+    for item in &report.items {
+        println!();
+        print_install_report_body(item);
+    }
+    // One aggregated reload block for the whole bundle: union the served harnesses
+    // per item type, so the (identical) skills hint isn't repeated per member and
+    // agent hints are consolidated.
+    for item_type in [ItemType::Skill, ItemType::Agent] {
+        let mut served: Vec<HarnessId> = Vec::new();
+        for item in report.items.iter().filter(|i| i.item_type == item_type) {
+            for h in &item.harnesses {
+                if !served.contains(h) {
+                    served.push(*h);
+                }
+            }
+        }
+        served.sort();
+        if !served.is_empty() {
+            print_reload_guidance(item_type, &served);
+        }
+    }
+}
+
+/// Confirm proceeding with a partial bundle install at an interactive prompt.
+fn confirm_partial_install() -> Result<bool> {
+    use std::io::{IsTerminal, Write};
+    if !std::io::stdin().is_terminal() {
+        bail!(
+            "refusing a partial bundle install non-interactively; re-run with --yes to install \
+             the servable items and skip the rest"
+        );
+    }
+    print!("Proceed with a partial install (skipping the items above)? [y/N] ");
+    std::io::stdout().flush().ok();
+    let mut line = String::new();
+    std::io::stdin().read_line(&mut line)?;
+    Ok(matches!(line.trim(), "y" | "Y" | "yes" | "Yes"))
 }
 
 fn covers_str(covers: &[HarnessId]) -> String {

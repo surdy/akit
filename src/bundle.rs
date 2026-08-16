@@ -10,7 +10,7 @@
 //! Either key may be omitted and is treated as an empty list. Loading validates every referenced
 //! item exists before any add operation starts, so a bad bundle fails as a whole.
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use serde::Deserialize;
 
 use crate::catalog::Catalog;
@@ -64,9 +64,14 @@ pub fn load(catalog: &Catalog, name: &str) -> Result<Bundle> {
         });
     }
     for agent in manifest.agents {
-        catalog
-            .resolve_agent(&agent)
-            .with_context(|| format!("bundle '{name}' references agent '{agent}'"))?;
+        // Accept either on-disk shape: a legacy flat `agents/<id>.agent.md` file
+        // or a harness-aware `agents/<id>/` package. The existence check is
+        // engine-agnostic; each engine resolves its own shape when installing.
+        if catalog.resolve_agent(&agent).is_err() {
+            catalog
+                .resolve_agent_package(&agent)
+                .with_context(|| format!("bundle '{name}' references agent '{agent}'"))?;
+        }
         items.push(BundleItem {
             item_type: ItemType::Agent,
             id: agent,

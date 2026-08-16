@@ -958,6 +958,7 @@ akit install -H claude deploy-to-vercel  # flags win: claude only
 
 ```bash
 akit install [--agent] [-H <id>]... [--dry-run] <id>
+akit install [-H <id>]... [--dry-run] [--yes] --bundle <name>
 ```
 
 Installs (or reshapes) catalog item `<id>` for exactly the resolved harness set. `install` is
@@ -1041,6 +1042,44 @@ A **real** `install` (no `--dry-run`) with `--json` emits the `InstallReport` ob
 `harnesses`, the `materializations` now backing the install (each
 `{ "path", "mode", "covers" }`, plus `"hash"` for copies), any `issues`, `replaced` (an existing
 install was reshaped), and `not_a_git_repo`.
+
+#### `--bundle <name>` — install a whole bundle, harness-aware
+
+With `--bundle <name>` (in place of an `<id>`), `install` reads `<catalog>/bundles/<name>.yml` and
+installs **every** listed skill and agent for the resolved harness set. Each member is planned and
+materialized independently — the same harness-compatibility rules apply per member — so a member
+that can't be served for a selected harness is **skipped** (listed under `skipped:`) rather than
+failing the whole bundle. A missing manifest, or a member missing from the catalog, fails up front
+before anything is installed. Each installed member is tagged with the bundle name in
+`.akit/kit.lock.json`. `--bundle` cannot be combined with `--agent` or a positional `<id>`.
+
+When the plan is **partial** — at least one member can't be served for every selected harness —
+`install` prints the plan and asks for confirmation before applying. Pass `--yes` to skip the
+prompt (required non-interactively, e.g. in CI). A fully-servable bundle installs with no prompt.
+`--dry-run` prints the aggregated per-member plan and changes nothing.
+
+```bash
+$ akit install -H claude -H codex --bundle web
+Plan: bundle 'web' for claude, codex
+  skill 'deploy':
+    create:
+      .agents/skills/deploy  (codex)  [copy]
+      .claude/skills/deploy  (claude)  [copy]
+  skill 'clauded':
+    create:
+      .claude/skills/clauded  (claude)  [copy]
+    skipped:
+      codex: skill declares it is not compatible
+(partial — some items can't be served for every selected harness)
+Proceed with a partial install (skipping the items above)? [y/N] y
+Installed bundle 'web' for claude, codex (2 item(s))
+…
+```
+
+With `--json`, `--dry-run --bundle` emits a `BundleInstallPreview` (`{ "bundle", "harnesses",
+"items": [InstallPreview…] }`) and a real `--bundle` install emits a `BundleInstallReport`
+(`{ "bundle", "harnesses", "items": [InstallReport…] }`), each member object being exactly the
+single-item shape documented above.
 
 ### `uninstall` — remove a harness-aware install
 

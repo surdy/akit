@@ -50,6 +50,36 @@ fn make_bundle(catalog_root: &Path, name: &str, manifest: &str) {
     fs::write(dir.join(format!("{name}.yml")), manifest).unwrap();
 }
 
+/// A skill restricted to specific harnesses via `skill.yml` (harness-aware).
+fn make_skill_only(catalog_root: &Path, name: &str, harnesses: &[&str]) {
+    make_skill(catalog_root, name);
+    let list = harnesses
+        .iter()
+        .map(|h| format!("  - {h}\n"))
+        .collect::<String>();
+    fs::write(
+        catalog_root.join("skills").join(name).join("skill.yml"),
+        format!("harnesses:\n{list}"),
+    )
+    .unwrap();
+}
+
+/// Run the `akit` binary with the catalog + harness env pointed at a fixture.
+fn akit_install(
+    proj: &Path,
+    catalog_root: &Path,
+    harnesses: &str,
+    args: &[&str],
+) -> std::process::Output {
+    Command::new(env!("CARGO_BIN_EXE_akit"))
+        .args(["--project", proj.to_str().unwrap()])
+        .args(args)
+        .env("KIT_CATALOG_DIR", catalog_root)
+        .env("AKIT_HARNESSES", harnesses)
+        .output()
+        .expect("akit binary should run")
+}
+
 fn type_key(item_type: ItemType) -> &'static str {
     match item_type {
         ItemType::Skill => "skill",
@@ -533,4 +563,129 @@ fn bundle_health_reports_unknown_when_manifest_is_absent() {
     assert_eq!(ghost.expected, None);
     assert_eq!(ghost.installed, 1);
     assert!(ghost.missing.is_empty());
+}
+
+// ── harness-aware `install --bundle` (issue #45) ─────────────────────────────
+
+#[test]
+fn cli_install_bundle_installs_all_members_tagged() {
+    let tmp = tempfile::tempdir().unwrap();
+    let base = tmp.path();
+    let catalog_root = base.join("catalog");
+    make_skill(&catalog_root, "deploy");
+    make_skill(&catalog_root, "lint");
+    make_bundle(&catalog_root, "web", "skills: [deploy, lint]\n");
+    let (proj, _project) = init_project(base);
+
+    let out = akit_install(
+        &proj,
+        &catalog_root,
+        "claude",
+        &["install", "--bundle", "web"],
+    );
+    assert!(
+        out.status.success(),
+        "install failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("Installed bundle 'web'"), "{stdout}");
+
+    assert!(proj.join(".claude/skills/deploy/SKILL.md").is_file());
+    assert!(proj.join(".claude/skills/lint/SKILL.md").is_file());
+    // Both installs carry the bundle tag in the harness-aware lockfile.
+    let lock = fs::read_to_string(proj.join(".akit/kit.lock.json")).unwrap();
+    assert_eq!(lock.matches("\"bundle\": \"web\"").count(), 2, "{lock}");
+}
+
+#[test]
+fn cli_install_bundle_dry_run_changes_nothing() {
+    let tmp = tempfile::tempdir().unwrap();
+    let base = tmp.path();
+    let catalog_root = base.join("catalog");
+    make_skill(&catalog_root, "deploy");
+    make_bundle(&catalog_root, "web", "skills: [deploy]\n");
+    let (proj, _project) = init_project(base);
+
+    let out = akit_install(
+        &proj,
+        &catalog_root,
+        "claude",
+        &["install", "--bundle", "web", "--dry-run"],
+    );
+    assert!(out.status.success());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("Plan: bundle 'web'"), "{stdout}");
+    assert!(stdout.contains("dry run"), "{stdout}");
+    // Nothing materialized, no lockfile written.
+    assert!(!proj.join(".claude/skills/deploy").exists());
+    assert!(!proj.join(".akit/kit.lock.json").exists());
+}
+
+#[test]
+fn cli_install_bundle_partial_needs_yes_non_interactive() {
+    let tmp = tempfile::tempdir().unwrap();
+    let base = tmp.path();
+    let catalog_root = base.join("catalog");
+    make_skill_only(&catalog_root, "clauded", &["claude"]);
+    make_skill(&catalog_root, "portable");
+    make_bundle(&catalog_root, "mix", "skills: [clauded, portable]\n");
+    let (proj, _project) = init_project(base);
+
+    // Non-interactive partial install (codex can't take `clauded`) must refuse
+    // without --yes rather than hang or silently do a partial install.
+    let refused = akit_install(
+        &proj,
+        &catalog_root,
+        "claude,codex",
+        &["install", "--bundle", "mix"],
+    );
+    assert!(!refused.status.success());
+    assert!(
+        String::from_utf8_lossy(&refused.stderr).contains("--yes"),
+        "stderr: {}",
+        String::from_utf8_lossy(&refused.stderr)
+    );
+    assert!(!proj.join(".akit/kit.lock.json").exists());
+
+    // With --yes it installs the servable parts and skips the rest.
+    let ok = akit_install(
+        &proj,
+        &catalog_root,
+        "claude,codex",
+        &["install", "--bundle", "mix", "--yes"],
+    );
+    assert!(
+        ok.status.success(),
+        "install --yes failed: {}",
+        String::from_utf8_lossy(&ok.stderr)
+    );
+    assert!(proj.join(".claude/skills/clauded/SKILL.md").is_file());
+    assert!(proj.join(".claude/skills/portable/SKILL.md").is_file());
+    // `portable` reaches codex via the shared neutral path; `clauded` does not.
+    assert!(proj.join(".agents/skills/portable/SKILL.md").is_file());
+    assert!(!proj.join(".agents/skills/clauded").exists());
+}
+
+#[test]
+fn cli_install_rejects_id_and_bundle_together() {
+    let tmp = tempfile::tempdir().unwrap();
+    let base = tmp.path();
+    let catalog_root = base.join("catalog");
+    make_skill(&catalog_root, "deploy");
+    make_bundle(&catalog_root, "web", "skills: [deploy]\n");
+    let (proj, _project) = init_project(base);
+
+    let out = akit_install(
+        &proj,
+        &catalog_root,
+        "claude",
+        &["install", "--bundle", "web", "deploy"],
+    );
+    assert!(!out.status.success());
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("either <id> or --bundle"),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
 }
