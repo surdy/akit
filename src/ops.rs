@@ -328,9 +328,16 @@ pub fn pull_into_catalog(
             item_type,
             id: report.id.clone(),
             commit: report.commit.clone(),
+            agent_package: is_agent_package(catalog, item_type, &report.id),
         },
     )?;
     Ok(report)
+}
+
+/// Whether `(item_type, id)` is materialized in the catalog as a harness-aware
+/// agent package directory (rather than a legacy flat `.agent.md` file).
+fn is_agent_package(catalog: &Catalog, item_type: ItemType, id: &str) -> bool {
+    item_type == ItemType::Agent && catalog.agent_package_dir(id).is_dir()
 }
 
 /// Whether to reuse the source cache as-is or re-fetch the latest commit first.
@@ -365,12 +372,7 @@ fn pull_copy(
     let default_id = remote_id(item_type, spec);
     let id = as_id.unwrap_or(&default_id);
     ensure_simple_id(id)?;
-    validate_remote_source(item_type, id, &src)?;
-
-    let dst = match item_type {
-        ItemType::Skill => catalog.skill_source(id),
-        ItemType::Agent => catalog.agent_source(id),
-    };
+    let dst = catalog_dst_for_source(catalog, item_type, id, &src)?;
 
     let existed = std::fs::symlink_metadata(&dst).is_ok();
     let mut overwritten = false;
@@ -512,6 +514,7 @@ pub fn restore_catalog(
                             item_type: entry.item_type,
                             id: entry.id.clone(),
                             commit: report.commit.clone(),
+                            agent_package: entry.agent_package,
                         },
                     )?;
                 }
@@ -630,12 +633,7 @@ fn pull_check(
     let default_id = remote_id(item_type, spec);
     let id = as_id.unwrap_or(&default_id);
     ensure_simple_id(id)?;
-    validate_remote_source(item_type, id, &src)?;
-
-    let dst = match item_type {
-        ItemType::Skill => catalog.skill_source(id),
-        ItemType::Agent => catalog.agent_source(id),
-    };
+    let dst = catalog_dst_for_source(catalog, item_type, id, &src)?;
     if std::fs::symlink_metadata(&dst).is_err() {
         return Ok(true);
     }
@@ -762,6 +760,7 @@ pub fn update_catalog(
                             item_type: entry.item_type,
                             id: entry.id.clone(),
                             commit: new_commit.clone(),
+                            agent_package: entry.agent_package,
                         },
                     )?;
                 }
@@ -899,6 +898,7 @@ pub fn rollback_catalog(
             item_type,
             id: entry.id.clone(),
             commit: Some(full.clone()),
+            agent_package: entry.agent_package,
         },
     )?;
 
@@ -971,10 +971,7 @@ pub fn drop_from_catalog(catalog: &Catalog, item_type: ItemType, id: &str) -> Re
         .into_iter()
         .find(|e| e.item_type == item_type && e.id == id);
 
-    let dst = match item_type {
-        ItemType::Skill => catalog.skill_source(id),
-        ItemType::Agent => catalog.agent_source(id),
-    };
+    let dst = drop_target(catalog, item_type, id);
     let item_removed = fsops::remove(&dst)?;
     let manifest_pruned = manifest::remove(catalog, item_type, id)?;
 
@@ -999,6 +996,23 @@ pub fn drop_from_catalog(catalog: &Catalog, item_type: ItemType, id: &str) -> Re
         item_removed,
         manifest_pruned,
     })
+}
+
+/// The catalog path `drop` should remove for `(item_type, id)`. For an agent this
+/// prefers a package directory (`agents/<id>/`) when present, else the legacy flat
+/// `agents/<id>.agent.md` file.
+fn drop_target(catalog: &Catalog, item_type: ItemType, id: &str) -> PathBuf {
+    match item_type {
+        ItemType::Skill => catalog.skill_source(id),
+        ItemType::Agent => {
+            let pkg = catalog.agent_package_dir(id);
+            if pkg.is_dir() {
+                pkg
+            } else {
+                catalog.agent_source(id)
+            }
+        }
+    }
 }
 
 fn ensure_simple_id(id: &str) -> Result<()> {
@@ -1109,23 +1123,12 @@ fn record_materialized(project: &Project, input: MaterializeRecord<'_>) -> Resul
     })
 }
 
+/// Validate a fetched remote source for the **legacy project `add`** path, where
+/// an agent is always a single Copilot-shaped `.agent.md` file. The catalog pull
+/// path uses [`catalog_dst_for_source`] instead, which also accepts agent packages.
 fn validate_remote_source(item_type: ItemType, id: &str, src: &std::path::Path) -> Result<()> {
     match item_type {
-        ItemType::Skill => {
-            if !src.is_dir() {
-                anyhow::bail!(
-                    "remote skill '{id}' must be a directory (resolved {})",
-                    src.display()
-                );
-            }
-            let skill_md = src.join("SKILL.md");
-            if !skill_md.is_file() {
-                anyhow::bail!(
-                    "remote skill '{id}' is missing SKILL.md ({})",
-                    skill_md.display()
-                );
-            }
-        }
+        ItemType::Skill => validate_remote_skill(id, src)?,
         ItemType::Agent => {
             if !src.is_file() {
                 anyhow::bail!(
@@ -1136,6 +1139,55 @@ fn validate_remote_source(item_type: ItemType, id: &str, src: &std::path::Path) 
         }
     }
     Ok(())
+}
+
+fn validate_remote_skill(id: &str, src: &std::path::Path) -> Result<()> {
+    if !src.is_dir() {
+        anyhow::bail!(
+            "remote skill '{id}' must be a directory (resolved {})",
+            src.display()
+        );
+    }
+    let skill_md = src.join("SKILL.md");
+    if !skill_md.is_file() {
+        anyhow::bail!(
+            "remote skill '{id}' is missing SKILL.md ({})",
+            skill_md.display()
+        );
+    }
+    Ok(())
+}
+
+/// Resolve where a fetched remote item is stored **in the catalog**, validating
+/// its on-disk shape. Skills are always directories. An agent may arrive as a
+/// harness-aware **package** directory (`agent.yml` + variants) — the target
+/// contract, stored at `agents/<id>/` — or a legacy flat `.agent.md` file, stored
+/// at `agents/<id>.agent.md`. This is what puts `pull`/`update`/`restore` onto
+/// agent packages while still accepting legacy flat sources.
+fn catalog_dst_for_source(
+    catalog: &Catalog,
+    item_type: ItemType,
+    id: &str,
+    src: &std::path::Path,
+) -> Result<PathBuf> {
+    match item_type {
+        ItemType::Skill => {
+            validate_remote_skill(id, src)?;
+            Ok(catalog.skill_source(id))
+        }
+        ItemType::Agent if src.is_dir() => {
+            // A directory must be a valid agent package (validates agent.yml + variants).
+            crate::agentpkg::AgentPackage::load(id, src)
+                .with_context(|| format!("remote agent '{id}' is not a valid agent package"))?;
+            Ok(catalog.agent_package_dir(id))
+        }
+        ItemType::Agent if src.is_file() => Ok(catalog.agent_source(id)),
+        ItemType::Agent => anyhow::bail!(
+            "remote agent '{id}' resolved to neither an agent package directory nor a \
+             .agent.md file ({})",
+            src.display()
+        ),
+    }
 }
 
 fn remote_id(item_type: ItemType, spec: &SourceSpec) -> String {

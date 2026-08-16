@@ -104,6 +104,65 @@ fn make_local_bare_remote(base: &Path) -> PathBuf {
     git_base
 }
 
+/// Build a local bare remote whose repo holds a harness-aware agent **package**
+/// at `agents/reviewer/` (an `agent.yml` plus one native variant per harness).
+/// Returns the git base dir; the package is reachable as `acme/kit-agents/agents/reviewer`.
+fn make_local_bare_agent_pkg_remote(base: &Path) -> PathBuf {
+    let work = base.join("agent-remote-work");
+    let pkg = work.join("agents").join("reviewer");
+    fs::create_dir_all(&pkg).unwrap();
+    fs::write(
+        pkg.join("agent.yml"),
+        "id: reviewer\nname: Code Reviewer\ndescription: Reviews PRs\n\
+         variants:\n  copilot: copilot.agent.md\n  claude: claude.md\n",
+    )
+    .unwrap();
+    fs::write(pkg.join("copilot.agent.md"), "---\nname: r\n---\nprompt\n").unwrap();
+    fs::write(pkg.join("claude.md"), "---\nname: r\n---\nprompt\n").unwrap();
+
+    assert_git(&["init", "-q", "--initial-branch", "main"], &work);
+    assert_git(&["add", "."], &work);
+    assert_git(
+        &[
+            "-c",
+            "user.email=ci@example.com",
+            "-c",
+            "user.name=ci",
+            "commit",
+            "-q",
+            "-m",
+            "initial",
+        ],
+        &work,
+    );
+
+    let git_base = base.join("git-base");
+    let bare = git_base.join("acme").join("kit-agents");
+    fs::create_dir_all(bare.parent().unwrap()).unwrap();
+    assert_git(
+        &[
+            "clone",
+            "-q",
+            "--bare",
+            work.to_str().unwrap(),
+            bare.to_str().unwrap(),
+        ],
+        base,
+    );
+    // Allow SHA fetches so a commit-pinned `restore` can fetch the recorded commit.
+    assert_git(
+        &[
+            "--git-dir",
+            bare.to_str().unwrap(),
+            "config",
+            "uploadpack.allowReachableSHA1InWant",
+            "true",
+        ],
+        base,
+    );
+    git_base
+}
+
 fn run_akit(
     args: &[&str],
     project: &Path,
@@ -901,4 +960,93 @@ fn update_advances_and_records_commit() {
     // The manifest now records the advanced commit.
     let manifest = fs::read_to_string(catalog.join("akit.yml")).unwrap();
     assert!(manifest.contains(&format!("commit: {c2}")), "{manifest}");
+}
+
+#[test]
+fn pull_agent_package_into_catalog_and_drop() {
+    let tmp = test_tempdir();
+    let base = tmp.path();
+    let git_base = make_local_bare_agent_pkg_remote(base);
+    let cache = base.join("cache");
+    let catalog = base.join("catalog");
+    let base_url = format!("file://{}", git_base.display());
+
+    // Pull the harness-aware agent package into the catalog.
+    let output = run_akit_pull(
+        &["pull", "--agent", "acme/kit-agents/agents/reviewer#main"],
+        &catalog,
+        &cache,
+        &base_url,
+    );
+    assert!(
+        output.status.success(),
+        "akit pull --agent failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(json["id"], "reviewer");
+    assert_eq!(json["type"], "agent");
+    assert_eq!(json["created"], true);
+
+    // The catalog now holds a package DIRECTORY (agent.yml + variants), not a flat file.
+    let pkg = catalog.join("agents/reviewer");
+    assert!(
+        pkg.join("agent.yml").is_file(),
+        "package descriptor missing"
+    );
+    assert!(pkg.join("copilot.agent.md").is_file());
+    assert!(pkg.join("claude.md").is_file());
+    assert!(!catalog.join("agents/reviewer.agent.md").exists());
+
+    // `ls` surfaces it as a package with its supported harnesses.
+    let ls = Command::new(env!("CARGO_BIN_EXE_akit"))
+        .args(["--json", "ls"])
+        .env("KIT_CATALOG_DIR", &catalog)
+        .output()
+        .unwrap();
+    let items: serde_json::Value = serde_json::from_slice(&ls.stdout).unwrap();
+    let reviewer = items
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|i| i["id"] == "reviewer")
+        .expect("reviewer listed");
+    assert_eq!(
+        reviewer["harnesses"],
+        serde_json::json!(["copilot", "claude"])
+    );
+
+    // `restore` rebootstraps the package from the manifest after the catalog copy
+    // is lost (round-trips the whole directory, not a flat file).
+    fs::remove_dir_all(&pkg).unwrap();
+    let restore = run_akit_pull(&["restore"], &catalog, &cache, &base_url);
+    assert!(
+        restore.status.success(),
+        "restore failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&restore.stdout),
+        String::from_utf8_lossy(&restore.stderr)
+    );
+    assert!(
+        pkg.join("agent.yml").is_file(),
+        "restore should recreate the package directory"
+    );
+    assert!(pkg.join("copilot.agent.md").is_file());
+
+    // `drop` removes the whole package directory and prunes the manifest.
+    let drop = run_akit_pull(
+        &["drop", "--agent", "reviewer"],
+        &catalog,
+        &cache,
+        &base_url,
+    );
+    assert!(
+        drop.status.success(),
+        "{}",
+        String::from_utf8_lossy(&drop.stderr)
+    );
+    let djson: serde_json::Value = serde_json::from_slice(&drop.stdout).unwrap();
+    assert_eq!(djson["item_removed"], true);
+    assert_eq!(djson["manifest_pruned"], true);
+    assert!(!pkg.exists(), "package directory should be gone after drop");
 }

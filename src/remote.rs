@@ -383,11 +383,16 @@ fn resolved_item_path(checkout: &Path, spec: &SourceSpec) -> PathBuf {
         return skill_dir;
     }
 
-    let agent_leaf = spec
-        .path
-        .strip_suffix(".agent.md")
-        .map_or_else(|| format!("{}.agent.md", spec.path), str::to_string);
-    let agent_file = checkout.join("agents").join(agent_leaf);
+    // A harness-aware agent *package* dir (`agents/<path>/agent.yml`) is preferred
+    // over the legacy flat file when a bare path is given — packages are the
+    // target contract.
+    let stem = spec.path.strip_suffix(".agent.md").unwrap_or(&spec.path);
+    let agent_pkg = checkout.join("agents").join(stem);
+    if agent_pkg.join(crate::agentpkg::AGENT_DESCRIPTOR).is_file() {
+        return agent_pkg;
+    }
+
+    let agent_file = checkout.join("agents").join(format!("{stem}.agent.md"));
     if agent_file.exists() {
         return agent_file;
     }

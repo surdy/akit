@@ -13,7 +13,11 @@
 //! dependencies:
 //!   apm:
 //!     - vercel-labs/agent-skills/deploy-to-vercel#main   # skill (string shorthand)
-//!     - acme/kits/reviewer.agent.md#main                 # agent (.agent.md file primitive)
+//!     - acme/kits/reviewer.agent.md#main                 # legacy flat agent (.agent.md primitive)
+//!     - git: acme/kits                                   # harness-aware agent package
+//!       path: agents/reviewer                            #   (real dir path + explicit type)
+//!       type: agent
+//!       ref: main
 //!     - git: acme/kits/deploy                            # custom id via object form
 //!       ref: main
 //!       alias: vercel
@@ -51,6 +55,12 @@ pub struct ManifestEntry {
     /// `old → new` diffs. `None` for legacy entries written before SHA recording and for
     /// items that could not be resolved to a commit.
     pub commit: Option<String>,
+    /// Whether this agent is a harness-aware **package** directory (`agent.yml` +
+    /// variants) rather than a legacy flat `.agent.md` file. Always `false` for
+    /// skills. A package keeps its real directory path and records an explicit
+    /// `type: agent` in the manifest — the `.agent.md` suffix trick used to
+    /// classify flat agents can't encode a package path.
+    pub agent_package: bool,
 }
 
 /// Path to the catalog manifest (may not exist).
@@ -190,11 +200,12 @@ fn ensure_sequence<'a>(map: &'a mut Mapping, key: &str) -> Result<&'a mut Vec<Va
         .with_context(|| format!("`{key}` must be a sequence"))
 }
 
-/// Canonical repo path for an entry, with the `.agent.md` suffix forced for agents so the
-/// APM file-primitive classification round-trips.
+/// Canonical repo path for an entry. A legacy flat agent gets the `.agent.md` suffix
+/// forced so the APM file-primitive classification round-trips; an agent **package**
+/// keeps its real directory path (its type is recorded explicitly instead).
 fn canonical_path(entry: &ManifestEntry) -> String {
     let path = &entry.spec.path;
-    if entry.item_type == ItemType::Agent && !path.ends_with(".agent.md") {
+    if entry.item_type == ItemType::Agent && !entry.agent_package && !path.ends_with(".agent.md") {
         format!("{path}.agent.md")
     } else {
         path.clone()
@@ -207,9 +218,10 @@ fn entry_to_value(entry: &ManifestEntry) -> Value {
     let is_default_id = entry.id == default_id;
 
     // String shorthand stays the canonical form when there is nothing extra to record: the id is
-    // the default and no resolved commit needs persisting. A recorded commit forces the object
-    // form because a single string can't carry both the symbolic ref and the commit.
-    if is_default_id && entry.commit.is_none() {
+    // the default, no resolved commit needs persisting, and the item is not an agent package (a
+    // bare package path can't be classified by suffix, so it needs the object form's explicit
+    // `type`). A recorded commit also forces the object form (a string can't carry ref + commit).
+    if is_default_id && entry.commit.is_none() && !entry.agent_package {
         let base = format!("{}/{}/{}", entry.spec.owner, entry.spec.repo, path);
         let shorthand = match &entry.spec.ref_ {
             Some(git_ref) => format!("{base}#{git_ref}"),
@@ -218,13 +230,17 @@ fn entry_to_value(entry: &ManifestEntry) -> Value {
         return Value::String(shorthand);
     }
 
-    // Object form: APM `git`/`path`/`ref`, plus our `commit` and (for `--as`) `alias`.
+    // Object form: APM `git`/`path`/`ref`, plus our `type` (for packages), `commit`, and
+    // (for `--as`) `alias`.
     let mut object = Mapping::new();
     object.insert(
         string("git"),
         string(&format!("{}/{}", entry.spec.owner, entry.spec.repo)),
     );
     object.insert(string("path"), string(&path));
+    if entry.agent_package {
+        object.insert(string("type"), string("agent"));
+    }
     if let Some(git_ref) = &entry.spec.ref_ {
         object.insert(string("ref"), string(git_ref));
     }
@@ -248,11 +264,13 @@ fn parse_entry(value: &Value) -> Option<ManifestEntry> {
                 item_type,
                 id,
                 commit: None,
+                agent_package: false,
             })
         }
         Value::Mapping(object) => {
             let git = object.get("git").and_then(Value::as_str)?;
             let path = object.get("path").and_then(Value::as_str);
+            let explicit_type = object.get("type").and_then(Value::as_str);
             let git_ref = object
                 .get("ref")
                 .and_then(Value::as_str)
@@ -274,13 +292,22 @@ fn parse_entry(value: &Value) -> Option<ManifestEntry> {
                 None => git.to_string(),
             };
             let spec = SourceSpec::from_source_and_ref(&source, git_ref)?;
-            let item_type = type_from_path(&spec.path);
-            let id = alias.unwrap_or_else(|| default_id(item_type, &spec));
+            // An explicit `type` wins (it's how an agent package declares itself
+            // despite a suffix-less path); otherwise fall back to path inference.
+            let item_type = match explicit_type {
+                Some("agent") => ItemType::Agent,
+                Some("skill") => ItemType::Skill,
+                _ => type_from_path(&spec.path),
+            };
+            // A package is an agent whose recorded path is not a `.agent.md` file.
+            let agent_package = item_type == ItemType::Agent && !spec.path.ends_with(".agent.md");
+            let id = alias.unwrap_or_else(|| default_id_for(item_type, &spec.path));
             Some(ManifestEntry {
                 spec,
                 item_type,
                 id,
                 commit,
+                agent_package,
             })
         }
         _ => None,
@@ -334,6 +361,7 @@ mod tests {
             item_type: ItemType::Skill,
             id: "deploy".to_string(),
             commit: None,
+            agent_package: false,
         };
         record(&c, &entry).unwrap();
 
@@ -352,6 +380,7 @@ mod tests {
             item_type: ItemType::Agent,
             id: "reviewer".to_string(),
             commit: None,
+            agent_package: false,
         };
         record(&c, &entry).unwrap();
 
@@ -365,6 +394,32 @@ mod tests {
     }
 
     #[test]
+    fn agent_package_roundtrips_via_object_form_with_type() {
+        let tmp = TempDir::new().unwrap();
+        let c = catalog(&tmp);
+        let entry = ManifestEntry {
+            spec: spec("acme/repo/agents/reviewer#main"),
+            item_type: ItemType::Agent,
+            id: "reviewer".to_string(),
+            commit: None,
+            agent_package: true,
+        };
+        record(&c, &entry).unwrap();
+
+        // A package keeps its real directory path (no forced `.agent.md`) and records
+        // an explicit `type: agent` so it can't be misread as a skill.
+        let text = std::fs::read_to_string(manifest_path(&c)).unwrap();
+        assert!(text.contains("path: agents/reviewer"), "{text}");
+        assert!(!text.contains(".agent.md"), "{text}");
+        assert!(text.contains("type: agent"), "{text}");
+
+        let got = entries(&c).unwrap();
+        assert_eq!(got, vec![entry]);
+        assert!(got[0].agent_package);
+        assert_eq!(got[0].spec.path, "agents/reviewer");
+    }
+
+    #[test]
     fn custom_id_uses_object_form_with_alias() {
         let tmp = TempDir::new().unwrap();
         let c = catalog(&tmp);
@@ -373,6 +428,7 @@ mod tests {
             item_type: ItemType::Skill,
             id: "vercel".to_string(),
             commit: None,
+            agent_package: false,
         };
         record(&c, &entry).unwrap();
 
@@ -391,6 +447,7 @@ mod tests {
             item_type: ItemType::Skill,
             id: "deploy".to_string(),
             commit: Some("0123456789abcdef0123456789abcdef01234567".to_string()),
+            agent_package: false,
         };
         record(&c, &entry).unwrap();
 
@@ -435,6 +492,7 @@ mod tests {
                 item_type: ItemType::Skill,
                 id: "deploy".to_string(),
                 commit: None,
+                agent_package: false,
             },
         )
         .unwrap();
@@ -443,6 +501,7 @@ mod tests {
             item_type: ItemType::Skill,
             id: "deploy".to_string(),
             commit: None,
+            agent_package: false,
         };
         record(&c, &updated).unwrap();
 
@@ -467,6 +526,7 @@ mod tests {
                 item_type: ItemType::Skill,
                 id: "deploy".to_string(),
                 commit: None,
+                agent_package: false,
             },
         )
         .unwrap();
@@ -486,12 +546,14 @@ mod tests {
             item_type: ItemType::Skill,
             id: "deploy".to_string(),
             commit: None,
+            agent_package: false,
         };
         let agent = ManifestEntry {
             spec: spec("acme/repo/reviewer#main"),
             item_type: ItemType::Agent,
             id: "reviewer".to_string(),
             commit: None,
+            agent_package: false,
         };
         record(&c, &skill).unwrap();
         record(&c, &agent).unwrap();

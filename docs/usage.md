@@ -154,13 +154,21 @@ cloning and copying by hand.
   `$KIT_CACHE_DIR` and `$KIT_REMOTE_BASE_URL`), then **copies** the resolved item into the
   catalog — a standalone copy, independent of the cache.
 - By default the source is a **skill** (`<catalog>/skills/<id>/`); with `--agent` it is an
-  agent (`<catalog>/agents/<id>.agent.md`). The same path resolution as `add` applies, so a
-  single-segment `path` like `deploy-to-vercel` resolves to `skills/deploy-to-vercel` (or, with
-  `--agent`, `agents/deploy-to-vercel.agent.md`) in the source repo.
+  agent. An agent may be either a harness-aware **package** — a directory `agents/<id>/` holding
+  an `agent.yml` (stored at `<catalog>/agents/<id>/`) — or a legacy flat `.agent.md` file
+  (stored at `<catalog>/agents/<id>.agent.md`); `pull` detects which the source is and stores it
+  in the matching shape. The same path resolution as `add` applies, so a single-segment `path`
+  like `deploy-to-vercel` resolves to `skills/deploy-to-vercel` (or, with `--agent`, an
+  `agents/deploy-to-vercel/` package if present, else `agents/deploy-to-vercel.agent.md`) in the
+  source repo.
 - The catalog **id** defaults to the source's last path segment; `--as <id>` stores it under
   a different name. Ids must be a single path segment (no `/`).
 - Validates the fetched source before writing: a skill must be a directory containing `SKILL.md`;
-  an agent must be a `.agent.md` file.
+  an agent must be either a valid package directory (`agent.yml` + declared variant files) or a
+  `.agent.md` file.
+- Records an agent package with its real directory path and an explicit `type: agent` in the
+  manifest (flat agents keep the `.agent.md` shorthand), so
+  [`restore`](#restore--rebootstrap-the-catalog-from-the-manifest) rebuilds the whole package.
 - Creates the `skills/` / `agents/` directories if the catalog does not exist yet.
 - **Idempotent and safe:** an identical existing item is a no-op (`"created": false`); an item
   that already exists and *differs* from the source is left untouched and the command errors
@@ -196,8 +204,8 @@ Example:
 $ akit pull vercel-labs/agent-skills/deploy-to-vercel#main
 Pulled skill 'deploy-to-vercel' from vercel-labs/agent-skills/deploy-to-vercel#main -> /home/you/.akit/catalog/skills/deploy-to-vercel (copied)
 
-$ akit pull --agent acme/kits/reviewer#main
-Pulled agent 'reviewer' from acme/kits/reviewer#main -> /home/you/.akit/catalog/agents/reviewer.agent.md (copied)
+$ akit pull --agent acme/kits/agents/reviewer#main
+Pulled agent 'reviewer' from acme/kits/agents/reviewer -> /home/you/.akit/catalog/agents/reviewer (copied)
 
 $ akit pull --as vercel vercel-labs/agent-skills/deploy-to-vercel#main
 Pulled skill 'vercel' from vercel-labs/agent-skills/deploy-to-vercel#main -> /home/you/.akit/catalog/skills/vercel (copied)
@@ -412,7 +420,8 @@ With `--json`, `log` emits an array, newest first:
 akit drop [--agent] <id>
 ```
 
-Removes a skill or agent from your catalog (`skills/<id>/` or `agents/<id>.agent.md`). If the
+Removes a skill or agent from your catalog (`skills/<id>/`, or for an agent the whole
+`agents/<id>/` package directory when present, else the legacy flat `agents/<id>.agent.md`). If the
 item was pulled, it also prunes its entry from the manifest, so
 [`restore`](#restore--rebootstrap-the-catalog-from-the-manifest) won't bring it back. It's the
 inverse of [`pull`](#pull--fetch-a-remote-source-into-the-catalog), but unlike the old behavior
