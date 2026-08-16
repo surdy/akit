@@ -57,12 +57,26 @@ Move your personal skills/agents here (out of `~/.copilot/`, which is auto-loade
 project). Skills are directories containing `SKILL.md`. Agents come in two shapes: a legacy
 single `agents/<name>.agent.md` file (Copilot-shaped), and a harness-aware **agent package**
 `agents/<name>/` (an `agent.yml` plus one native variant file per harness, installed by
-[`install --agent`](#install--install-a-skill-or-agent-for-one-or-more-harnesses); the
-harness-aware engine installs agents only as packages). The read/browse commands
+[`install --agent`](#install--install-a-skill-or-agent-for-one-or-more-harnesses)). The
+read/browse commands
 ([`ls`](#ls--list-everything-in-the-catalog) / [`search`](#search--search-the-catalog) /
 [`show`](#show--preview-a-catalog-item)) surface both, preferring the package when an id exists in
 both shapes. `akit` then materializes only the ones you select into a given project with
 [`install`](#install--install-a-skill-or-agent-for-one-or-more-harnesses).
+
+> **Flat `.agent.md` agents are pull-only — they cannot be installed.** A legacy flat
+> `agents/<id>.agent.md` stays fully **browsable**
+> ([`ls`](#ls--list-everything-in-the-catalog) / [`search`](#search--search-the-catalog) /
+> [`show`](#show--preview-a-catalog-item)) and **manageable in the catalog**
+> ([`pull`](#pull--fetch-a-remote-source-into-the-catalog) /
+> [`update`](#update--refresh-pulled-items-to-the-latest-upstream-commit) /
+> [`restore`](#restore--rebootstrap-the-catalog-from-the-manifest) /
+> [`drop`](#drop--remove-an-item-from-the-catalog)), but
+> [`install`](#install--install-a-skill-or-agent-for-one-or-more-harnesses) resolves agents as
+> **packages only** — the legacy `add` command that materialized flat files was removed in
+> v0.30.0, and nothing replaced it for this shape. To make a flat agent installable, convert it
+> to a package: create `agents/<id>/` holding an `agent.yml` descriptor plus one native variant
+> file per harness you want to target.
 
 You can populate the catalog by hand (move/copy files into the layout above) or fetch a
 remote source straight into it with [`akit pull`](#pull--fetch-a-remote-source-into-the-catalog).
@@ -108,7 +122,9 @@ cloning and copying by hand. (To fetch and install in one step, pass the remote 
   agent. An agent may be either a harness-aware **package** — a directory `agents/<id>/` holding
   an `agent.yml` (stored at `<catalog>/agents/<id>/`) — or a legacy flat `.agent.md` file
   (stored at `<catalog>/agents/<id>.agent.md`); `pull` detects which the source is and stores it
-  in the matching shape. The same path resolution as a remote `install` applies, so a single-segment `path`
+  in the matching shape. A pulled **flat** `.agent.md` is browsable and updatable but **not
+  installable** — see [Your catalog](#your-catalog). The same path resolution as a remote
+  `install` applies, so a single-segment `path`
   like `deploy-to-vercel` resolves to `skills/deploy-to-vercel` (or, with `--agent`, an
   `agents/deploy-to-vercel/` package if present, else `agents/deploy-to-vercel.agent.md`) in the
   source repo.
