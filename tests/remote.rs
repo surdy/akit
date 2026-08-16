@@ -1050,3 +1050,157 @@ fn pull_agent_package_into_catalog_and_drop() {
     assert_eq!(djson["manifest_pruned"], true);
     assert!(!pkg.exists(), "package directory should be gone after drop");
 }
+
+// ── `install <remote>` — pull into catalog, then install (issue #45) ──────────
+
+/// Run `akit install` with a writable temp catalog plus the remote cache/base
+/// and harness env, so a remote `<id>` pulls into the catalog before installing.
+fn run_akit_install(
+    args: &[&str],
+    project: &Path,
+    catalog: &Path,
+    cache: &Path,
+    base_url: &str,
+    harnesses: &str,
+) -> std::process::Output {
+    Command::new(env!("CARGO_BIN_EXE_akit"))
+        .args(["--project", project.to_str().unwrap()])
+        .args(args)
+        .env("KIT_CATALOG_DIR", catalog)
+        .env(remote::ENV_CACHE_DIR, cache)
+        .env(remote::ENV_REMOTE_BASE_URL, base_url)
+        .env("AKIT_HARNESSES", harnesses)
+        .output()
+        .expect("akit binary should run")
+}
+
+#[test]
+fn install_remote_skill_pulls_into_catalog_then_installs() {
+    let tmp = test_tempdir();
+    let base = tmp.path();
+    let git_base = make_local_bare_remote(base);
+    let (proj, _project) = init_project(base);
+    let catalog = base.join("catalog");
+    let cache = base.join("cache");
+    let base_url = format!("file://{}", git_base.display());
+
+    let out = run_akit_install(
+        &["install", "acme/kit-skills/deploy-to-vercel#main"],
+        &proj,
+        &catalog,
+        &cache,
+        &base_url,
+        "claude",
+    );
+    assert!(
+        out.status.success(),
+        "install <remote> failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("Pulled skill 'deploy-to-vercel'"),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains("Installed skill 'deploy-to-vercel' for claude"),
+        "{stdout}"
+    );
+
+    // Landed in the catalog…
+    assert!(catalog.join("skills/deploy-to-vercel/SKILL.md").is_file());
+    // …and installed into the project for claude.
+    assert!(
+        proj.join(".claude/skills/deploy-to-vercel/SKILL.md")
+            .is_file()
+    );
+}
+
+#[test]
+fn install_remote_agent_package_pulls_and_installs_native_files() {
+    let tmp = test_tempdir();
+    let base = tmp.path();
+    let git_base = make_local_bare_agent_pkg_remote(base);
+    let (proj, _project) = init_project(base);
+    let catalog = base.join("catalog");
+    let cache = base.join("cache");
+    let base_url = format!("file://{}", git_base.display());
+
+    let out = run_akit_install(
+        &["install", "--agent", "acme/kit-agents/agents/reviewer#main"],
+        &proj,
+        &catalog,
+        &cache,
+        &base_url,
+        "copilot,claude",
+    );
+    assert!(
+        out.status.success(),
+        "install --agent <remote> failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    // Package landed in the catalog and native files were installed per harness.
+    assert!(catalog.join("agents/reviewer/agent.yml").is_file());
+    assert!(proj.join(".github/agents/reviewer.agent.md").is_file());
+    assert!(proj.join(".claude/agents/reviewer.md").is_file());
+}
+
+#[test]
+fn install_remote_dry_run_is_refused() {
+    let tmp = test_tempdir();
+    let base = tmp.path();
+    let git_base = make_local_bare_remote(base);
+    let (proj, _project) = init_project(base);
+    let catalog = base.join("catalog");
+    let cache = base.join("cache");
+    let base_url = format!("file://{}", git_base.display());
+
+    let out = run_akit_install(
+        &[
+            "install",
+            "--dry-run",
+            "acme/kit-skills/deploy-to-vercel#main",
+        ],
+        &proj,
+        &catalog,
+        &cache,
+        &base_url,
+        "claude",
+    );
+    assert!(!out.status.success());
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("can't preview a remote source"),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    // Nothing was pulled into the catalog.
+    assert!(!catalog.join("skills/deploy-to-vercel").exists());
+}
+
+#[test]
+fn install_malformed_remote_spec_is_rejected() {
+    let tmp = test_tempdir();
+    let base = tmp.path();
+    let (proj, _project) = init_project(base);
+    let catalog = base.join("catalog");
+    let cache = base.join("cache");
+
+    // Two segments: not a valid owner/repo/path spec, but contains '/', so it's
+    // treated as a malformed remote rather than a (slash-free) catalog id.
+    let out = run_akit_install(
+        &["install", "owner/repo"],
+        &proj,
+        &catalog,
+        &cache,
+        "file:///unused",
+        "claude",
+    );
+    assert!(!out.status.success());
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("invalid remote source spec"),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}

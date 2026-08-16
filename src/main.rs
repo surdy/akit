@@ -145,6 +145,9 @@ enum Commands {
     /// Files land in each harness's own discovery paths, sharing a path across
     /// harnesses when that path is discoverable by all of them. Re-running with a
     /// different `--harness` set reshapes the install to exactly that set.
+    ///
+    /// `<id>` may be a local catalog id, or a remote `owner/repo/path[#ref]` — a
+    /// remote source is pulled into your catalog first, then installed.
     Install {
         /// Install an agent instead of a skill.
         #[arg(long)]
@@ -161,7 +164,10 @@ enum Commands {
         /// Skip the partial-install confirmation prompt.
         #[arg(long)]
         yes: bool,
-        /// Catalog id of the skill/agent to install (omit with --bundle).
+        /// Re-pull a remote `<id>` whose catalog copy differs from the source.
+        #[arg(long)]
+        force: bool,
+        /// Catalog id, or a remote owner/repo/path[#ref] to pull then install (omit with --bundle).
         id: Option<String>,
     },
     /// Uninstall a harness-aware install from some or all harnesses.
@@ -497,6 +503,7 @@ fn run() -> Result<()> {
             dry_run,
             bundle,
             yes,
+            force,
             id,
         } => {
             let project = Project::locate(cli.project.clone())?;
@@ -540,7 +547,42 @@ fn run() -> Result<()> {
                     }
                 }
                 (None, Some(id)) => {
-                    if *dry_run {
+                    if let Some(spec) = SourceSpec::parse(id) {
+                        // Remote source: pull into the catalog first, then install by
+                        // the resulting catalog id. A preview would require fetching,
+                        // so `--dry-run` is refused here rather than pulling silently.
+                        if *dry_run {
+                            bail!(
+                                "install --dry-run can't preview a remote source; pull it first, \
+                                 then `install --dry-run <id>`"
+                            );
+                        }
+                        let pulled = ops::pull_into_catalog(
+                            &catalog,
+                            &spec,
+                            item_type(*agent),
+                            None,
+                            &remote_base_url(),
+                            *force,
+                        )?;
+                        let report = install::install(
+                            &project,
+                            &catalog,
+                            pulled.item_type,
+                            &pulled.id,
+                            &ctx,
+                        )?;
+                        if cli.json {
+                            // Monomorphic with a local install: emit the InstallReport.
+                            // Pull provenance is recorded in the catalog manifest.
+                            println!("{}", serde_json::to_string(&report)?);
+                        } else {
+                            println!("{}", pull_report_line(&pulled));
+                            print_install_report(&project, &report);
+                        }
+                    } else if id.contains('/') {
+                        bail!("invalid remote source spec '{id}'; expected owner/repo/path[#ref]");
+                    } else if *dry_run {
                         let preview =
                             install::plan_install(&project, &catalog, item_type(*agent), id, &ctx)?;
                         if cli.json {

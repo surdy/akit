@@ -958,6 +958,7 @@ akit install -H claude deploy-to-vercel  # flags win: claude only
 
 ```bash
 akit install [--agent] [-H <id>]... [--dry-run] <id>
+akit install [--agent] [-H <id>]... [--force] <owner/repo/path[#ref]>
 akit install [-H <id>]... [--dry-run] [--yes] --bundle <name>
 ```
 
@@ -991,6 +992,31 @@ Reshaped skill 'deploy-to-vercel' for claude
 reload:
   skills: start a new session (or run your harness's skills-reload command) if it does not appear
 ```
+
+#### `<owner/repo/path[#ref]>` — install straight from a remote
+
+When `<id>` parses as a remote source (`owner/repo/path`, optionally `#ref`) instead of a plain
+catalog id, `install` **pulls it into your catalog first, then installs it** — the one-step form of
+`akit pull … && akit install <id>`. The pulled item is recorded in the catalog manifest (`akit.yml`)
+exactly as `pull` would record it, so `update`/`restore`/`log` work on it afterwards. The install id
+is the source's last path segment (for an agent, minus a trailing `.agent.md`); use `--agent` for a
+remote agent. `--force` re-pulls when the catalog already holds a **differing** copy of that id
+(without it, a drifted copy is an error, matching `pull`). Because previewing would require fetching,
+`--dry-run` is refused for a remote source — `pull` it, then `install --dry-run <id>`. To install a
+remote agent through the harness-aware path it must be a **package** (`agents/<id>/` with `agent.yml`);
+a single-file `.agent.md` remote pulls fine but isn't installable this way.
+
+```bash
+$ akit install -H claude acme/kit-skills/deploy-to-vercel#main
+Pulled skill 'deploy-to-vercel' from acme/kit-skills/deploy-to-vercel#main -> …/skills/deploy-to-vercel (copied)
+Installed skill 'deploy-to-vercel' for claude
+  .claude/skills/deploy-to-vercel  (claude)
+reload:
+  skills: start a new session (or run your harness's skills-reload command) if it does not appear
+```
+
+With `--json`, a remote `install` emits the same `InstallReport` as a local one (pull provenance is
+in the catalog manifest / available via `akit pull --json`).
 
 #### `--dry-run` — preview the plan
 
