@@ -80,6 +80,19 @@ impl HarnessId {
             HarnessId::Opencode => "OpenCode",
         }
     }
+
+    /// Whether this harness is *confirmed* to follow a symlinked skill directory
+    /// for discovery. Only Claude and Codex are confirmed (see the `SKILL_PATHS`
+    /// registry note); every other harness is treated as copy-only, so a forced
+    /// `install --symlink` never yields a skill a covering harness can't discover.
+    ///
+    /// This is the per-harness capability that [`SkillPath::symlink_verified`]
+    /// collapses (AND-ed) across a shared path's coverers — it lets the planner,
+    /// under an explicit symlink request, symlink a materialization exactly when
+    /// *every* harness it serves is a confirmed follower.
+    pub const fn follows_skill_symlink(self) -> bool {
+        matches!(self, HarnessId::Claude | HarnessId::Codex)
+    }
 }
 
 impl fmt::Display for HarnessId {

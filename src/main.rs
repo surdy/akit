@@ -167,6 +167,10 @@ enum Commands {
         /// Re-pull a remote `<id>` whose catalog copy differs from the source.
         #[arg(long)]
         force: bool,
+        /// Symlink skills to the catalog instead of copying, where every served
+        /// harness is a confirmed symlink-follower (else that path stays a copy).
+        #[arg(long)]
+        symlink: bool,
         /// Catalog id, or a remote owner/repo/path[#ref] to pull then install (omit with --bundle).
         id: Option<String>,
     },
@@ -504,11 +508,15 @@ fn run() -> Result<()> {
             bundle,
             yes,
             force,
+            symlink,
             id,
         } => {
             let project = Project::locate(cli.project.clone())?;
             let catalog = Catalog::locate()?;
             let ctx = resolve_install_harnesses(harnesses, &project)?;
+            let opts = install::InstallOptions {
+                force_symlink: *symlink,
+            };
             match (bundle.as_deref(), id.as_deref()) {
                 (Some(_), Some(_)) => {
                     bail!("install accepts either <id> or --bundle <name>, not both")
@@ -518,7 +526,8 @@ fn run() -> Result<()> {
                     if *agent {
                         bail!("install --bundle cannot be combined with --agent");
                     }
-                    let preview = install::plan_install_bundle(&project, &catalog, bundle, &ctx)?;
+                    let preview =
+                        install::plan_install_bundle_opts(&project, &catalog, bundle, &ctx, opts)?;
                     if *dry_run {
                         if cli.json {
                             println!("{}", serde_json::to_string(&preview)?);
@@ -539,11 +548,17 @@ fn run() -> Result<()> {
                             return Ok(());
                         }
                     }
-                    let report = install::install_bundle(&project, &catalog, bundle, &ctx)?;
+                    let report =
+                        install::install_bundle_opts(&project, &catalog, bundle, &ctx, opts)?;
                     if cli.json {
                         println!("{}", serde_json::to_string(&report)?);
                     } else {
                         print_bundle_install_report(&project, &report);
+                        if *symlink {
+                            for item in &report.items {
+                                print_symlink_notes(item);
+                            }
+                        }
                     }
                 }
                 (None, Some(id)) => {
@@ -565,12 +580,13 @@ fn run() -> Result<()> {
                             &remote_base_url(),
                             *force,
                         )?;
-                        let report = install::install(
+                        let report = install::install_opts(
                             &project,
                             &catalog,
                             pulled.item_type,
                             &pulled.id,
                             &ctx,
+                            opts,
                         )?;
                         if cli.json {
                             // Monomorphic with a local install: emit the InstallReport.
@@ -579,24 +595,42 @@ fn run() -> Result<()> {
                         } else {
                             println!("{}", pull_report_line(&pulled));
                             print_install_report(&project, &report);
+                            if *symlink {
+                                print_symlink_notes(&report);
+                            }
                         }
                     } else if id.contains('/') {
                         bail!("invalid remote source spec '{id}'; expected owner/repo/path[#ref]");
                     } else if *dry_run {
-                        let preview =
-                            install::plan_install(&project, &catalog, item_type(*agent), id, &ctx)?;
+                        let preview = install::plan_install_opts(
+                            &project,
+                            &catalog,
+                            item_type(*agent),
+                            id,
+                            &ctx,
+                            opts,
+                        )?;
                         if cli.json {
                             println!("{}", serde_json::to_string(&preview)?);
                         } else {
                             print_install_preview(&preview);
                         }
                     } else {
-                        let report =
-                            install::install(&project, &catalog, item_type(*agent), id, &ctx)?;
+                        let report = install::install_opts(
+                            &project,
+                            &catalog,
+                            item_type(*agent),
+                            id,
+                            &ctx,
+                            opts,
+                        )?;
                         if cli.json {
                             println!("{}", serde_json::to_string(&report)?);
                         } else {
                             print_install_report(&project, &report);
+                            if *symlink {
+                                print_symlink_notes(&report);
+                            }
                         }
                     }
                 }
@@ -907,6 +941,45 @@ fn print_install_report_body(report: &install::InstallReport) {
         println!("skipped:");
         for issue in &report.issues {
             println!("  {}: {}", issue.harness.as_str(), issue.reason.message());
+        }
+    }
+}
+
+/// After a `--symlink` install, note any materialization that was copied anyway,
+/// with the reason — so the user is never misled that everything symlinked.
+///
+/// A skill path copies when some harness it serves isn't a confirmed
+/// symlink-follower; agents are always copied (agent-file symlinks are unverified
+/// for every harness). Materializations that did symlink produce no note.
+fn print_symlink_notes(report: &install::InstallReport) {
+    match report.item_type {
+        ItemType::Agent => {
+            if !report.materializations.is_empty() {
+                println!(
+                    "note: agent '{}' was copied — symlink-following for agent files is not \
+                     confirmed for any harness",
+                    report.id
+                );
+            }
+        }
+        ItemType::Skill => {
+            for m in &report.materializations {
+                if m.mode != Mode::Symlink {
+                    let blockers: Vec<&str> = m
+                        .covers
+                        .iter()
+                        .filter(|h| !h.follows_skill_symlink())
+                        .map(|h| h.as_str())
+                        .collect();
+                    if !blockers.is_empty() {
+                        println!(
+                            "note: {} copied — symlink-following not confirmed for: {}",
+                            m.path,
+                            blockers.join(", ")
+                        );
+                    }
+                }
+            }
         }
     }
 }

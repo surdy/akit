@@ -957,9 +957,9 @@ akit install -H claude deploy-to-vercel  # flags win: claude only
 ### `install` — install a skill or agent for one or more harnesses
 
 ```bash
-akit install [--agent] [-H <id>]... [--dry-run] <id>
-akit install [--agent] [-H <id>]... [--force] <owner/repo/path[#ref]>
-akit install [-H <id>]... [--dry-run] [--yes] --bundle <name>
+akit install [--agent] [-H <id>]... [--dry-run] [--symlink] <id>
+akit install [--agent] [-H <id>]... [--force] [--symlink] <owner/repo/path[#ref]>
+akit install [-H <id>]... [--dry-run] [--yes] [--symlink] --bundle <name>
 ```
 
 Installs (or reshapes) catalog item `<id>` for exactly the resolved harness set. `install` is
@@ -1017,6 +1017,41 @@ reload:
 
 With `--json`, a remote `install` emits the same `InstallReport` as a local one (pull provenance is
 in the catalog manifest / available via `akit pull --json`).
+
+#### `--symlink` — symlink skills to the catalog instead of copying
+
+By default skills are **copied** into each harness's discovery path. `--symlink` requests a live
+symlink to the catalog source instead (`.claude/skills/deploy -> <catalog>/skills/deploy`), so
+edits to the catalog are picked up without re-installing.
+
+It is applied **per materialization, only where safe.** A skill directory is symlinked only when
+*every* harness that materialization serves is a **confirmed symlink-follower** — currently Claude
+and Codex. If a materialization is shared with any other harness (e.g. installing for
+`copilot,claude` collapses onto the single `.claude/skills` path that also serves Copilot), that
+path stays a **copy**, and `install` prints a `note:` saying which harness forced the copy. This
+guarantees `--symlink` never leaves a harness with a symlink it can't discover. Two consequences:
+
+- **Agents are always copied** — no harness is a confirmed follower for native agent files — so
+  `--symlink --agent` is a no-op (with a note).
+- On a transport that can't symlink (remote/SFTP embedding hosts), the request silently downgrades
+  to a copy.
+- Drift detection is weaker for symlinks: a symlinked skill is `clean` as long as the link exists;
+  edits made *through* it (to the catalog source) are not flagged the way a modified copy is.
+
+```bash
+$ akit install --symlink -H claude deploy-to-vercel
+Installed skill 'deploy-to-vercel' for claude
+  .claude/skills/deploy-to-vercel  (claude)
+reload:
+  skills: start a new session (or run your harness's skills-reload command) if it does not appear
+
+$ akit install --symlink -H copilot -H claude deploy-to-vercel
+Installed skill 'deploy-to-vercel' for copilot, claude
+  .claude/skills/deploy-to-vercel  (copilot, claude)
+note: .claude/skills/deploy-to-vercel copied — symlink-following not confirmed for: copilot
+```
+
+`--dry-run --symlink` shows the resulting `[symlink]`/`[copy]` mode per planned materialization.
 
 #### `--dry-run` — preview the plan
 

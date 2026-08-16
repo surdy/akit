@@ -56,6 +56,18 @@ impl HarnessContext {
     }
 }
 
+/// Tunables for an install/plan operation. Defaults reproduce the historical
+/// behavior, so this is an additive, backward-compatible knob set.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct InstallOptions {
+    /// Prefer symlink materialization (`install --symlink`). Honored per
+    /// materialization, only where safe — a path is symlinked when every harness
+    /// it serves is a confirmed symlink-follower, else it stays a copy. Silently
+    /// downgrades to copy on a transport that can't symlink. Skills only; agents
+    /// are always copied (no harness is a confirmed agent-file symlink-follower).
+    pub force_symlink: bool,
+}
+
 /// Which materializations a remove touches.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RemoveScope {
@@ -165,6 +177,18 @@ pub fn install(
     install_with(&LocalFs, project, catalog, item_type, id, ctx)
 }
 
+/// [`install`] with explicit [`InstallOptions`] (e.g. `--symlink`), local transport.
+pub fn install_opts(
+    project: &Project,
+    catalog: &Catalog,
+    item_type: ItemType,
+    id: &str,
+    ctx: &HarnessContext,
+    opts: InstallOptions,
+) -> Result<InstallReport> {
+    install_with_opts(&LocalFs, project, catalog, item_type, id, ctx, opts)
+}
+
 /// [`install`] against an explicit destination transport (for embedding hosts).
 pub fn install_with(
     fs: &dyn FsTransport,
@@ -174,7 +198,28 @@ pub fn install_with(
     id: &str,
     ctx: &HarnessContext,
 ) -> Result<InstallReport> {
-    let (plan, resolver) = build_plan(catalog, item_type, id, ctx.harnesses())?;
+    install_with_opts(
+        fs,
+        project,
+        catalog,
+        item_type,
+        id,
+        ctx,
+        InstallOptions::default(),
+    )
+}
+
+/// [`install_with`] with explicit [`InstallOptions`].
+pub fn install_with_opts(
+    fs: &dyn FsTransport,
+    project: &Project,
+    catalog: &Catalog,
+    item_type: ItemType,
+    id: &str,
+    ctx: &HarnessContext,
+    opts: InstallOptions,
+) -> Result<InstallReport> {
+    let (plan, resolver) = build_plan(catalog, item_type, id, ctx.harnesses(), opts)?;
     reconcile(fs, project, item_type, id, "local", None, &plan, &resolver)
 }
 
@@ -213,6 +258,18 @@ pub fn plan_install(
     plan_install_with(&LocalFs, project, catalog, item_type, id, ctx)
 }
 
+/// [`plan_install`] with explicit [`InstallOptions`] (e.g. `--symlink`), local transport.
+pub fn plan_install_opts(
+    project: &Project,
+    catalog: &Catalog,
+    item_type: ItemType,
+    id: &str,
+    ctx: &HarnessContext,
+    opts: InstallOptions,
+) -> Result<InstallPreview> {
+    plan_install_with_opts(&LocalFs, project, catalog, item_type, id, ctx, opts)
+}
+
 /// [`plan_install`] against an explicit transport.
 pub fn plan_install_with(
     fs: &dyn FsTransport,
@@ -222,7 +279,28 @@ pub fn plan_install_with(
     id: &str,
     ctx: &HarnessContext,
 ) -> Result<InstallPreview> {
-    let (plan, _resolver) = build_plan(catalog, item_type, id, ctx.harnesses())?;
+    plan_install_with_opts(
+        fs,
+        project,
+        catalog,
+        item_type,
+        id,
+        ctx,
+        InstallOptions::default(),
+    )
+}
+
+/// [`plan_install_with`] with explicit [`InstallOptions`].
+pub fn plan_install_with_opts(
+    fs: &dyn FsTransport,
+    project: &Project,
+    catalog: &Catalog,
+    item_type: ItemType,
+    id: &str,
+    ctx: &HarnessContext,
+    opts: InstallOptions,
+) -> Result<InstallPreview> {
+    let (plan, _resolver) = build_plan(catalog, item_type, id, ctx.harnesses(), opts)?;
 
     let lock = AkitLockfile::load_with(fs, &project.akit_lockfile_path())?;
     let existing = lock.get(item_type, id);
@@ -280,6 +358,17 @@ pub fn install_bundle(
     install_bundle_with(&LocalFs, project, catalog, bundle, ctx)
 }
 
+/// [`install_bundle`] with explicit [`InstallOptions`] (e.g. `--symlink`), local transport.
+pub fn install_bundle_opts(
+    project: &Project,
+    catalog: &Catalog,
+    bundle: &str,
+    ctx: &HarnessContext,
+    opts: InstallOptions,
+) -> Result<BundleInstallReport> {
+    install_bundle_with_opts(&LocalFs, project, catalog, bundle, ctx, opts)
+}
+
 /// [`install_bundle`] against an explicit destination transport (for embedding hosts).
 pub fn install_bundle_with(
     fs: &dyn FsTransport,
@@ -288,10 +377,23 @@ pub fn install_bundle_with(
     bundle: &str,
     ctx: &HarnessContext,
 ) -> Result<BundleInstallReport> {
+    install_bundle_with_opts(fs, project, catalog, bundle, ctx, InstallOptions::default())
+}
+
+/// [`install_bundle_with`] with explicit [`InstallOptions`].
+pub fn install_bundle_with_opts(
+    fs: &dyn FsTransport,
+    project: &Project,
+    catalog: &Catalog,
+    bundle: &str,
+    ctx: &HarnessContext,
+    opts: InstallOptions,
+) -> Result<BundleInstallReport> {
     let loaded = crate::bundle::load(catalog, bundle)?;
     let mut items = Vec::with_capacity(loaded.items.len());
     for member in &loaded.items {
-        let (plan, resolver) = build_plan(catalog, member.item_type, &member.id, ctx.harnesses())?;
+        let (plan, resolver) =
+            build_plan(catalog, member.item_type, &member.id, ctx.harnesses(), opts)?;
         let report = reconcile(
             fs,
             project,
@@ -325,6 +427,17 @@ pub fn plan_install_bundle(
     plan_install_bundle_with(&LocalFs, project, catalog, bundle, ctx)
 }
 
+/// [`plan_install_bundle`] with explicit [`InstallOptions`] (e.g. `--symlink`), local transport.
+pub fn plan_install_bundle_opts(
+    project: &Project,
+    catalog: &Catalog,
+    bundle: &str,
+    ctx: &HarnessContext,
+    opts: InstallOptions,
+) -> Result<BundleInstallPreview> {
+    plan_install_bundle_with_opts(&LocalFs, project, catalog, bundle, ctx, opts)
+}
+
 /// [`plan_install_bundle`] against an explicit transport.
 pub fn plan_install_bundle_with(
     fs: &dyn FsTransport,
@@ -333,16 +446,29 @@ pub fn plan_install_bundle_with(
     bundle: &str,
     ctx: &HarnessContext,
 ) -> Result<BundleInstallPreview> {
+    plan_install_bundle_with_opts(fs, project, catalog, bundle, ctx, InstallOptions::default())
+}
+
+/// [`plan_install_bundle_with`] with explicit [`InstallOptions`].
+pub fn plan_install_bundle_with_opts(
+    fs: &dyn FsTransport,
+    project: &Project,
+    catalog: &Catalog,
+    bundle: &str,
+    ctx: &HarnessContext,
+    opts: InstallOptions,
+) -> Result<BundleInstallPreview> {
     let loaded = crate::bundle::load(catalog, bundle)?;
     let mut items = Vec::with_capacity(loaded.items.len());
     for member in &loaded.items {
-        items.push(plan_install_with(
+        items.push(plan_install_with_opts(
             fs,
             project,
             catalog,
             member.item_type,
             &member.id,
             ctx,
+            opts,
         )?);
     }
     Ok(BundleInstallPreview {
@@ -413,10 +539,18 @@ pub fn remove_with(
             not_installed: false,
         })
     } else {
-        // Partial: re-plan for the reduced set and reshape.
+        // Partial: re-plan for the reduced set and reshape. The reshape uses the
+        // default (copy) mode — a scoped uninstall doesn't carry the original
+        // `--symlink` intent, so a previously symlinked path may become a copy.
         let cat = Catalog::locate()?;
         let ctx = HarnessContext::new(remaining)?;
-        let (plan, resolver) = build_plan(&cat, item_type, id, ctx.harnesses())?;
+        let (plan, resolver) = build_plan(
+            &cat,
+            item_type,
+            id,
+            ctx.harnesses(),
+            InstallOptions::default(),
+        )?;
         // Preserve the bundle tag across a reshape, so a partial uninstall never
         // silently detaches a member from its bundle.
         let report = reconcile(
@@ -533,16 +667,19 @@ pub(crate) fn build_plan(
     item_type: ItemType,
     id: &str,
     harnesses: &[HarnessId],
+    opts: InstallOptions,
 ) -> Result<(Plan, SourceResolver)> {
     match item_type {
         ItemType::Skill => {
             let src = catalog.resolve_skill(id)?;
             let compat = catalog.skill_compat(id)?;
-            let plan = plan::plan_skill(id, harnesses, &compat);
+            let plan = plan::plan_skill(id, harnesses, &compat, opts.force_symlink);
             let resolver: SourceResolver = Box::new(move |_planned| src.clone());
             Ok((plan, resolver))
         }
         ItemType::Agent => {
+            // Agents are always copied — no harness is a confirmed agent-file
+            // symlink-follower — so `opts.force_symlink` doesn't apply here.
             let pkg = catalog.resolve_agent_package(id)?;
             let plan = plan::plan_agent(&pkg, harnesses);
             let dir = pkg.dir.clone();
@@ -718,6 +855,7 @@ pub(crate) fn prune_empty_owned_dirs(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::lockfile::Mode;
     use std::path::Path;
     use tempfile::TempDir;
 
@@ -974,6 +1112,84 @@ mod tests {
                 .is_file()
         );
         assert!(f.project.root.join(".claude/agents/reviewer.md").is_file());
+    }
+
+    #[test]
+    fn install_symlink_symlinks_a_follower_only_install() {
+        let f = setup();
+        write_skill(&f.catalog, "deploy", None);
+        let opts = InstallOptions {
+            force_symlink: true,
+        };
+        // Claude is a confirmed follower → the sole materialization symlinks.
+        let report = install_opts(
+            &f.project,
+            &f.catalog,
+            ItemType::Skill,
+            "deploy",
+            &ctx(&[HarnessId::Claude]),
+            opts,
+        )
+        .unwrap();
+        assert_eq!(report.materializations.len(), 1);
+        assert_eq!(report.materializations[0].mode, Mode::Symlink);
+        // Symlinks carry no content hash.
+        assert!(report.materializations[0].hash.is_none());
+        // The on-disk entry is an actual symlink into the catalog.
+        let dest = f.project.root.join(".claude/skills/deploy");
+        assert!(std::fs::symlink_metadata(&dest).unwrap().is_symlink());
+        assert_eq!(
+            std::fs::read_link(&dest).unwrap(),
+            f.catalog.skill_source("deploy")
+        );
+    }
+
+    #[test]
+    fn install_symlink_falls_back_to_copy_when_a_coverer_is_not_a_follower() {
+        let f = setup();
+        write_skill(&f.catalog, "deploy", None);
+        let opts = InstallOptions {
+            force_symlink: true,
+        };
+        // Copilot+Claude collapse onto the shared `.claude/skills` path; Copilot is
+        // not a confirmed follower, so the path stays a copy despite --symlink.
+        let report = install_opts(
+            &f.project,
+            &f.catalog,
+            ItemType::Skill,
+            "deploy",
+            &ctx(&[HarnessId::Copilot, HarnessId::Claude]),
+            opts,
+        )
+        .unwrap();
+        assert_eq!(report.materializations.len(), 1);
+        assert_eq!(report.materializations[0].mode, Mode::Copy);
+        assert!(report.materializations[0].hash.is_some());
+        assert!(
+            !std::fs::symlink_metadata(f.project.root.join(".claude/skills/deploy"))
+                .unwrap()
+                .is_symlink()
+        );
+    }
+
+    #[test]
+    fn install_symlink_is_a_noop_for_agents() {
+        let f = setup();
+        write_agent(&f.catalog, "reviewer");
+        let opts = InstallOptions {
+            force_symlink: true,
+        };
+        // Agents are always copied — no harness is a confirmed agent-file follower.
+        let report = install_opts(
+            &f.project,
+            &f.catalog,
+            ItemType::Agent,
+            "reviewer",
+            &ctx(&[HarnessId::Claude]),
+            opts,
+        )
+        .unwrap();
+        assert!(report.materializations.iter().all(|m| m.mode == Mode::Copy));
     }
 
     #[test]

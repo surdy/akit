@@ -390,3 +390,67 @@ fn reset_preview_lists_owned_paths_before_refusing_non_interactively() {
     // And it did not delete anything.
     assert!(project.join(".agents/skills/demo").exists());
 }
+
+// ── `install --symlink` (issue #45) ──────────────────────────────────────────
+
+#[test]
+fn install_symlink_symlinks_a_follower_only_install() {
+    let (_tmp, catalog, project) = setup();
+    let (out, ok) = akit(
+        &project,
+        &catalog,
+        &["install", "--symlink", "-H", "claude", "demo"],
+    );
+    assert!(ok, "install --symlink failed: {out}");
+    let dest = project.join(".claude/skills/demo");
+    let meta = std::fs::symlink_metadata(&dest).unwrap();
+    assert!(meta.is_symlink(), "expected a symlink at {dest:?}");
+    assert_eq!(
+        std::fs::read_link(&dest).unwrap(),
+        catalog.join("skills/demo")
+    );
+}
+
+#[test]
+fn install_symlink_copies_and_notes_when_a_coverer_is_not_a_follower() {
+    let (_tmp, catalog, project) = setup();
+    // Copilot+Claude collapse onto the shared `.claude/skills` path; Copilot is
+    // not a confirmed symlink-follower, so the path is copied and a note is shown.
+    let (out, ok) = akit(
+        &project,
+        &catalog,
+        &[
+            "install",
+            "--symlink",
+            "-H",
+            "copilot",
+            "-H",
+            "claude",
+            "demo",
+        ],
+    );
+    assert!(ok, "install failed: {out}");
+    let dest = project.join(".claude/skills/demo");
+    assert!(!std::fs::symlink_metadata(&dest).unwrap().is_symlink());
+    assert!(
+        out.contains("note:") && out.contains("copilot"),
+        "expected a symlink-downgrade note mentioning copilot:\n{out}"
+    );
+}
+
+#[test]
+fn install_symlink_dry_run_shows_symlink_mode() {
+    let (_tmp, catalog, project) = setup();
+    let (out, ok) = akit(
+        &project,
+        &catalog,
+        &["install", "--symlink", "--dry-run", "-H", "claude", "demo"],
+    );
+    assert!(ok, "dry-run failed: {out}");
+    assert!(
+        out.contains("[symlink]"),
+        "expected [symlink] in plan:\n{out}"
+    );
+    // Nothing materialized.
+    assert!(!project.join(".claude/skills/demo").exists());
+}

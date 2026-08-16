@@ -163,14 +163,19 @@ pub fn repair_with(
             continue;
         }
         // Re-plan for this item's recorded harness set to resolve sources.
-        let (plan, resolver) =
-            match install::build_plan(catalog, inst.item_type, &inst.id, &inst.harnesses) {
-                Ok(pr) => pr,
-                Err(_) => {
-                    report.missing_source.push(inst.id.clone());
-                    continue;
-                }
-            };
+        let (plan, resolver) = match install::build_plan(
+            catalog,
+            inst.item_type,
+            &inst.id,
+            &inst.harnesses,
+            install::InstallOptions::default(),
+        ) {
+            Ok(pr) => pr,
+            Err(_) => {
+                report.missing_source.push(inst.id.clone());
+                continue;
+            }
+        };
         for planned in &plan.materializations {
             // Only act on paths this item already owns.
             let owned = inst
@@ -328,7 +333,13 @@ pub fn adopt_with(
     id: &str,
     ctx: &HarnessContext,
 ) -> Result<AdoptReport> {
-    let (plan, resolver) = install::build_plan(catalog, item_type, id, ctx.harnesses())?;
+    let (plan, resolver) = install::build_plan(
+        catalog,
+        item_type,
+        id,
+        ctx.harnesses(),
+        install::InstallOptions::default(),
+    )?;
 
     let mut adopted = Vec::new();
     let mut conflicts = Vec::new();

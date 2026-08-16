@@ -115,7 +115,19 @@ impl Plan {
 ///
 /// Runs a greedy set cover over the registry skill paths, so shared harnesses
 /// collapse onto a single materialization wherever possible.
-pub fn plan_skill(id: &str, selected: &[HarnessId], compat: &SkillCompat) -> Plan {
+///
+/// `force_symlink` requests symlink materialization (`install --symlink`). It is
+/// honored **per materialization, only when safe**: a chosen path is symlinked
+/// when every harness it serves is a confirmed symlink-follower
+/// ([`HarnessId::follows_skill_symlink`]); otherwise it stays a copy so no
+/// covering harness is left with a symlink it can't discover. A registry path
+/// that is already `symlink_verified` symlinks regardless of the flag.
+pub fn plan_skill(
+    id: &str,
+    selected: &[HarnessId],
+    compat: &SkillCompat,
+    force_symlink: bool,
+) -> Plan {
     let mut plan = Plan::default();
 
     // Split selected into servable (compatible) and incompatible.
@@ -167,7 +179,11 @@ pub fn plan_skill(id: &str, selected: &[HarnessId], compat: &SkillCompat) -> Pla
         let path = &paths[idx];
         remaining.retain(|h| !covered.contains(h));
 
-        let mode = if path.symlink_verified {
+        // Symlink when the registry verifies it for this shared path, or when the
+        // caller forced it AND every harness this materialization serves is a
+        // confirmed symlink-follower (so no coverer silently misses the skill).
+        let symlink_safe = force_symlink && covered.iter().all(|h| h.follows_skill_symlink());
+        let mode = if path.symlink_verified || symlink_safe {
             Mode::Symlink
         } else {
             Mode::Copy
@@ -266,7 +282,7 @@ mod tests {
 
     #[test]
     fn all_five_skill_harnesses_need_exactly_two_paths() {
-        let plan = plan_skill("deploy", &HarnessId::ALL, &SkillCompat::Portable);
+        let plan = plan_skill("deploy", &HarnessId::ALL, &SkillCompat::Portable, false);
         assert_eq!(plan.issues, vec![]);
         assert_eq!(plan.materializations.len(), 2);
         // Every selected harness is served.
@@ -283,7 +299,7 @@ mod tests {
 
     #[test]
     fn single_non_claude_harness_uses_one_neutral_path() {
-        let plan = plan_skill("deploy", &[HarnessId::Codex], &SkillCompat::Portable);
+        let plan = plan_skill("deploy", &[HarnessId::Codex], &SkillCompat::Portable, false);
         assert_eq!(plan.materializations.len(), 1);
         assert_eq!(plan.materializations[0].path, ".agents/skills/deploy");
         assert_eq!(plan.materializations[0].covers, vec![HarnessId::Codex]);
@@ -292,7 +308,12 @@ mod tests {
 
     #[test]
     fn claude_only_uses_claude_path() {
-        let plan = plan_skill("deploy", &[HarnessId::Claude], &SkillCompat::Portable);
+        let plan = plan_skill(
+            "deploy",
+            &[HarnessId::Claude],
+            &SkillCompat::Portable,
+            false,
+        );
         assert_eq!(plan.materializations.len(), 1);
         assert_eq!(plan.materializations[0].path, ".claude/skills/deploy");
     }
@@ -305,6 +326,7 @@ mod tests {
             "deploy",
             &[HarnessId::Copilot, HarnessId::Claude],
             &SkillCompat::Portable,
+            false,
         );
         assert_eq!(plan.materializations.len(), 1);
         assert_eq!(plan.materializations[0].path, ".claude/skills/deploy");
@@ -316,16 +338,76 @@ mod tests {
 
     #[test]
     fn skills_default_to_copy_mode() {
-        let plan = plan_skill("deploy", &HarnessId::ALL, &SkillCompat::Portable);
+        let plan = plan_skill("deploy", &HarnessId::ALL, &SkillCompat::Portable, false);
         for m in &plan.materializations {
             assert_eq!(m.mode, Mode::Copy);
         }
     }
 
     #[test]
+    fn force_symlink_symlinks_a_path_all_of_whose_coverers_follow_symlinks() {
+        // Claude and Codex both follow skill symlinks; installed together they take
+        // two separate paths, each served only by a follower → both symlink.
+        let plan = plan_skill(
+            "deploy",
+            &[HarnessId::Claude, HarnessId::Codex],
+            &SkillCompat::Portable,
+            true,
+        );
+        assert_eq!(plan.materializations.len(), 2);
+        for m in &plan.materializations {
+            assert_eq!(m.mode, Mode::Symlink, "{}", m.path);
+        }
+    }
+
+    #[test]
+    fn force_symlink_stays_copy_when_a_coverer_is_not_a_follower() {
+        // Copilot+Claude collapse onto the shared `.claude/skills` path; Copilot is
+        // not a confirmed follower, so forcing symlink must NOT symlink it.
+        let plan = plan_skill(
+            "deploy",
+            &[HarnessId::Copilot, HarnessId::Claude],
+            &SkillCompat::Portable,
+            true,
+        );
+        assert_eq!(plan.materializations.len(), 1);
+        assert_eq!(plan.materializations[0].mode, Mode::Copy);
+    }
+
+    #[test]
+    fn force_symlink_is_partial_when_selection_mixes_followers_and_not() {
+        // Claude (follower) + Gemini (not): the greedy cover puts Gemini on the
+        // neutral `.agents/skills` path and Claude on `.claude/skills`.
+        // Claude's path symlinks; Gemini's stays a copy.
+        let plan = plan_skill(
+            "deploy",
+            &[HarnessId::Claude, HarnessId::Gemini],
+            &SkillCompat::Portable,
+            true,
+        );
+        let claude = plan
+            .materializations
+            .iter()
+            .find(|m| m.covers.contains(&HarnessId::Claude))
+            .unwrap();
+        let gemini = plan
+            .materializations
+            .iter()
+            .find(|m| m.covers.contains(&HarnessId::Gemini))
+            .unwrap();
+        assert_eq!(claude.mode, Mode::Symlink);
+        assert_eq!(gemini.mode, Mode::Copy);
+    }
+
+    #[test]
     fn incompatible_skill_harness_becomes_issue_not_materialization() {
         let compat = SkillCompat::Only(vec![HarnessId::Claude]);
-        let plan = plan_skill("deploy", &[HarnessId::Claude, HarnessId::Codex], &compat);
+        let plan = plan_skill(
+            "deploy",
+            &[HarnessId::Claude, HarnessId::Codex],
+            &compat,
+            false,
+        );
         assert_eq!(plan.materializations.len(), 1);
         assert_eq!(plan.materializations[0].path, ".claude/skills/deploy");
         assert_eq!(
@@ -394,11 +476,13 @@ mod tests {
             "deploy",
             &[HarnessId::Opencode, HarnessId::Claude, HarnessId::Copilot],
             &SkillCompat::Portable,
+            false,
         );
         let b = plan_skill(
             "deploy",
             &[HarnessId::Copilot, HarnessId::Opencode, HarnessId::Claude],
             &SkillCompat::Portable,
+            false,
         );
         assert_eq!(a, b);
     }
