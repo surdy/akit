@@ -46,6 +46,17 @@ fn make_skill(catalog: &Path, name: &str) {
     .unwrap();
 }
 
+fn make_agent_pkg(catalog: &Path, id: &str, variants: &[(&str, &str)]) {
+    let dir = catalog.join("agents").join(id);
+    fs::create_dir_all(&dir).unwrap();
+    let mut yml = format!("id: {id}\ndescription: t\nvariants:\n");
+    for (harness, file) in variants {
+        yml.push_str(&format!("  {harness}: {file}\n"));
+        fs::write(dir.join(file), "---\nname: a\n---\nprompt\n").unwrap();
+    }
+    fs::write(dir.join("agent.yml"), yml).unwrap();
+}
+
 fn setup() -> (tempfile::TempDir, std::path::PathBuf, std::path::PathBuf) {
     let tmp = tempfile::tempdir().unwrap();
     let catalog = tmp.path().join("catalog");
@@ -220,4 +231,87 @@ fn installed_reports_degraded_when_a_materialization_is_deleted() {
     assert_eq!(v["healthy"], false, "{json}");
     assert_eq!(v["items"][0]["degraded"], true, "{json}");
     assert_eq!(v["items"][0]["source_present"], true, "{json}");
+}
+
+#[test]
+fn install_dry_run_previews_without_applying() {
+    let (_tmp, catalog, project) = setup();
+    let (out, ok) = akit(
+        &project,
+        &catalog,
+        &["install", "-H", "copilot", "--dry-run", "demo"],
+    );
+    assert!(ok, "dry-run failed:\n{out}");
+    assert!(out.contains("Plan:"), "no plan header:\n{out}");
+    assert!(
+        out.contains(".agents/skills/demo"),
+        "no planned path:\n{out}"
+    );
+    assert!(out.contains("dry run"), "no dry-run notice:\n{out}");
+    // Nothing was materialized and nothing recorded.
+    assert!(!project.join(".agents/skills/demo").exists());
+    let (listed, _) = akit(&project, &catalog, &["installed"]);
+    assert!(listed.contains("No harness-aware installs"), "{listed}");
+}
+
+#[test]
+fn install_dry_run_json_reports_create_remove_and_replaces() {
+    let (_tmp, catalog, project) = setup();
+    akit(&project, &catalog, &["install", "-H", "copilot", "demo"]);
+    // A dry-run reshape to claude: drops the .agents copy, creates the .claude one.
+    let (json, ok) = akit(
+        &project,
+        &catalog,
+        &["--json", "install", "-H", "claude", "--dry-run", "demo"],
+    );
+    assert!(ok);
+    let v: serde_json::Value = serde_json::from_str(&json).expect("InstallPreview json");
+    assert_eq!(v["replaces"], true, "{json}");
+    assert_eq!(v["create"][0]["path"], ".claude/skills/demo", "{json}");
+    assert_eq!(v["remove"][0], ".agents/skills/demo", "{json}");
+    // The real install is untouched by the dry run.
+    assert!(project.join(".agents/skills/demo").exists());
+}
+
+#[test]
+fn install_prints_reload_guidance_for_skills() {
+    let (_tmp, catalog, project) = setup();
+    let (out, ok) = akit(&project, &catalog, &["install", "-H", "copilot", "demo"]);
+    assert!(ok, "{out}");
+    assert!(out.contains("reload:"), "no reload block:\n{out}");
+    assert!(out.contains("skills:"), "no skill reload hint:\n{out}");
+}
+
+#[test]
+fn install_prints_per_harness_reload_for_agents() {
+    let (_tmp, catalog, project) = setup();
+    make_agent_pkg(
+        &catalog,
+        "rev",
+        &[("copilot", "rev.md"), ("claude", "rev.md")],
+    );
+    let (out, ok) = akit(
+        &project,
+        &catalog,
+        &["install", "--agent", "-H", "copilot", "-H", "claude", "rev"],
+    );
+    assert!(ok, "{out}");
+    assert!(out.contains("copilot agent:"), "no copilot reload:\n{out}");
+    assert!(out.contains("claude agent:"), "no claude reload:\n{out}");
+}
+
+#[test]
+fn reset_preview_lists_owned_paths_before_refusing_non_interactively() {
+    let (_tmp, catalog, project) = setup();
+    akit(&project, &catalog, &["install", "-H", "copilot", "demo"]);
+    // Non-interactive reset (no --yes): previews the owned paths, then refuses.
+    let (out, ok) = akit(&project, &catalog, &["reset"]);
+    assert!(!ok, "reset should refuse non-interactively:\n{out}");
+    assert!(out.contains("Reset would remove"), "no preview:\n{out}");
+    assert!(
+        out.contains(".agents/skills/demo"),
+        "path not listed:\n{out}"
+    );
+    // And it did not delete anything.
+    assert!(project.join(".agents/skills/demo").exists());
 }

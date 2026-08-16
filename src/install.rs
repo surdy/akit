@@ -28,7 +28,7 @@ use crate::harness::HarnessId;
 use crate::lockfile::ItemType;
 use crate::materialize::{self, MaterializeItem, remove_materialization};
 use crate::ownership::{AKIT_LOCKFILE_REL, AkitLockfile, Installation, MaterializationRecord};
-use crate::plan::{self, Plan, PlanIssue};
+use crate::plan::{self, Plan, PlanIssue, PlannedMaterialization};
 use crate::project::Project;
 use crate::transport::{FsTransport, LocalFs};
 
@@ -127,6 +127,91 @@ pub fn install_with(
 ) -> Result<InstallReport> {
     let (plan, resolver) = build_plan(catalog, item_type, id, ctx.harnesses())?;
     reconcile(fs, project, item_type, id, "local", &plan, &resolver)
+}
+
+/// A read-only preview of what [`install`] would do, without touching the project.
+///
+/// Diffs the freshly-computed plan against the current `.akit/kit.lock.json`, so
+/// the caller can show exactly which materializations would be created, which
+/// already exist unchanged, which would be removed (a reshape to a smaller
+/// harness set), and which selected harnesses would be skipped.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InstallPreview {
+    pub id: String,
+    pub item_type: ItemType,
+    /// Harnesses selected for this install (sorted, deduped).
+    pub harnesses: Vec<HarnessId>,
+    /// Planned materializations not currently present for this item.
+    pub create: Vec<PlannedMaterialization>,
+    /// Planned materializations already owned by this item at the same path.
+    pub unchanged: Vec<PlannedMaterialization>,
+    /// Paths this item currently owns that the new plan drops (reshape removals).
+    pub remove: Vec<String>,
+    /// Selected harnesses that could not be served, with reasons.
+    pub issues: Vec<PlanIssue>,
+    /// Whether an existing installation of this item would be replaced/reshaped.
+    pub replaces: bool,
+}
+
+/// Compute an [`InstallPreview`] for `install` without applying it (`--dry-run`).
+pub fn plan_install(
+    project: &Project,
+    catalog: &Catalog,
+    item_type: ItemType,
+    id: &str,
+    ctx: &HarnessContext,
+) -> Result<InstallPreview> {
+    plan_install_with(&LocalFs, project, catalog, item_type, id, ctx)
+}
+
+/// [`plan_install`] against an explicit transport.
+pub fn plan_install_with(
+    fs: &dyn FsTransport,
+    project: &Project,
+    catalog: &Catalog,
+    item_type: ItemType,
+    id: &str,
+    ctx: &HarnessContext,
+) -> Result<InstallPreview> {
+    let (plan, _resolver) = build_plan(catalog, item_type, id, ctx.harnesses())?;
+
+    let lock = AkitLockfile::load_with(fs, &project.akit_lockfile_path())?;
+    let existing = lock.get(item_type, id);
+    let existing_paths: std::collections::HashSet<&str> = existing
+        .map(|e| e.materializations.iter().map(|m| m.path.as_str()).collect())
+        .unwrap_or_default();
+    let planned_paths: std::collections::HashSet<&str> = plan
+        .materializations
+        .iter()
+        .map(|m| m.path.as_str())
+        .collect();
+
+    let mut create = Vec::new();
+    let mut unchanged = Vec::new();
+    for m in &plan.materializations {
+        if existing_paths.contains(m.path.as_str()) {
+            unchanged.push(m.clone());
+        } else {
+            create.push(m.clone());
+        }
+    }
+    let mut remove: Vec<String> = existing_paths
+        .iter()
+        .filter(|p| !planned_paths.contains(*p))
+        .map(|p| p.to_string())
+        .collect();
+    remove.sort();
+
+    Ok(InstallPreview {
+        id: id.to_string(),
+        item_type,
+        harnesses: ctx.harnesses().to_vec(),
+        create,
+        unchanged,
+        remove,
+        issues: plan.issues,
+        replaces: existing.is_some(),
+    })
 }
 
 /// Remove `id` from some or all harnesses.

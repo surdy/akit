@@ -152,6 +152,9 @@ enum Commands {
         /// Target harness (repeatable). Overrides `AKIT_HARNESSES` and `.akit/config.json`.
         #[arg(long = "harness", short = 'H', value_name = "ID")]
         harnesses: Vec<String>,
+        /// Preview the plan without changing anything.
+        #[arg(long)]
+        dry_run: bool,
         /// Catalog id of the skill/agent to install.
         id: String,
     },
@@ -449,16 +452,27 @@ fn run() -> Result<()> {
         Commands::Install {
             agent,
             harnesses,
+            dry_run,
             id,
         } => {
             let project = Project::locate(cli.project.clone())?;
             let catalog = Catalog::locate()?;
             let ctx = resolve_install_harnesses(harnesses, &project)?;
-            let report = install::install(&project, &catalog, item_type(*agent), id, &ctx)?;
-            if cli.json {
-                println!("{}", serde_json::to_string(&report)?);
+            if *dry_run {
+                let preview =
+                    install::plan_install(&project, &catalog, item_type(*agent), id, &ctx)?;
+                if cli.json {
+                    println!("{}", serde_json::to_string(&preview)?);
+                } else {
+                    print_install_preview(&preview);
+                }
             } else {
-                print_install_report(&project, &report);
+                let report = install::install(&project, &catalog, item_type(*agent), id, &ctx)?;
+                if cli.json {
+                    println!("{}", serde_json::to_string(&report)?);
+                } else {
+                    print_install_report(&project, &report);
+                }
             }
         }
         Commands::Uninstall {
@@ -507,9 +521,12 @@ fn run() -> Result<()> {
                 }
                 return Ok(());
             }
-            if !yes && !cli.json && !confirm_reset(lock.items.len(), owned)? {
-                println!("Aborted.");
-                return Ok(());
+            if !yes && !cli.json {
+                print_reset_preview(&lock.items);
+                if !confirm_reset(lock.items.len(), owned)? {
+                    println!("Aborted.");
+                    return Ok(());
+                }
             }
             let report = install::reset(&project)?;
             if cli.json {
@@ -628,6 +645,16 @@ fn prompt_for_harnesses() -> Result<HarnessContext> {
     HarnessContext::new(chosen)
 }
 
+/// List the akit-owned files a reset would remove, before the confirm prompt.
+fn print_reset_preview(items: &[akit::ownership::Installation]) {
+    println!("Reset would remove these akit-owned files:");
+    for item in items {
+        for m in &item.materializations {
+            println!("  {}", m.path);
+        }
+    }
+}
+
 /// Confirm a destructive reset at an interactive prompt.
 fn confirm_reset(installs: usize, files: usize) -> Result<bool> {
     use std::io::{IsTerminal, Write};
@@ -684,6 +711,88 @@ fn print_install_report(project: &Project, report: &install::InstallReport) {
             println!("  {}: {}", issue.harness.as_str(), issue.reason.message());
         }
     }
+    print_reload_guidance(report.item_type, &report.harnesses);
+}
+
+/// Print post-install reload/restart guidance per served harness.
+///
+/// Agents have per-harness reload data in the registry; skills do not yet, so
+/// they get one honest, harness-agnostic hint.
+fn print_reload_guidance(item_type: ItemType, harnesses: &[HarnessId]) {
+    if harnesses.is_empty() {
+        return;
+    }
+    println!("reload:");
+    match item_type {
+        ItemType::Agent => {
+            for h in harnesses {
+                let target = akit::harness::agent_target(*h);
+                println!("  {} agent: {}", h.as_str(), target.reload.guidance());
+            }
+        }
+        ItemType::Skill => {
+            println!(
+                "  skills: start a new session (or run your harness's skills-reload command) if it does not appear"
+            );
+        }
+    }
+}
+
+fn print_install_preview(preview: &install::InstallPreview) {
+    let harnesses = preview
+        .harnesses
+        .iter()
+        .map(|h| h.as_str())
+        .collect::<Vec<_>>()
+        .join(", ");
+    let suffix = if preview.replaces {
+        "  (reshapes an existing install)"
+    } else {
+        ""
+    };
+    println!(
+        "Plan: {} '{}' for {harnesses}{suffix}",
+        type_name(preview.item_type),
+        preview.id
+    );
+    if !preview.create.is_empty() {
+        println!("  create:");
+        for m in &preview.create {
+            println!(
+                "    {}  ({})  [{}]",
+                m.path,
+                covers_str(&m.covers),
+                mode_name(m.mode)
+            );
+        }
+    }
+    if !preview.unchanged.is_empty() {
+        println!("  unchanged:");
+        for m in &preview.unchanged {
+            println!("    {}  ({})", m.path, covers_str(&m.covers));
+        }
+    }
+    if !preview.remove.is_empty() {
+        println!("  remove (reshape):");
+        for p in &preview.remove {
+            println!("    {p}");
+        }
+    }
+    if !preview.issues.is_empty() {
+        println!("  skipped:");
+        for issue in &preview.issues {
+            println!("    {}: {}", issue.harness.as_str(), issue.reason.message());
+        }
+    }
+    println!("(dry run — nothing changed; re-run without --dry-run to apply)");
+}
+
+fn covers_str(covers: &[HarnessId]) -> String {
+    covers
+        .iter()
+        .map(|h| h.as_str())
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 fn print_uninstall_report(report: &install::RemoveReport) {

@@ -29,7 +29,8 @@ use crate::harness::{self, HarnessId};
 use crate::lockfile::Mode;
 
 /// What a materialization installs.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum MatKind {
     /// A skill directory (`<skill-path>/<id>/`).
     SkillDir,
@@ -38,7 +39,7 @@ pub enum MatKind {
 }
 
 /// One physical file/directory the plan will create.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PlannedMaterialization {
     /// Project-relative destination path.
     pub path: String,
@@ -88,7 +89,7 @@ impl PlanIssueReason {
 }
 
 /// The result of planning an install: what to materialize + what was skipped.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct Plan {
     /// Physical materializations, sorted by path for deterministic output.
     pub materializations: Vec<PlannedMaterialization>,
