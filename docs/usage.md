@@ -279,6 +279,7 @@ With `--json`, `restore` emits a stable object:
 
 ```text
 akit update [--check] [<id> [--agent]]
+akit update <id> [--agent] --to <sha>
 ```
 
 Re-fetches remotely-pulled catalog items and rewrites them to the **latest commit** of their
@@ -325,6 +326,64 @@ With `--json`, `update` emits a stable object:
 
 `status` is one of `updated`, `outdated`, `up-to-date`, `pinned`, or `error`; failed items add
 an `error` string. `previous_commit`/`commit` are included when known.
+
+#### Roll back (or forward-pin) with `--to <sha>`
+
+Pass `--to <sha>` with an `<id>` to move a single item to an **exact commit** of its recorded ref
+instead of following the ref forward. The `<sha>` may be a full SHA or an unambiguous prefix, and it
+must be **reachable from the item's recorded ref** — an unknown or unreachable commit is rejected
+(without touching the manifest) with a pointer to [`log`](#log--show-a-pulled-items-commit-history):
+
+```bash
+$ akit update deploy-to-vercel --to 9f3c1a2
+  updated skill 'deploy-to-vercel' from vercel-labs/agent-skills/deploy-to-vercel#main (4b7e0d1 → 9f3c1a2)
+Updated 1 item(s): 1 updated, 0 up to date, 0 pinned, 0 error(s).
+```
+
+The catalog copy is re-materialized at that commit and the manifest is **pinned to the resolved
+full SHA** (its `ref` becomes the SHA). Because a full SHA is immutable, `update --check` then
+reports the item as `pinned`; run `akit update <id>` against the branch again — or edit the manifest
+`ref` — to resume tracking. `--to` cannot be combined with `--check`, and requires an `<id>`. The
+`--json` output reuses the `update` object shape (`status`, `previous_commit`, `commit`).
+
+### `log` — show a pulled item's commit history
+
+```text
+akit log <id> [--agent]
+```
+
+Lists the upstream commit history of a pulled catalog item for its recorded ref, newest first, and
+marks (`*`) the commit currently recorded in the manifest (the installed one). History is read from
+the git-fetch **cache's clone** — the manifest itself only ever records the current commit — so an
+already-cached source lists offline; a cache miss fetches once (like `update`).
+
+```bash
+$ akit log deploy-to-vercel
+* 4b7e0d1  2026-02-14  tighten deploy defaults
+  9f3c1a2  2026-01-30  initial deploy-to-vercel skill
+```
+
+- `<id>` must be an item that was pulled and recorded in the manifest (add `--agent` for an agent);
+  an id that was never pulled is an error.
+- Pair it with [`update <id> --to <sha>`](#roll-back-or-forward-pin-with---to-sha) to roll back to
+  any listed commit.
+
+With `--json`, `log` emits an array, newest first:
+
+```json
+[
+  {
+    "commit": "4b7e0d1a…",
+    "ref": "main",
+    "date": "2026-02-14",
+    "subject": "tighten deploy defaults",
+    "current": true
+  }
+]
+```
+
+`current` is `true` for the commit recorded in the manifest; `ref` is the recorded symbolic ref
+(omitted when the item tracks the default branch).
 
 ### `drop` — remove an item from the catalog
 

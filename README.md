@@ -51,7 +51,8 @@ See [`docs/design.md`](docs/design.md) for the full design, decisions, and Phase
   `add --bundle`, `rm --bundle`, `ls` (list the whole catalog), `status` (list items installed in
   the project), `search`, `show`, `sync`, `doctor`, `pull` (fetch a remote source into the
   catalog), `drop` (remove an item from the catalog + prune its manifest entry if it was
-  pulled), `update` (refresh pulled items to the latest upstream commit; `--check` to preview),
-  and `restore` (rebootstrap
+  pulled), `update` (refresh pulled items to the latest upstream commit; `--check` to preview,
+  or `<id> --to <sha>` to roll back / forward-pin to an exact commit), `log` (show a pulled
+  item's upstream commit history, marking the installed commit), and `restore` (rebootstrap
   the catalog from `akit.yml`, pinning each item to its recorded commit; `--latest` to move to
   the head of its ref).
