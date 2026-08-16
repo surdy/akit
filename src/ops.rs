@@ -793,6 +793,143 @@ pub fn update_catalog(
     Ok(UpdateReport { items, summary })
 }
 
+/// One row returned by `log`: an upstream commit of a pulled item's recorded ref.
+#[derive(Debug, Serialize)]
+pub struct LogEntry {
+    /// Full commit SHA.
+    pub commit: String,
+    /// Recorded symbolic ref the history was walked from, when one was recorded.
+    #[serde(rename = "ref", skip_serializing_if = "Option::is_none")]
+    pub git_ref: Option<String>,
+    /// Author date, `YYYY-MM-DD`.
+    pub date: String,
+    /// Commit subject.
+    pub subject: String,
+    /// Whether this is the commit currently recorded in the manifest (installed).
+    pub current: bool,
+}
+
+/// List the upstream commit history of a pulled catalog item, newest first.
+///
+/// History is read from the git-fetch cache's clone of the item's recorded ref (deepening it once
+/// when online); the manifest keeps only the current commit. The row whose commit matches the
+/// manifest's recorded `commit` is flagged `current`. Errors when `id` was never pulled.
+pub fn log_history(
+    catalog: &Catalog,
+    item_type: ItemType,
+    id: &str,
+    base_url: &str,
+) -> Result<Vec<LogEntry>> {
+    ensure_simple_id(id)?;
+    let entry = find_pulled_entry(catalog, item_type, id)?;
+    let commits = remote::history(&entry.spec, base_url)?;
+    Ok(commits
+        .into_iter()
+        .map(|c| LogEntry {
+            current: entry.commit.as_deref() == Some(c.commit.as_str()),
+            commit: c.commit,
+            git_ref: entry.spec.ref_.clone(),
+            date: c.date,
+            subject: c.subject,
+        })
+        .collect())
+}
+
+/// Roll back (or forward-pin) a pulled catalog item to an exact commit of its recorded ref.
+///
+/// The target `to` (a full SHA or an unambiguous prefix) must be reachable from the item's recorded
+/// ref; an unreachable or unknown commit is rejected without touching the manifest. On success the
+/// catalog copy is re-materialized at that commit and the manifest is pinned to the resolved full
+/// SHA (so `update --check` reports it as `pinned`). Returns the same shape as [`update_catalog`].
+pub fn rollback_catalog(
+    catalog: &Catalog,
+    item_type: ItemType,
+    id: &str,
+    to: &str,
+    base_url: &str,
+) -> Result<UpdateReport> {
+    ensure_simple_id(id)?;
+    let entry = find_pulled_entry(catalog, item_type, id)?;
+
+    // Resolve `to` against the recorded ref's history: this both expands a prefix to the full SHA
+    // and enforces reachability (git log lists exactly the ancestors of the ref tip).
+    let commits = remote::history(&entry.spec, base_url)?;
+    let full = commits
+        .iter()
+        .find(|c| c.commit == to || c.commit.starts_with(to))
+        .map(|c| c.commit.clone());
+    let Some(full) = full else {
+        let ref_label = entry.spec.ref_.as_deref().unwrap_or("the default branch");
+        anyhow::bail!(
+            "commit '{to}' is not reachable from {ref_label} of {}; \
+             run `akit log {id}` to list valid commits",
+            entry.spec.source()
+        );
+    };
+
+    // Re-materialize pinned to the resolved SHA. A SHA ref caches under its own checkout dir, so
+    // this fetches and checks out that exact commit (like a SHA-pinned pull).
+    let pinned_spec = SourceSpec {
+        ref_: Some(full.clone()),
+        ..entry.spec.clone()
+    };
+    pull_copy(
+        catalog,
+        &pinned_spec,
+        item_type,
+        Some(&entry.id),
+        base_url,
+        FetchMode::Cached,
+        true,
+    )?;
+
+    manifest::record(
+        catalog,
+        &manifest::ManifestEntry {
+            spec: pinned_spec,
+            item_type,
+            id: entry.id.clone(),
+            commit: Some(full.clone()),
+        },
+    )?;
+
+    let mut summary = UpdateSummary::default();
+    let status = if entry.commit.as_deref() == Some(full.as_str()) {
+        summary.up_to_date += 1;
+        UpdateStatus::UpToDate
+    } else {
+        summary.updated += 1;
+        UpdateStatus::Updated
+    };
+    Ok(UpdateReport {
+        items: vec![UpdateItem {
+            id: entry.id,
+            item_type,
+            source: entry.spec.source(),
+            git_ref: entry.spec.ref_.clone(),
+            status,
+            previous_commit: entry.commit.clone(),
+            commit: Some(full),
+            error: None,
+        }],
+        summary,
+    })
+}
+
+/// Find the manifest entry for a pulled `(type, id)`, or bail with `update`-style guidance.
+fn find_pulled_entry(
+    catalog: &Catalog,
+    item_type: ItemType,
+    id: &str,
+) -> Result<manifest::ManifestEntry> {
+    manifest::entries(catalog)?
+        .into_iter()
+        .find(|e| e.item_type == item_type && e.id == id)
+        .with_context(|| {
+            format!("no catalog item with id '{id}' was pulled from a source (nothing recorded in the manifest)")
+        })
+}
+
 /// Outcome of a `drop` operation (removing an item from the catalog).
 #[derive(Debug, Serialize)]
 pub struct DropReport {

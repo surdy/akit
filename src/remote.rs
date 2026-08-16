@@ -165,6 +165,131 @@ pub fn resolved_commit_with_cache_root(spec: &SourceSpec, cache_root: &Path) -> 
     if sha.is_empty() { None } else { Some(sha) }
 }
 
+/// One commit in a source's upstream history, as read from the cached clone's git log.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CommitInfo {
+    /// Full commit SHA.
+    pub commit: String,
+    /// Author date, `YYYY-MM-DD`.
+    pub date: String,
+    /// Commit subject (first line of the message).
+    pub subject: String,
+}
+
+/// Return the upstream commit history of the spec's recorded ref, newest first.
+///
+/// Backs `akit log`. The cache is cloned on first use; thereafter the checkout is reused and the
+/// network is only contacted to deepen the shallow clone's history. An offline deepen failure is
+/// tolerated, so an already-cached source lists whatever history it holds without a network hop.
+pub fn history(spec: &SourceSpec, base_url: &str) -> Result<Vec<CommitInfo>> {
+    history_with_cache_root(spec, base_url, &cache_root())
+}
+
+/// [`history`] with an explicit cache root, for hermetic callers and tests.
+pub fn history_with_cache_root(
+    spec: &SourceSpec,
+    base_url: &str,
+    cache_root: &Path,
+) -> Result<Vec<CommitInfo>> {
+    let checkout = checkout_dir(cache_root, spec);
+
+    if is_git_checkout(&checkout) {
+        // Best-effort: deepen the shallow clone so the full history is available. When offline
+        // this fails and we log whatever the cache already holds.
+        let _ = deepen_history(&checkout, spec);
+    } else if checkout.exists() {
+        bail!(
+            "cache path {} exists but is not a git checkout",
+            checkout.display()
+        );
+    } else {
+        clone_checkout(spec, base_url, &checkout)?;
+        let _ = deepen_history(&checkout, spec);
+    }
+
+    read_log(&checkout, &log_target(&checkout, spec))
+}
+
+/// Deepen a shallow clone so `git log` can walk the full history of the ref.
+///
+/// `--unshallow` fails on an already-complete repository, so fall back to a plain fetch of the ref.
+fn deepen_history(checkout: &Path, spec: &SourceSpec) -> Result<()> {
+    let ref_ = spec.ref_.as_deref().unwrap_or("HEAD");
+    let unshallow = run_git_status(
+        &[
+            "fetch".into(),
+            "--unshallow".into(),
+            "origin".into(),
+            ref_.into(),
+        ],
+        Some(checkout),
+    )?;
+    if unshallow.status.success() {
+        return Ok(());
+    }
+    run_git(
+        &["fetch".into(), "origin".into(), ref_.into()],
+        Some(checkout),
+    )
+}
+
+/// Pick the revision to log: the freshly fetched `FETCH_HEAD`, else the recorded ref, else `HEAD`.
+fn log_target(checkout: &Path, spec: &SourceSpec) -> String {
+    let mut candidates: Vec<String> = vec!["FETCH_HEAD".into()];
+    if let Some(ref_) = spec.ref_.as_deref() {
+        candidates.push(ref_.into());
+    }
+    candidates.push("HEAD".into());
+    for cand in &candidates {
+        let ok = run_git_status(
+            &["rev-parse".into(), "--verify".into(), cand.into()],
+            Some(checkout),
+        )
+        .map(|out| out.status.success())
+        .unwrap_or(false);
+        if ok {
+            return cand.clone();
+        }
+    }
+    "HEAD".into()
+}
+
+/// Read the git log of `target` as newest-first [`CommitInfo`] rows.
+fn read_log(checkout: &Path, target: &str) -> Result<Vec<CommitInfo>> {
+    let output = run_git_status(
+        &[
+            "log".into(),
+            "--format=%H%x1f%ad%x1f%s".into(),
+            "--date=short".into(),
+            target.into(),
+        ],
+        Some(checkout),
+    )?;
+    if !output.status.success() {
+        bail!(
+            "git log {target} failed in {}\nstderr:\n{}",
+            checkout.display(),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    let text = String::from_utf8_lossy(&output.stdout);
+    let mut commits = Vec::new();
+    for line in text.lines() {
+        let mut fields = line.splitn(3, '\u{1f}');
+        let (Some(commit), Some(date), Some(subject)) =
+            (fields.next(), fields.next(), fields.next())
+        else {
+            continue;
+        };
+        commits.push(CommitInfo {
+            commit: commit.to_string(),
+            date: date.to_string(),
+            subject: subject.to_string(),
+        });
+    }
+    Ok(commits)
+}
+
 /// Force-refresh a cached source to the latest commit of its recorded ref (or the
 /// repository's default branch when no ref was recorded), then return the resolved
 /// item path.

@@ -346,11 +346,7 @@ fn pull_remote_into_catalog_via_local_bare_repo() {
     let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(json["id"], "vercel-deploy");
     assert_eq!(json["created"], true);
-    assert!(
-        catalog
-            .join("skills/vercel-deploy/SKILL.md")
-            .is_file()
-    );
+    assert!(catalog.join("skills/vercel-deploy/SKILL.md").is_file());
 }
 
 #[test]
@@ -533,7 +529,11 @@ fn update_refreshes_outdated_catalog_items() {
     assert_eq!(json["summary"]["outdated"], 1);
     assert_eq!(json["items"][0]["status"], "outdated");
     assert!(fs::read_to_string(&skill_md).unwrap().contains("body"));
-    assert!(!fs::read_to_string(&skill_md).unwrap().contains("updated body"));
+    assert!(
+        !fs::read_to_string(&skill_md)
+            .unwrap()
+            .contains("updated body")
+    );
 
     // Applying the update rewrites the catalog copy to the latest commit.
     let output = run_akit_pull(&["update"], &catalog, &cache, &base_url);
@@ -546,7 +546,11 @@ fn update_refreshes_outdated_catalog_items() {
     let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(json["summary"]["updated"], 1);
     assert_eq!(json["items"][0]["status"], "updated");
-    assert!(fs::read_to_string(&skill_md).unwrap().contains("updated body"));
+    assert!(
+        fs::read_to_string(&skill_md)
+            .unwrap()
+            .contains("updated body")
+    );
 
     // A second run is a no-op now that the copy matches upstream.
     let output = run_akit_pull(&["update"], &catalog, &cache, &base_url);
@@ -674,21 +678,196 @@ fn restore_pins_to_recorded_commit_until_latest() {
         String::from_utf8_lossy(&output.stderr)
     );
     let body = fs::read_to_string(&skill_md).unwrap();
-    assert!(body.contains("body") && !body.contains("updated body"), "{body}");
+    assert!(
+        body.contains("body") && !body.contains("updated body"),
+        "{body}"
+    );
     let manifest = fs::read_to_string(catalog.join("akit.yml")).unwrap();
     assert!(manifest.contains(&format!("commit: {c1}")), "{manifest}");
 
     // `restore --latest` moves to the head of the ref (C2) and rewrites the recorded commit.
-    let output = run_akit_pull(&["restore", "--latest", "--force"], &catalog, &cache, &base_url);
+    let output = run_akit_pull(
+        &["restore", "--latest", "--force"],
+        &catalog,
+        &cache,
+        &base_url,
+    );
     assert!(
         output.status.success(),
         "akit restore --latest failed\nstdout:\n{}\nstderr:\n{}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
-    assert!(fs::read_to_string(&skill_md).unwrap().contains("updated body"));
+    assert!(
+        fs::read_to_string(&skill_md)
+            .unwrap()
+            .contains("updated body")
+    );
     let manifest = fs::read_to_string(catalog.join("akit.yml")).unwrap();
     assert!(manifest.contains(&format!("commit: {c2}")), "{manifest}");
+}
+
+#[test]
+fn log_lists_history_and_marks_current() {
+    let tmp = test_tempdir();
+    let base = tmp.path();
+    let git_base = make_local_bare_remote(base);
+    let cache = base.join("cache");
+    let catalog = base.join("catalog");
+    let base_url = format!("file://{}", git_base.display());
+
+    // Pull at C1, advance upstream to C2, and update so the manifest records C2.
+    let output = run_akit_pull(
+        &["pull", "acme/kit-skills/deploy-to-vercel#main"],
+        &catalog,
+        &cache,
+        &base_url,
+    );
+    assert!(output.status.success());
+    let c1 = remote_head(base);
+
+    push_remote_change(base, &git_base, "updated body");
+    let c2 = remote_head(base);
+    assert_ne!(c1, c2);
+
+    let output = run_akit_pull(&["update"], &catalog, &cache, &base_url);
+    assert!(output.status.success());
+
+    // `log` lists the recorded ref's history newest-first and marks the installed commit (C2).
+    let output = run_akit_pull(&["log", "deploy-to-vercel"], &catalog, &cache, &base_url);
+    assert!(
+        output.status.success(),
+        "akit log failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let rows = json.as_array().unwrap();
+    assert_eq!(rows.len(), 2, "expected two commits, got {json}");
+    assert_eq!(rows[0]["commit"], c2);
+    assert_eq!(rows[0]["ref"], "main");
+    assert_eq!(rows[0]["current"], true);
+    assert_eq!(rows[1]["commit"], c1);
+    assert_eq!(rows[1]["current"], false);
+
+    // Logging an id that was never pulled is an error.
+    let output = run_akit_pull(&["log", "never-pulled"], &catalog, &cache, &base_url);
+    assert!(!output.status.success());
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("was pulled from a source"),
+        "stderr:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn update_to_rolls_back_to_prior_commit() {
+    let tmp = test_tempdir();
+    let base = tmp.path();
+    let git_base = make_local_bare_remote(base);
+    let cache = base.join("cache");
+    let catalog = base.join("catalog");
+    let base_url = format!("file://{}", git_base.display());
+    let skill_md = catalog.join("skills/deploy-to-vercel/SKILL.md");
+
+    // Pull C1, advance to C2, update to C2.
+    let output = run_akit_pull(
+        &["pull", "acme/kit-skills/deploy-to-vercel#main"],
+        &catalog,
+        &cache,
+        &base_url,
+    );
+    assert!(output.status.success());
+    let c1 = remote_head(base);
+
+    push_remote_change(base, &git_base, "updated body");
+    let c2 = remote_head(base);
+
+    let output = run_akit_pull(&["update"], &catalog, &cache, &base_url);
+    assert!(output.status.success());
+    assert!(
+        fs::read_to_string(&skill_md)
+            .unwrap()
+            .contains("updated body")
+    );
+
+    // Roll back to C1: the catalog copy is re-materialized at the old commit.
+    let output = run_akit_pull(
+        &["update", "deploy-to-vercel", "--to", &c1],
+        &catalog,
+        &cache,
+        &base_url,
+    );
+    assert!(
+        output.status.success(),
+        "akit update --to failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(json["items"][0]["status"], "updated");
+    assert_eq!(json["items"][0]["previous_commit"], c2);
+    assert_eq!(json["items"][0]["commit"], c1);
+
+    let body = fs::read_to_string(&skill_md).unwrap();
+    assert!(
+        body.contains("body") && !body.contains("updated body"),
+        "{body}"
+    );
+
+    // The manifest is now pinned to the full SHA, so `update --check` reports it as pinned.
+    let manifest = fs::read_to_string(catalog.join("akit.yml")).unwrap();
+    assert!(manifest.contains(&format!("commit: {c1}")), "{manifest}");
+    assert!(manifest.contains(&format!("ref: {c1}")), "{manifest}");
+
+    let output = run_akit_pull(&["update", "--check"], &catalog, &cache, &base_url);
+    assert!(output.status.success());
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(json["summary"]["pinned"], 1);
+    assert_eq!(json["items"][0]["status"], "pinned");
+}
+
+#[test]
+fn update_to_rejects_unreachable_sha_without_mutating_manifest() {
+    let tmp = test_tempdir();
+    let base = tmp.path();
+    let git_base = make_local_bare_remote(base);
+    let cache = base.join("cache");
+    let catalog = base.join("catalog");
+    let base_url = format!("file://{}", git_base.display());
+
+    let output = run_akit_pull(
+        &["pull", "acme/kit-skills/deploy-to-vercel#main"],
+        &catalog,
+        &cache,
+        &base_url,
+    );
+    assert!(output.status.success());
+    let c1 = remote_head(base);
+    let manifest_before = fs::read_to_string(catalog.join("akit.yml")).unwrap();
+
+    // A syntactically-valid but unreachable SHA is rejected with actionable guidance.
+    let bogus = "0123456789abcdef0123456789abcdef01234567";
+    let output = run_akit_pull(
+        &["update", "deploy-to-vercel", "--to", bogus],
+        &catalog,
+        &cache,
+        &base_url,
+    );
+    assert!(!output.status.success());
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("not reachable"),
+        "stderr:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    // The manifest is untouched: it still records the original commit C1.
+    let manifest_after = fs::read_to_string(catalog.join("akit.yml")).unwrap();
+    assert_eq!(manifest_before, manifest_after);
+    assert!(
+        manifest_after.contains(&format!("commit: {c1}")),
+        "{manifest_after}"
+    );
 }
 
 #[test]

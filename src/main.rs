@@ -118,8 +118,19 @@ enum Commands {
         /// Report what would change without writing anything.
         #[arg(long)]
         check: bool,
+        /// Roll back (or forward-pin) `<id>` to this exact commit of its recorded ref.
+        #[arg(long, value_name = "SHA")]
+        to: Option<String>,
         /// Catalog id to update; omit to update every pulled item.
         id: Option<String>,
+    },
+    /// Show the upstream commit history of a pulled catalog item (newest first).
+    Log {
+        /// Inspect an agent (`.agent.md`) instead of a skill.
+        #[arg(long)]
+        agent: bool,
+        /// Catalog id of the pulled item.
+        id: String,
     },
     /// Remove a skill or agent from the catalog (prunes its manifest entry if it was pulled).
     Drop {
@@ -389,10 +400,25 @@ fn run() -> Result<()> {
                 std::process::exit(1);
             }
         }
-        Commands::Update { agent, check, id } => {
+        Commands::Update {
+            agent,
+            check,
+            to,
+            id,
+        } => {
             let catalog = Catalog::locate()?;
-            let only = id.as_deref().map(|id| (item_type(*agent), id));
-            let report = ops::update_catalog(&catalog, only, &remote_base_url(), *check)?;
+            let report = if let Some(to) = to.as_deref() {
+                if *check {
+                    bail!("update --to <sha> cannot be combined with --check");
+                }
+                let Some(id) = id.as_deref() else {
+                    bail!("update --to <sha> requires an <id> to roll back");
+                };
+                ops::rollback_catalog(&catalog, item_type(*agent), id, to, &remote_base_url())?
+            } else {
+                let only = id.as_deref().map(|id| (item_type(*agent), id));
+                ops::update_catalog(&catalog, only, &remote_base_url(), *check)?
+            };
             if cli.json {
                 println!("{}", serde_json::to_string(&report)?);
             } else {
@@ -400,6 +426,15 @@ fn run() -> Result<()> {
             }
             if report.summary.errors > 0 {
                 std::process::exit(1);
+            }
+        }
+        Commands::Log { agent, id } => {
+            let catalog = Catalog::locate()?;
+            let entries = ops::log_history(&catalog, item_type(*agent), id, &remote_base_url())?;
+            if cli.json {
+                println!("{}", serde_json::to_string(&entries)?);
+            } else {
+                print_log(&entries);
             }
         }
         Commands::Drop { agent, id } => {
@@ -931,6 +966,22 @@ fn print_update_report(report: &ops::UpdateReport, check: bool) {
             s.up_to_date,
             s.pinned,
             s.errors
+        );
+    }
+}
+
+fn print_log(entries: &[ops::LogEntry]) {
+    if entries.is_empty() {
+        println!("No commit history available for this item.");
+        return;
+    }
+    for entry in entries {
+        let mark = if entry.current { "*" } else { " " };
+        println!(
+            "{mark} {}  {}  {}",
+            short_sha(&entry.commit),
+            entry.date,
+            entry.subject
         );
     }
 }
