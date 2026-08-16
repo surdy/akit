@@ -15,57 +15,11 @@ pub enum MaterializeOutcome {
     AlreadyPresent,
 }
 
-/// Result of materialization with the effective mode that was actually used.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct MaterializeReport {
-    pub outcome: MaterializeOutcome,
-    pub mode: Mode,
-}
-
-impl MaterializeOutcome {
-    pub fn created(&self) -> bool {
-        matches!(self, MaterializeOutcome::Created)
-    }
-}
-
 /// Materialize `src` at `dst` using the given mode, creating parent directories as needed.
 pub fn materialize(mode: Mode, src: &Path, dst: &Path) -> Result<MaterializeOutcome> {
     match mode {
         Mode::Symlink => symlink(src, dst),
         Mode::Copy => copy(src, dst),
-    }
-}
-
-/// Materialize `src` at `dst`, falling back from symlink to copy if symlinking fails.
-pub fn materialize_with_fallback(
-    requested_mode: Mode,
-    src: &Path,
-    dst: &Path,
-) -> Result<MaterializeReport> {
-    match requested_mode {
-        Mode::Copy => Ok(MaterializeReport {
-            outcome: copy(src, dst)?,
-            mode: Mode::Copy,
-        }),
-        Mode::Symlink => match symlink(src, dst) {
-            Ok(outcome) => Ok(MaterializeReport {
-                outcome,
-                mode: Mode::Symlink,
-            }),
-            Err(err) => {
-                eprintln!(
-                    "warning: symlink failed for {} -> {}; falling back to copy: {err:#}",
-                    dst.display(),
-                    src.display()
-                );
-                Ok(MaterializeReport {
-                    outcome: copy(src, dst).with_context(|| {
-                        format!("copy fallback after symlink failure for {}", dst.display())
-                    })?,
-                    mode: Mode::Copy,
-                })
-            }
-        },
     }
 }
 

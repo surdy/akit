@@ -37,31 +37,6 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Pull a skill or agent from your catalog, or owner/repo/path[#ref], into this project.
-    Add {
-        /// Add an agent (`agents/<name>.agent.md`) instead of a skill.
-        #[arg(long)]
-        agent: bool,
-        /// Copy files instead of symlinking them.
-        #[arg(long)]
-        copy: bool,
-        /// Add every item listed by `bundles/<name>.yml`.
-        #[arg(long)]
-        bundle: Option<String>,
-        /// Local item name, or remote owner/repo/path[#ref].
-        name: Option<String>,
-    },
-    /// Remove a skill or agent from this project.
-    Rm {
-        /// Remove an agent (`agents/<name>.agent.md`) instead of a skill.
-        #[arg(long)]
-        agent: bool,
-        /// Remove every installed item tagged with this bundle.
-        #[arg(long)]
-        bundle: Option<String>,
-        /// Name of the item to remove.
-        name: Option<String>,
-    },
     /// List every skill and agent in your catalog.
     #[command(alias = "catalog")]
     Ls,
@@ -242,114 +217,6 @@ fn run() -> Result<()> {
     let cli = Cli::parse();
 
     match &cli.command {
-        Commands::Add {
-            agent,
-            copy,
-            bundle,
-            name,
-        } => {
-            let mode = if *copy { Mode::Copy } else { Mode::Symlink };
-            match (bundle.as_deref(), name.as_deref()) {
-                (Some(_), Some(_)) => {
-                    bail!("add accepts either <name> or --bundle <name>, not both")
-                }
-                (None, None) => bail!("add requires <name> or --bundle <name>"),
-                (Some(bundle), None) => {
-                    if *agent {
-                        bail!("add --bundle cannot be combined with --agent");
-                    }
-                    let project = Project::locate(cli.project.clone())?;
-                    let catalog = Catalog::locate()?;
-                    let report = ops::add_bundle(&project, &catalog, bundle, mode)?;
-                    if cli.json {
-                        println!("{}", serde_json::to_string(&report)?);
-                    } else {
-                        if report.items.iter().any(|item| item.not_a_git_repo) {
-                            warn_not_git(&project);
-                        }
-                        println!(
-                            "Added bundle '{}' ({} items)",
-                            report.bundle,
-                            report.items.len()
-                        );
-                        for item in &report.items {
-                            println!("  {}", add_report_line(item));
-                        }
-                    }
-                }
-                (None, Some(name)) => {
-                    let project = Project::locate(cli.project.clone())?;
-                    let report = if let Some(spec) = SourceSpec::parse(name) {
-                        ops::add_remote(
-                            &project,
-                            &spec,
-                            item_type(*agent),
-                            mode,
-                            &remote_base_url(),
-                        )?
-                    } else if name.contains('/') {
-                        bail!("invalid remote source spec '{name}'; expected owner/repo/path[#ref]")
-                    } else {
-                        let catalog = Catalog::locate()?;
-                        ops::add_item(&project, &catalog, item_type(*agent), name, mode, None)?
-                    };
-                    if cli.json {
-                        println!("{}", serde_json::to_string(&report)?);
-                    } else {
-                        if report.not_a_git_repo {
-                            warn_not_git(&project);
-                        }
-                        println!("{}", add_report_line(&report));
-                    }
-                }
-            }
-        }
-        Commands::Rm {
-            agent,
-            bundle,
-            name,
-        } => match (bundle.as_deref(), name.as_deref()) {
-            (Some(_), Some(_)) => {
-                bail!("rm accepts either <name> or --bundle <name>, not both")
-            }
-            (None, None) => bail!("rm requires <name> or --bundle <name>"),
-            (Some(bundle), None) => {
-                if *agent {
-                    bail!("rm --bundle cannot be combined with --agent");
-                }
-                let project = Project::locate(cli.project.clone())?;
-                let report = ops::remove_bundle(&project, bundle)?;
-                if cli.json {
-                    println!("{}", serde_json::to_string(&report)?);
-                } else if report.items.is_empty() {
-                    println!("Bundle '{}' is not installed", report.bundle);
-                } else {
-                    println!(
-                        "Removed bundle '{}' ({} items)",
-                        report.bundle,
-                        report.items.len()
-                    );
-                    for item in &report.items {
-                        println!("  {}", remove_report_line(item));
-                    }
-                }
-            }
-            (None, Some(name)) => {
-                let project = Project::locate(cli.project.clone())?;
-                let report = ops::remove_item(&project, item_type(*agent), name)?;
-                if cli.json {
-                    println!("{}", serde_json::to_string(&report)?);
-                } else if report.not_installed {
-                    println!(
-                        "{} '{}' is not installed",
-                        title_case(type_name(report.item_type)),
-                        report.id
-                    );
-                } else {
-                    println!("{}", remove_report_line(&report));
-                }
-            }
-        },
         Commands::Ls => {
             let catalog = Catalog::locate()?;
             let items = ops::list_catalog(&catalog)?;
@@ -1435,20 +1302,6 @@ fn mode_name(mode: Mode) -> &'static str {
     }
 }
 
-fn created_name(mode: Mode) -> &'static str {
-    match mode {
-        Mode::Symlink => "linked",
-        Mode::Copy => "copied",
-    }
-}
-
-fn already_present_name(mode: Mode) -> &'static str {
-    match mode {
-        Mode::Symlink => "already linked",
-        Mode::Copy => "already present",
-    }
-}
-
 fn title_case(s: &str) -> String {
     let mut chars = s.chars();
     match chars.next() {
@@ -1462,20 +1315,6 @@ fn warn_not_git(project: &Project) {
         "warning: {} is not a git repository; pulled files will NOT be git-ignored",
         project.root.display()
     );
-}
-
-fn add_report_line(report: &ops::AddReport) -> String {
-    let action = if report.link_created {
-        created_name(report.mode)
-    } else {
-        already_present_name(report.mode)
-    };
-    format!(
-        "Added {} '{}' -> {} ({action})",
-        type_name(report.item_type),
-        report.id,
-        report.target
-    )
 }
 
 fn pull_report_line(report: &ops::PullReport) -> String {
@@ -1655,20 +1494,6 @@ fn print_log(entries: &[ops::LogEntry]) {
             entry.subject
         );
     }
-}
-
-fn remove_report_line(report: &ops::RemoveReport) -> String {
-    let removed = if report.target_removed {
-        "removed"
-    } else {
-        "target already missing"
-    };
-    format!(
-        "Removed {} '{}' -> {} ({removed})",
-        type_name(report.item_type),
-        report.id,
-        report.target
-    )
 }
 
 /// JSON shape for `status`: harness-aware installed items (`.akit`) plus

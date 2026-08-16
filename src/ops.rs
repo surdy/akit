@@ -1,5 +1,6 @@
-//! High-level engine operations. The CLI and any GUI call these; they own the end-to-end
-//! pipeline (resolve → materialize/remove → gitignore → record in lockfile).
+//! High-level catalog engine operations: fetch remote sources into the catalog
+//! (`pull`/`restore`/`update`/`log`/`drop`) and list catalog contents (`ls`).
+//! Project materialization is the harness-aware engine's job ([`crate::install`]).
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
@@ -7,101 +8,12 @@ use std::collections::{HashMap, HashSet};
 use std::io::ErrorKind;
 use std::path::PathBuf;
 
-use crate::bundle;
 use crate::catalog::{AgentShape, Catalog};
 use crate::fsops;
-use crate::gitexclude;
 use crate::harness::HarnessId;
-use crate::lockfile::{ItemType, LockItem, Lockfile, Mode};
+use crate::lockfile::{ItemType, Mode};
 use crate::manifest;
-use crate::project::Project;
 use crate::remote::{self, SourceSpec};
-
-/// Project-relative path of the lockfile, used for the git-exclude entry.
-pub const LOCKFILE_REL: &str = ".copilot/kit.lock.json";
-
-/// Outcome of an `add` operation.
-#[derive(Debug, Serialize)]
-pub struct AddReport {
-    pub id: String,
-    #[serde(rename = "type")]
-    pub item_type: ItemType,
-    pub mode: Mode,
-    /// Project-relative materialized path.
-    pub target: String,
-    /// `local` for catalog items, or `owner/repo/path` for remote items.
-    pub source: String,
-    /// Source ref, when applicable.
-    #[serde(rename = "ref", skip_serializing_if = "Option::is_none")]
-    pub git_ref: Option<String>,
-    /// Bundle this item was installed as part of, if any.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub bundle: Option<String>,
-    /// Whether the link/copy was created (vs already present).
-    pub link_created: bool,
-    /// Whether a new line was added to `.git/info/exclude`.
-    pub exclude_added: bool,
-    /// Whether a new lockfile entry was added (vs replaced).
-    pub lock_added: bool,
-    /// True if the project is not a git repo (pulls cannot be auto-ignored).
-    pub not_a_git_repo: bool,
-}
-
-/// Outcome of an `add --bundle` operation.
-#[derive(Debug, Serialize)]
-pub struct BundleAddReport {
-    pub bundle: String,
-    pub items: Vec<AddReport>,
-}
-
-/// Outcome of an `rm` operation.
-#[derive(Debug, Serialize)]
-pub struct RemoveReport {
-    pub id: String,
-    #[serde(rename = "type")]
-    pub item_type: ItemType,
-    /// Project-relative materialized path.
-    pub target: String,
-    /// Whether a materialized target was removed.
-    pub target_removed: bool,
-    /// Whether the target line was removed from `.git/info/exclude`.
-    pub exclude_removed: bool,
-    /// Whether a lockfile entry was removed.
-    pub lock_removed: bool,
-    /// True when the item was not recorded as installed.
-    pub not_installed: bool,
-    /// True if the project is not a git repo.
-    pub not_a_git_repo: bool,
-}
-
-/// Outcome of an `rm --bundle` operation.
-#[derive(Debug, Serialize)]
-pub struct BundleRemoveReport {
-    pub bundle: String,
-    pub items: Vec<RemoveReport>,
-}
-
-/// Health status for an installed lockfile item.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "lowercase")]
-pub enum HealthStatus {
-    Ok,
-    Orphaned,
-    Missing,
-    Drifted,
-}
-
-/// One row returned by `ls`.
-#[derive(Debug, Serialize)]
-pub struct ListItem {
-    pub id: String,
-    #[serde(rename = "type")]
-    pub item_type: ItemType,
-    pub mode: Mode,
-    pub target: String,
-    pub bundle: Option<String>,
-    pub status: HealthStatus,
-}
 
 /// Whether an installed bundle has all its manifest members present.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -130,97 +42,6 @@ pub struct BundleHealth {
     pub state: BundleState,
 }
 
-/// Report per-bundle completeness for every bundle referenced by the project lockfile.
-///
-/// See [`bundle_health_from_items`] for the semantics; this loads the lockfile first.
-pub fn bundle_health(project: &Project, catalog: Option<&Catalog>) -> Result<Vec<BundleHealth>> {
-    let lockfile = Lockfile::load(&project.lockfile_path())?;
-    Ok(bundle_health_from_items(&lockfile.items, catalog))
-}
-
-/// Compute per-bundle completeness from already-loaded lockfile items.
-///
-/// For each distinct bundle tag among `items`, the manifest `bundles/<name>.yml`
-/// is loaded and its declared members compared to what is installed. A bundle
-/// whose manifest is missing or unreadable (or when no catalog is available)
-/// degrades to [`BundleState::Unknown`] with a stderr warning, rather than
-/// failing the whole report. This never mutates the lockfile or the manifest.
-pub fn bundle_health_from_items(
-    items: &[LockItem],
-    catalog: Option<&Catalog>,
-) -> Vec<BundleHealth> {
-    // Distinct bundle names, sorted, preserving determinism.
-    let mut names: Vec<&str> = items
-        .iter()
-        .filter_map(|i| i.bundle.as_deref())
-        .collect::<HashSet<_>>()
-        .into_iter()
-        .collect();
-    names.sort_unstable();
-
-    names
-        .into_iter()
-        .map(|name| {
-            // (type, id) pairs installed under this bundle tag.
-            let installed_members: HashSet<(ItemType, &str)> = items
-                .iter()
-                .filter(|i| i.bundle.as_deref() == Some(name))
-                .map(|i| (i.item_type, i.id.as_str()))
-                .collect();
-
-            match catalog.map(|c| bundle::load(c, name)) {
-                Some(Ok(manifest)) => {
-                    let mut missing: Vec<String> = manifest
-                        .items
-                        .iter()
-                        .filter(|m| !installed_members.contains(&(m.item_type, m.id.as_str())))
-                        .map(|m| m.id.clone())
-                        .collect();
-                    missing.sort_unstable();
-                    let expected = manifest.items.len();
-                    let installed = expected - missing.len();
-                    let state = if missing.is_empty() {
-                        BundleState::Complete
-                    } else {
-                        BundleState::Partial
-                    };
-                    BundleHealth {
-                        name: name.to_string(),
-                        expected: Some(expected),
-                        installed,
-                        missing,
-                        state,
-                    }
-                }
-                Some(Err(err)) => {
-                    eprintln!(
-                        "warning: bundle '{name}': manifest unreadable ({err}); reporting state 'unknown'"
-                    );
-                    BundleHealth {
-                        name: name.to_string(),
-                        expected: None,
-                        installed: installed_members.len(),
-                        missing: Vec::new(),
-                        state: BundleState::Unknown,
-                    }
-                }
-                None => {
-                    eprintln!(
-                        "warning: bundle '{name}': catalog not found; reporting state 'unknown'"
-                    );
-                    BundleHealth {
-                        name: name.to_string(),
-                        expected: None,
-                        installed: installed_members.len(),
-                        missing: Vec::new(),
-                        state: BundleState::Unknown,
-                    }
-                }
-            }
-        })
-        .collect()
-}
-
 /// One skill or agent present in the catalog, as listed by `catalog ls`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct CatalogItem {
@@ -242,35 +63,6 @@ pub struct CatalogItem {
     /// `description` then carries the diagnostic. Never set for valid items.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub disabled: bool,
-}
-
-/// Pull an item from the catalog into the project (symlink, gitignore, record).
-pub fn add_item(
-    project: &Project,
-    catalog: &Catalog,
-    item_type: ItemType,
-    name: &str,
-    mode: Mode,
-    bundle_name: Option<&str>,
-) -> Result<AddReport> {
-    let src = match item_type {
-        ItemType::Skill => catalog.resolve_skill(name)?,
-        ItemType::Agent => catalog.resolve_agent(name)?,
-    };
-    let target_rel = target_for(item_type, name);
-    record_materialized(
-        project,
-        MaterializeRecord {
-            item_type,
-            id: name,
-            target_rel,
-            src: &src,
-            mode,
-            source: "local".to_string(),
-            git_ref: None,
-            bundle_name,
-        },
-    )
 }
 
 /// Outcome of a `pull` operation (fetch a remote source into the local catalog).
@@ -297,10 +89,9 @@ pub struct PullReport {
 
 /// Fetch a remote `owner/repo/path[#ref]` source and copy it into the local catalog.
 ///
-/// Unlike [`add_remote`], which materializes a remote source straight into a project, this
-/// seeds a reusable **catalog** item (`skills/<id>/` or `agents/<id>.agent.md`) so it can
-/// later be added, searched, and previewed like any other local item. The copy is standalone,
-/// independent of the git-fetch cache.
+/// This seeds a reusable **catalog** item (`skills/<id>/`, or `agents/<id>/` package /
+/// `agents/<id>.agent.md`) so it can later be installed, searched, and previewed like any
+/// other local item. The copy is standalone, independent of the git-fetch cache.
 ///
 /// The remote provenance is recorded in the catalog manifest ([`manifest`]) so the item can
 /// be re-fetched on a new machine with [`restore_catalog`].
@@ -1029,118 +820,6 @@ fn type_label(item_type: ItemType) -> &'static str {
     }
 }
 
-/// Pull a remote item into the project through the same materialize/gitignore/lockfile pipeline.
-pub fn add_remote(
-    project: &Project,
-    spec: &SourceSpec,
-    item_type: ItemType,
-    mode: Mode,
-    base_url: &str,
-) -> Result<AddReport> {
-    let src = remote::fetch(spec, base_url)?;
-    let id = remote_id(item_type, spec);
-    validate_remote_source(item_type, &id, &src)?;
-    let target_rel = target_for(item_type, &id);
-    record_materialized(
-        project,
-        MaterializeRecord {
-            item_type,
-            id: &id,
-            target_rel,
-            src: &src,
-            mode,
-            source: spec.source(),
-            git_ref: spec.ref_.clone(),
-            bundle_name: None,
-        },
-    )
-}
-
-struct MaterializeRecord<'a> {
-    item_type: ItemType,
-    id: &'a str,
-    target_rel: String,
-    src: &'a std::path::Path,
-    mode: Mode,
-    source: String,
-    git_ref: Option<String>,
-    bundle_name: Option<&'a str>,
-}
-
-fn record_materialized(project: &Project, input: MaterializeRecord<'_>) -> Result<AddReport> {
-    let MaterializeRecord {
-        item_type,
-        id,
-        target_rel,
-        src,
-        mode,
-        source,
-        git_ref,
-        bundle_name,
-    } = input;
-    let dst = project.root.join(&target_rel);
-
-    let materialized = fsops::materialize_with_fallback(mode, src, &dst)?;
-
-    let mut exclude_added = false;
-    let not_a_git_repo = project.git_dir.is_none();
-    if let Some(excl) = project.git_info_exclude_path() {
-        exclude_added |=
-            gitexclude::add_line(&crate::transport::LocalFs, &excl, &format!("/{target_rel}"))?;
-        exclude_added |= gitexclude::add_line(
-            &crate::transport::LocalFs,
-            &excl,
-            &format!("/{LOCKFILE_REL}"),
-        )?;
-    }
-
-    let lf_path = project.lockfile_path();
-    let mut lockfile = Lockfile::load(&lf_path)?;
-    let bundle = bundle_name.map(str::to_string);
-    let lock_added = lockfile.upsert(LockItem {
-        id: id.to_string(),
-        item_type,
-        source: source.clone(),
-        git_ref: git_ref.clone(),
-        mode: materialized.mode,
-        target: target_rel.clone(),
-        bundle: bundle.clone(),
-    });
-    lockfile.save(&lf_path)?;
-
-    Ok(AddReport {
-        id: id.to_string(),
-        item_type,
-        mode: materialized.mode,
-        target: target_rel,
-        source,
-        git_ref,
-        bundle,
-        link_created: materialized.outcome.created(),
-        exclude_added,
-        lock_added,
-        not_a_git_repo,
-    })
-}
-
-/// Validate a fetched remote source for the **legacy project `add`** path, where
-/// an agent is always a single Copilot-shaped `.agent.md` file. The catalog pull
-/// path uses [`catalog_dst_for_source`] instead, which also accepts agent packages.
-fn validate_remote_source(item_type: ItemType, id: &str, src: &std::path::Path) -> Result<()> {
-    match item_type {
-        ItemType::Skill => validate_remote_skill(id, src)?,
-        ItemType::Agent => {
-            if !src.is_file() {
-                anyhow::bail!(
-                    "remote agent '{id}' must be a .agent.md file (resolved {})",
-                    src.display()
-                );
-            }
-        }
-    }
-    Ok(())
-}
-
 fn validate_remote_skill(id: &str, src: &std::path::Path) -> Result<()> {
     if !src.is_dir() {
         anyhow::bail!(
@@ -1196,160 +875,6 @@ fn remote_id(item_type: ItemType, spec: &SourceSpec) -> String {
         ItemType::Skill => leaf.to_string(),
         ItemType::Agent => leaf.strip_suffix(".agent.md").unwrap_or(leaf).to_string(),
     }
-}
-
-/// Pull a skill from the catalog into the project (symlink, gitignore, record).
-pub fn add_skill(project: &Project, catalog: &Catalog, name: &str) -> Result<AddReport> {
-    add_item(project, catalog, ItemType::Skill, name, Mode::Symlink, None)
-}
-
-/// Pull every item in a named catalog bundle into the project.
-pub fn add_bundle(
-    project: &Project,
-    catalog: &Catalog,
-    name: &str,
-    mode: Mode,
-) -> Result<BundleAddReport> {
-    let bundle = bundle::load(catalog, name)?;
-    let mut items = Vec::with_capacity(bundle.items.len());
-    for item in &bundle.items {
-        items.push(add_item(
-            project,
-            catalog,
-            item.item_type,
-            &item.id,
-            mode,
-            Some(&bundle.name),
-        )?);
-    }
-    Ok(BundleAddReport {
-        bundle: bundle.name,
-        items,
-    })
-}
-
-/// Remove an installed item from the project.
-pub fn remove_item(project: &Project, item_type: ItemType, name: &str) -> Result<RemoveReport> {
-    let lf_path = project.lockfile_path();
-    let mut lockfile = Lockfile::load(&lf_path)?;
-    let report = remove_item_from_lockfile(project, &mut lockfile, item_type, name)?;
-    if report.lock_removed {
-        lockfile.save(&lf_path)?;
-    }
-    Ok(report)
-}
-
-/// Remove an installed skill from the project.
-pub fn remove_skill(project: &Project, name: &str) -> Result<RemoveReport> {
-    remove_item(project, ItemType::Skill, name)
-}
-
-/// Remove every installed item tagged with a named bundle.
-pub fn remove_bundle(project: &Project, name: &str) -> Result<BundleRemoveReport> {
-    let lf_path = project.lockfile_path();
-    let mut lockfile = Lockfile::load(&lf_path)?;
-    let bundle_items: Vec<(ItemType, String)> = lockfile
-        .items
-        .iter()
-        .filter(|item| item.bundle.as_deref() == Some(name))
-        .map(|item| (item.item_type, item.id.clone()))
-        .collect();
-
-    let mut items = Vec::with_capacity(bundle_items.len());
-    for (item_type, id) in bundle_items {
-        items.push(remove_item_from_lockfile(
-            project,
-            &mut lockfile,
-            item_type,
-            &id,
-        )?);
-    }
-    if items.iter().any(|item| item.lock_removed) {
-        lockfile.save(&lf_path)?;
-    }
-
-    Ok(BundleRemoveReport {
-        bundle: name.to_string(),
-        items,
-    })
-}
-
-fn remove_item_from_lockfile(
-    project: &Project,
-    lockfile: &mut Lockfile,
-    item_type: ItemType,
-    name: &str,
-) -> Result<RemoveReport> {
-    let removed_item = lockfile.remove(item_type, name);
-    let lock_removed = removed_item.is_some();
-    let target = removed_item
-        .as_ref()
-        .map(|item| item.target.clone())
-        .unwrap_or_else(|| target_for(item_type, name));
-
-    let target_removed = if lock_removed {
-        fsops::remove(&project.root.join(&target))?
-    } else {
-        false
-    };
-
-    let mut exclude_removed = false;
-    let not_a_git_repo = project.git_dir.is_none();
-    if lock_removed && let Some(excl) = project.git_info_exclude_path() {
-        exclude_removed =
-            gitexclude::remove_line(&crate::transport::LocalFs, &excl, &format!("/{target}"))?;
-    }
-
-    Ok(RemoveReport {
-        id: name.to_string(),
-        item_type,
-        target,
-        target_removed,
-        exclude_removed,
-        lock_removed,
-        not_installed: !lock_removed,
-        not_a_git_repo,
-    })
-}
-
-/// List lockfile items with their on-disk health.
-pub fn list_items(project: &Project) -> Result<Vec<ListItem>> {
-    list_items_with_optional_catalog(project, None)
-}
-
-/// List lockfile items using an explicit catalog root for copy drift checks.
-pub fn list_items_with_catalog(project: &Project, catalog: &Catalog) -> Result<Vec<ListItem>> {
-    list_items_with_optional_catalog(project, Some(catalog))
-}
-
-fn list_items_with_optional_catalog(
-    project: &Project,
-    catalog: Option<&Catalog>,
-) -> Result<Vec<ListItem>> {
-    let lockfile = Lockfile::load(&project.lockfile_path())?;
-    let needs_catalog = lockfile.items.iter().any(|item| item.mode == Mode::Copy);
-    let located_catalog = if catalog.is_none() && needs_catalog {
-        Some(Catalog::locate()?)
-    } else {
-        None
-    };
-    let catalog = catalog.or(located_catalog.as_ref());
-
-    lockfile
-        .items
-        .into_iter()
-        .map(|item| {
-            let status = health(project, &item, catalog)?;
-            Ok(ListItem {
-                id: item.id,
-                item_type: item.item_type,
-                mode: item.mode,
-                target: item.target,
-                bundle: item.bundle,
-                status,
-            })
-        })
-        .collect()
 }
 
 /// List every skill and agent present in the catalog, with provenance.
@@ -1482,59 +1007,4 @@ fn catalog_item(
         harnesses: Vec::new(),
         disabled: false,
     }
-}
-
-fn target_for(item_type: ItemType, name: &str) -> String {
-    match item_type {
-        ItemType::Skill => format!(".github/skills/{name}"),
-        ItemType::Agent => format!(".github/agents/{name}.agent.md"),
-    }
-}
-
-pub(crate) fn health(
-    project: &Project,
-    item: &LockItem,
-    catalog: Option<&Catalog>,
-) -> Result<HealthStatus> {
-    let dst = project.root.join(&item.target);
-    match std::fs::symlink_metadata(&dst) {
-        Ok(_) if item.mode == Mode::Copy => {
-            let catalog = catalog.context("catalog is required to check copy drift")?;
-            let src = source_for_item(catalog, item);
-            if !src.exists() {
-                return Ok(HealthStatus::Orphaned);
-            }
-            if fsops::drifted(&src, &dst)? {
-                Ok(HealthStatus::Drifted)
-            } else {
-                Ok(HealthStatus::Ok)
-            }
-        }
-        Ok(meta) if meta.file_type().is_symlink() => {
-            if dst.canonicalize().is_ok() {
-                Ok(HealthStatus::Ok)
-            } else {
-                Ok(HealthStatus::Orphaned)
-            }
-        }
-        Ok(_) => Ok(HealthStatus::Ok),
-        Err(e) if e.kind() == ErrorKind::NotFound => Ok(HealthStatus::Missing),
-        Err(e) => Err(e).with_context(|| format!("reading {}", dst.display())),
-    }
-}
-
-pub(crate) fn source_for(catalog: &Catalog, item_type: ItemType, id: &str) -> std::path::PathBuf {
-    match item_type {
-        ItemType::Skill => catalog.skill_source(id),
-        ItemType::Agent => catalog.agent_source(id),
-    }
-}
-
-pub(crate) fn source_for_item(catalog: &Catalog, item: &LockItem) -> std::path::PathBuf {
-    if item.source == "local" {
-        return source_for(catalog, item.item_type, &item.id);
-    }
-    SourceSpec::from_source_and_ref(&item.source, item.git_ref.clone())
-        .map(|spec| remote::cached_item_path(&spec))
-        .unwrap_or_else(|| source_for(catalog, item.item_type, &item.id))
 }

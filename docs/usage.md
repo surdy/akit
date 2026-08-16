@@ -3,20 +3,30 @@
 `akit` pulls personal agent customizations (skills and custom agents) from a central
 **catalog** into a project on demand, kept personal and gitignored, tracked by a lockfile.
 
-It exposes two command families. The **legacy** commands
-([`add`](#add--pull-a-skill-or-agent-into-the-project) / [`rm`](#rm--remove-a-skill-or-agent-from-the-project)
-/ [`status`](#status--harness-aware-project-overview) / [`sync`](#sync--repair-safe-lockfilefilesystemexclude-drift)
-/ [`doctor`](#doctor--read-only-reconcile-report)) materialize into `.github/{skills,agents}` for
-GitHub Copilot CLI. The newer **harness-aware** commands
+The **harness-aware** commands
 ([`install`](#install--install-a-skill-or-agent-for-one-or-more-harnesses) /
 [`uninstall`](#uninstall--remove-a-harness-aware-install) /
 [`installed`](#installed--list-harness-aware-installs-and-their-health) /
+[`status`](#status--harness-aware-project-overview) /
+[`doctor`](#doctor--read-only-harness-aware-diagnosis) /
+[`sync`](#sync--repair-safe-lockfilefilesystemexclude-drift) /
 [`reset`](#reset--remove-every-harness-aware-install) /
 [`verify`](#verify--check-harness-support-on-this-host) /
 [`repair`/`detach`/`forget`/`adopt`](#repair--detach--forget--adopt--maintain-akit-ownership))
 materialize into **each** selected harness's own discovery paths across Copilot, Claude Code,
-Codex, Gemini, and OpenCode — see
-[Harness-aware commands](#harness-aware-commands-the-akit-engine).
+Codex, Gemini, and OpenCode, tracked in `.akit/kit.lock.json` — see
+[Harness-aware commands](#harness-aware-commands-the-akit-engine). The catalog commands
+([`pull`](#pull--fetch-a-remote-source-into-the-catalog) /
+[`restore`](#restore--rebootstrap-the-catalog-from-the-manifest) /
+[`update`](#update--refresh-pulled-items-to-the-latest-upstream-commit) /
+[`log`](#log--show-a-pulled-items-commit-history) / [`drop`](#drop--remove-an-item-from-the-catalog) /
+[`ls`](#ls--list-everything-in-the-catalog) / [`search`](#search--search-the-catalog) /
+[`show`](#show--preview-a-catalog-item)) populate and inspect the catalog itself.
+
+> **Removed in v0.30.0:** the legacy `add`/`rm` commands and the `.copilot/kit.lock.json`
+> lockfile they used. Use [`install`](#install--install-a-skill-or-agent-for-one-or-more-harnesses) /
+> [`uninstall`](#uninstall--remove-a-harness-aware-install) instead — `install` also installs
+> straight from a remote `owner/repo/path[#ref]` and supports `--bundle` and `--symlink`.
 
 ## Install / build
 
@@ -45,13 +55,14 @@ cargo build --release
 
 Move your personal skills/agents here (out of `~/.copilot/`, which is auto-loaded in *every*
 project). Skills are directories containing `SKILL.md`. Agents come in two shapes: a legacy
-single `agents/<name>.agent.md` file (used by [`add`](#add--pull-a-skill-or-agent-into-the-project),
-Copilot-shaped), and a harness-aware **agent package** `agents/<name>/` (an `agent.yml` plus one
-native variant file per harness, used by [`install --agent`](#install--install-a-skill-or-agent-for-one-or-more-harnesses)).
-The read/browse commands ([`ls`](#ls--list-everything-in-the-catalog) /
-[`search`](#search--search-the-catalog) / [`show`](#show--preview-a-catalog-item)) surface both,
-preferring the package when an id exists in both shapes. `akit` then materializes only the ones
-you select into a given project.
+single `agents/<name>.agent.md` file (Copilot-shaped), and a harness-aware **agent package**
+`agents/<name>/` (an `agent.yml` plus one native variant file per harness, installed by
+[`install --agent`](#install--install-a-skill-or-agent-for-one-or-more-harnesses); the
+harness-aware engine installs agents only as packages). The read/browse commands
+([`ls`](#ls--list-everything-in-the-catalog) / [`search`](#search--search-the-catalog) /
+[`show`](#show--preview-a-catalog-item)) surface both, preferring the package when an id exists in
+both shapes. `akit` then materializes only the ones you select into a given project with
+[`install`](#install--install-a-skill-or-agent-for-one-or-more-harnesses).
 
 You can populate the catalog by hand (move/copy files into the layout above) or fetch a
 remote source straight into it with [`akit pull`](#pull--fetch-a-remote-source-into-the-catalog).
@@ -65,8 +76,9 @@ skills: [deploy-to-vercel, lint-fix]
 agents: [code-reviewer]
 ```
 
-Either key may be omitted and is treated as an empty list. Bundle adds validate every referenced
-skill and agent before materializing anything; if an id is missing, the whole bundle add fails.
+Either key may be omitted and is treated as an empty list. `install --bundle` validates every
+referenced skill and agent before materializing anything; if an id is missing, the whole bundle
+install fails.
 
 ## Global flags
 
@@ -77,87 +89,26 @@ skill and agent before materializing anything; if an id is missing, the whole bu
 
 ## Commands
 
-### `add` — pull a skill or agent into the project
-
-```bash
-akit add [--agent] [--copy] <name>
-akit add [--agent] [--copy] owner/repo/path[#ref]
-akit add [--copy] --bundle <name>
-```
-
-- By default, symlinks `<catalog>/skills/<name>` into `<project>/.github/skills/<name>`
-  (Copilot loads it as a **project-scope** skill).
-- With `--agent`, symlinks `<catalog>/agents/<name>.agent.md` into
-  `<project>/.github/agents/<name>.agent.md`.
-- With `--copy`, copies the source files instead of symlinking them and records `"mode": "copy"`
-  in the lockfile and `--json` add report.
-- If `<name>` contains `/`, `akit` treats it as a remote source spec instead of a local catalog
-  name. The syntax is `owner/repo/path[#ref]`; `path` points at a skill directory containing
-  `SKILL.md` (or, with `--agent`, a `.agent.md` file). For skill repositories with a top-level
-  `skills/` directory, a single-segment path like `deploy-to-vercel` also resolves to
-  `skills/deploy-to-vercel`. The installed id/target comes from the last path segment, so
-  `vercel-labs/agent-skills/deploy-to-vercel#main` lands at `.github/skills/deploy-to-vercel`.
-- Remote sources are fetched with `git` into a local cache, then materialized through the same
-  symlink/copy pipeline as local items. The default cache is
-  `~/.cache/akit/sources/<owner>/<repo>@<ref-or-default>`; `$XDG_CACHE_HOME` changes the cache base
-  to `$XDG_CACHE_HOME/akit`, and `$KIT_CACHE_DIR` overrides it entirely. The CLI fetches from
-  `https://github.com/<owner>/<repo>` by default; `$KIT_REMOTE_BASE_URL` can point at another git
-  URL base (for example, a local `file://` mirror).
-- Remote lockfile entries record `"source": "owner/repo/path"` and `"ref": "<ref>"` when a ref was
-  supplied. The future intended backend is APM; the current git-fetch cache is the equivalent
-  offline-friendly mechanism used today.
-- With `--bundle <name>`, reads `<catalog>/bundles/<name>.yml` and adds every listed skill and
-  agent through the same add pipeline. `--copy` applies to every item. `--agent` is not used with
-  bundles because the manifest already distinguishes item types.
-- If symlink creation fails at runtime (for example, Windows without symlink privilege), `akit`
-  warns on stderr, falls back to copying, and records the effective `"mode": "copy"`.
-- Appends the pull and the lockfile to `.git/info/exclude`, so nothing is committed and your
-  teammates are unaffected. This applies to both local and remote pulls.
-- Records the item in `<project>/.copilot/kit.lock.json`. Bundle-installed entries carry
-  `"bundle": "<name>"`.
-- Idempotent: re-running is a safe no-op.
-
-Example:
-
-```bash
-$ akit add deploy-helper
-Added skill 'deploy-helper' -> .github/skills/deploy-helper (linked)
-
-$ akit add --agent reviewer
-Added agent 'reviewer' -> .github/agents/reviewer.agent.md (linked)
-
-$ akit add --copy deploy-helper
-Added skill 'deploy-helper' -> .github/skills/deploy-helper (copied)
-
-$ akit add vercel-labs/agent-skills/deploy-to-vercel#main
-Added skill 'deploy-to-vercel' -> .github/skills/deploy-to-vercel (linked)
-
-$ akit add --bundle web
-Added bundle 'web' (3 items)
-  Added skill 'deploy-to-vercel' -> .github/skills/deploy-to-vercel (linked)
-  Added skill 'lint-fix' -> .github/skills/lint-fix (linked)
-  Added agent 'code-reviewer' -> .github/agents/code-reviewer.agent.md (linked)
-```
-
 ### `pull` — fetch a remote source into the catalog
 
 ```bash
 akit pull [--agent] [--as <id>] [--force] owner/repo/path[#ref]
 ```
 
-Where `add` materializes items *into a project*, `pull` copies a remote source *into your local
-catalog* so it becomes a reusable item you can later `add`, `search`, and `show` like any
-hand-authored kit. This is how you populate the catalog from shared repositories without
-cloning and copying by hand.
+Where `install` materializes items *into a project*, `pull` copies a remote source *into your
+local catalog* so it becomes a reusable item you can later `install`, `search`, and `show` like
+any hand-authored kit. This is how you populate the catalog from shared repositories without
+cloning and copying by hand. (To fetch and install in one step, pass the remote spec straight to
+[`install`](#install--install-a-skill-or-agent-for-one-or-more-harnesses).)
 
-- Fetches `owner/repo/path[#ref]` through the same git-fetch cache as `add` (honoring
-  `$KIT_CACHE_DIR` and `$KIT_REMOTE_BASE_URL`), then **copies** the resolved item into the
-  catalog — a standalone copy, independent of the cache.
+- Fetches `owner/repo/path[#ref]` through the same git-fetch cache `install` uses for a remote
+  source (honoring `$KIT_CACHE_DIR` and `$KIT_REMOTE_BASE_URL`), then **copies** the resolved item
+  into the catalog — a standalone copy, independent of the cache.
 - By default the source is a **skill** (`<catalog>/skills/<id>/`); with `--agent` it is an
   agent. An agent may be either a harness-aware **package** — a directory `agents/<id>/` holding
   an `agent.yml` (stored at `<catalog>/agents/<id>/`) — or a legacy flat `.agent.md` file
   (stored at `<catalog>/agents/<id>.agent.md`); `pull` detects which the source is and stores it
-  in the matching shape. The same path resolution as `add` applies, so a single-segment `path`
+  in the matching shape. The same path resolution as a remote `install` applies, so a single-segment `path`
   like `deploy-to-vercel` resolves to `skills/deploy-to-vercel` (or, with `--agent`, an
   `agents/deploy-to-vercel/` package if present, else `agents/deploy-to-vercel.agent.md`) in the
   source repo.
@@ -216,7 +167,7 @@ Once pulled, the item is just another catalog entry:
 ```bash
 $ akit search deploy
 skill  Deploy to Vercel  — Ship apps to Vercel (ops)
-$ akit add deploy-to-vercel   # materialize it into a project
+$ akit install deploy-to-vercel -H claude   # materialize it into a project
 ```
 
 ### `restore` — rebootstrap the catalog from the manifest
@@ -460,38 +411,6 @@ With `--json`, `drop` emits a stable object (`source`/`ref` appear only for pull
 }
 ```
 
-### `rm` — remove a skill or agent from the project
-
-```bash
-akit rm [--agent] <name>
-akit rm --bundle <name>
-```
-
-- Removes the materialized target from `.github/skills/` or `.github/agents/`.
-- Removes that target's `.git/info/exclude` line.
-- Removes the lockfile entry.
-- Remote items are removed by their installed id (the source path leaf), so a remote add of
-  `owner/repo/deploy-to-vercel#main` is reversed with `akit rm deploy-to-vercel`.
-- With `--bundle <name>`, removes exactly the installed lockfile entries tagged with that bundle.
-  The current manifest is not consulted, so removal stays precise even if the manifest changed.
-- Idempotent: removing an item that is not installed exits successfully.
-
-Example:
-
-```bash
-$ akit rm deploy-helper
-Removed skill 'deploy-helper' -> .github/skills/deploy-helper (removed)
-
-$ akit rm --agent reviewer
-Removed agent 'reviewer' -> .github/agents/reviewer.agent.md (removed)
-
-$ akit rm --bundle web
-Removed bundle 'web' (3 items)
-  Removed skill 'deploy-to-vercel' -> .github/skills/deploy-to-vercel (removed)
-  Removed skill 'lint-fix' -> .github/skills/lint-fix (removed)
-  Removed agent 'code-reviewer' -> .github/agents/code-reviewer.agent.md (removed)
-```
-
 ### `status` — harness-aware project overview
 
 ```bash
@@ -559,11 +478,9 @@ emits, each with an optional `bundle` tag) and `bundles` are the completeness ob
 or `"modified"`; `mode` is `"copy"` or `"symlink"`. Each bundle's `state` is `"complete"`,
 `"partial"`, or `"unknown"`; `expected` is omitted for `unknown`.
 
-> **Breaking change:** `status` now reads the harness-aware `.akit/kit.lock.json` (previously the
-> legacy `.copilot/kit.lock.json` written by `add`/`rm`). The `--json` `items[]` are now
-> `ItemHealth` (harness/materialization/drift) rather than the old
-> `{ mode, target, status }` rows. Use [`add`](#add--pull-an-item-into-a-project)/`rm` with the
-> legacy tooling if you need the old lockfile view.
+> **Breaking change (v0.27.0):** `status` reads the harness-aware `.akit/kit.lock.json`. Its
+> `--json` `items[]` are `ItemHealth` (harness/materialization/drift), not the old
+> `{ mode, target, status }` rows from the removed legacy `.copilot` lockfile.
 
 > `status` lists what's **installed into the current project**. To list everything **available
 > in your catalog**, use [`akit ls`](#ls--list-everything-in-the-catalog).
@@ -797,7 +714,7 @@ akit ls
 akit catalog
 ```
 
-Lists every skill and agent in your catalog, with the **id** you pass to `add`, `show`, and
+Lists every skill and agent in your catalog, with the **id** you pass to `install`, `show`, and
 `drop`. Unlike [`search`](#search--search-the-catalog) (which fuzzy-matches and shows each
 item's frontmatter `name`), `ls` is the catalog-wide inventory keyed by id, and it
 records each item's provenance:
@@ -845,12 +762,12 @@ set) and `disabled` (`true` for an invalid package) are present only when they a
 
 ## Harness-aware commands (the `.akit` engine)
 
-The commands above (`add`/`rm`/`status`/`sync`/`doctor`) are the **legacy, Copilot-shaped**
-family: they materialize into `.github/{skills,agents}` and track ownership in
-`.copilot/kit.lock.json`. Alongside them, akit ships a **harness-aware install engine** that
-materializes an item into **each selected harness's own discovery paths** — GitHub Copilot CLI,
-Claude Code, OpenAI Codex CLI, Gemini CLI, and OpenCode — and tracks that in a separate,
-local-only `.akit/kit.lock.json`.
+akit's install engine is **harness-aware**: it materializes an item into **each selected
+harness's own discovery paths** — GitHub Copilot CLI, Claude Code, OpenAI Codex CLI, Gemini CLI,
+and OpenCode — and tracks ownership in a local-only `.akit/kit.lock.json`. The project-facing
+verbs below (`install`/`uninstall`/`installed`/`status`/`doctor`/`sync`/`reset`/`repair`/…) all
+operate on this engine. (The old Copilot-only `add`/`rm` commands and their
+`.copilot/kit.lock.json` were removed in v0.30.0.)
 
 - **Skills** are portable `SKILL.md` directories, and several harnesses read the *same* project
   directory, so a single materialization can serve several harnesses. The planner runs a set
@@ -879,9 +796,8 @@ local-only `.akit/kit.lock.json`.
   Harness-aware agents come from a catalog **agent package** — a directory `agents/<id>/`
   holding an `agent.yml` descriptor plus one native file per harness it supports. akit copies a
   variant's bytes **verbatim**; it never converts one format to another. (This is a distinct
-  catalog shape from the legacy `agents/<id>.agent.md` single file that
-  [`add`](#add--pull-a-skill-or-agent-into-the-project) / [`pull`](#pull--fetch-a-remote-source-into-the-catalog)
-  use.) A selected harness with no matching variant — or OpenCode's probe-gated target, whose
+  catalog shape from the legacy `agents/<id>.agent.md` single file.) A selected harness with no
+  matching variant — or OpenCode's probe-gated target, whose
   exact directory is version-dependent — is reported as a **skipped** issue, not installed.
 
 Everything the engine writes (both materializations and the `.akit/kit.lock.json` itself) is
@@ -1325,8 +1241,7 @@ with `id`, `type`, `paths`, `not_installed`; `adopt` emits an `AdoptReport` with
 
 ## How it stays out of your repo
 
-The legacy family keeps pulls under `.github/skills/`, `.github/agents/`, and
-`.copilot/kit.lock.json`; the harness-aware engine keeps materializations under each harness's
-discovery paths (`.agents/skills`, `.claude/skills`, `.github/agents`, …) plus
-`.akit/kit.lock.json`. Both add every path they write to `.git/info/exclude` (a local, untracked
-ignore list). Your tracked `.gitignore` is never touched, and `git status` stays clean.
+The harness-aware engine keeps materializations under each harness's discovery paths
+(`.agents/skills`, `.claude/skills`, `.github/agents`, …) plus its `.akit/kit.lock.json` lockfile.
+It adds every path it writes to `.git/info/exclude` (a local, untracked ignore list). Your tracked
+`.gitignore` is never touched, and `git status` stays clean.

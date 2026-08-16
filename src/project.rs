@@ -53,11 +53,6 @@ impl Project {
         self.root.join(".github").join("agents")
     }
 
-    /// `<root>/.copilot/kit.lock.json`
-    pub fn lockfile_path(&self) -> PathBuf {
-        self.root.join(".copilot").join("kit.lock.json")
-    }
-
     /// `<root>/.akit` — the harness-aware ownership directory (#32). Holds the
     /// v2 lockfile and optional local config. Local-only (git-excluded).
     pub fn akit_dir(&self) -> PathBuf {

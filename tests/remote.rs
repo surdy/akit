@@ -2,7 +2,6 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use akit::lockfile::{ItemType, Lockfile, Mode};
 use akit::project::Project;
 use akit::remote::{self, SourceSpec};
 
@@ -201,97 +200,6 @@ fn source_spec_parse_cases() {
     assert!(SourceSpec::parse("name").is_none());
     assert!(SourceSpec::parse("owner/repo").is_none());
     assert!(SourceSpec::parse("owner/repo/path#").is_none());
-}
-
-#[test]
-fn remote_cli_fetch_add_and_rm_via_local_bare_repo() {
-    let tmp = test_tempdir();
-    let base = tmp.path();
-    let git_base = make_local_bare_remote(base);
-    let (proj, project) = init_project(base);
-    let cache = base.join("cache");
-    let base_url = format!("file://{}", git_base.display());
-
-    let output = run_akit(
-        &["add", "acme/kit-skills/deploy-to-vercel#main"],
-        &proj,
-        &cache,
-        Some(&base_url),
-    );
-    assert!(
-        output.status.success(),
-        "akit add failed\nstdout:\n{}\nstderr:\n{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-
-    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(json["id"], "deploy-to-vercel");
-    assert_eq!(json["type"], "skill");
-    assert_eq!(json["target"], ".github/skills/deploy-to-vercel");
-    assert_eq!(json["source"], "acme/kit-skills/deploy-to-vercel");
-    assert_eq!(json["ref"], "main");
-
-    let target = proj.join(".github/skills/deploy-to-vercel");
-    assert!(
-        fs::symlink_metadata(&target).is_ok(),
-        "remote skill should be materialized"
-    );
-    assert!(target.join("SKILL.md").is_file());
-
-    let lockfile = Lockfile::load(&project.lockfile_path()).unwrap();
-    assert_eq!(lockfile.items.len(), 1);
-    let item = &lockfile.items[0];
-    assert_eq!(item.id, "deploy-to-vercel");
-    assert_eq!(item.item_type, ItemType::Skill);
-    assert_eq!(item.mode, Mode::Symlink);
-    assert_eq!(item.source, "acme/kit-skills/deploy-to-vercel");
-    assert_eq!(item.git_ref.as_deref(), Some("main"));
-    assert_eq!(item.target, ".github/skills/deploy-to-vercel");
-
-    let exclude = fs::read_to_string(proj.join(".git/info/exclude")).unwrap();
-    assert!(
-        exclude
-            .lines()
-            .any(|line| line == "/.github/skills/deploy-to-vercel")
-    );
-    assert!(
-        exclude
-            .lines()
-            .any(|line| line == "/.copilot/kit.lock.json")
-    );
-
-    let status = git(&["status", "--porcelain"], &proj);
-    assert!(
-        status.stdout.is_empty(),
-        "git status not clean after add: {}",
-        String::from_utf8_lossy(&status.stdout)
-    );
-
-    let output = run_akit(&["rm", "deploy-to-vercel"], &proj, &cache, Some(&base_url));
-    assert!(
-        output.status.success(),
-        "akit rm failed\nstdout:\n{}\nstderr:\n{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-    assert!(fs::symlink_metadata(&target).is_err());
-
-    let lockfile = Lockfile::load(&project.lockfile_path()).unwrap();
-    assert!(lockfile.items.is_empty());
-    let exclude = fs::read_to_string(proj.join(".git/info/exclude")).unwrap();
-    assert!(
-        !exclude
-            .lines()
-            .any(|line| line == "/.github/skills/deploy-to-vercel")
-    );
-
-    let status = git(&["status", "--porcelain"], &proj);
-    assert!(
-        status.stdout.is_empty(),
-        "git status not clean after rm: {}",
-        String::from_utf8_lossy(&status.stdout)
-    );
 }
 
 #[test]
