@@ -319,7 +319,13 @@ fn reconcile(
             planned,
         })
         .collect();
-    let records = materialize::materialize_all(fs, &project.root, &items)
+    // Paths akit already owns (this item's prior install plus every other item):
+    // the materialize guard may only overwrite these, an absent path, or a
+    // destination whose content already byte-matches the source. Any other
+    // pre-existing file is foreign and the whole apply is refused.
+    let owned: std::collections::HashSet<String> =
+        lock.owned_paths().into_iter().map(str::to_string).collect();
+    let records = materialize::materialize_all(fs, &project.root, &items, &owned)
         .with_context(|| format!("installing '{id}'"))?;
 
     let new_paths: Vec<&str> = records.iter().map(|r| r.path.as_str()).collect();
@@ -574,6 +580,89 @@ mod tests {
         // The stale exclude line is gone too.
         let excl = std::fs::read_to_string(f.project.root.join(".git/info/exclude")).unwrap();
         assert!(!excl.contains("/.agents/skills/deploy"), "{excl}");
+    }
+
+    #[test]
+    fn install_refuses_to_overwrite_a_preexisting_foreign_file() {
+        let f = setup();
+        write_skill(&f.catalog, "deploy", None);
+        // A user file already sits where the Claude skill dir would materialize.
+        let dest = f.project.root.join(".claude/skills/deploy");
+        write(&dest.join("SKILL.md"), "hand-written user content");
+
+        let err = install(
+            &f.project,
+            &f.catalog,
+            ItemType::Skill,
+            "deploy",
+            &ctx(&[HarnessId::Claude]),
+        )
+        .unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains(".claude/skills/deploy"), "{msg}");
+
+        // The pre-existing file is byte-for-byte untouched…
+        assert_eq!(
+            std::fs::read_to_string(dest.join("SKILL.md")).unwrap(),
+            "hand-written user content"
+        );
+        // …and no ownership was recorded (no lockfile entry, none written at all).
+        assert!(!f.project.root.join(".akit/kit.lock.json").exists());
+        assert!(status(&f.project).unwrap().is_empty());
+    }
+
+    #[test]
+    fn install_adopts_a_byte_identical_preexisting_file() {
+        let f = setup();
+        write_skill(&f.catalog, "deploy", None);
+        // Pre-place content identical to what the skill materializes.
+        let dest = f.project.root.join(".claude/skills/deploy");
+        write(&dest.join("SKILL.md"), "---\nname: x\n---\nbody");
+
+        let report = install(
+            &f.project,
+            &f.catalog,
+            ItemType::Skill,
+            "deploy",
+            &ctx(&[HarnessId::Claude]),
+        )
+        .unwrap();
+        assert_eq!(report.materializations.len(), 1);
+        assert!(!report.replaced);
+        assert_eq!(
+            std::fs::read_to_string(dest.join("SKILL.md")).unwrap(),
+            "---\nname: x\n---\nbody"
+        );
+        assert_eq!(status(&f.project).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn install_with_one_foreign_destination_fails_atomically() {
+        let f = setup();
+        write_skill(&f.catalog, "deploy", None);
+        // Install for all harnesses would write both `.agents/skills/deploy` and
+        // `.claude/skills/deploy`; only the latter is pre-occupied by a foreign file.
+        let foreign = f.project.root.join(".claude/skills/deploy");
+        write(&foreign.join("SKILL.md"), "foreign");
+
+        let err = install(
+            &f.project,
+            &f.catalog,
+            ItemType::Skill,
+            "deploy",
+            &ctx(&HarnessId::ALL),
+        )
+        .unwrap_err();
+        assert!(format!("{err:#}").contains(".claude/skills/deploy"));
+
+        // The other destination was never written; the foreign one is intact;
+        // nothing recorded.
+        assert!(!f.project.root.join(".agents/skills/deploy").exists());
+        assert_eq!(
+            std::fs::read_to_string(foreign.join("SKILL.md")).unwrap(),
+            "foreign"
+        );
+        assert!(status(&f.project).unwrap().is_empty());
     }
 
     #[test]

@@ -6,6 +6,7 @@
 //! reconciles user edits, and cleans up managed files without ever touching
 //! content akit does not own.
 
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
@@ -111,9 +112,17 @@ pub fn materialize_one(
 }
 
 /// Transactionally materialize a whole plan: **stage** every entry to a sibling
-/// temp path (validating hashes) before **committing** any via atomic rename.
+/// temp path (validating hashes), **guard** every destination against clobbering
+/// an unmanaged file, and only then **commit** any via atomic rename.
 ///
-/// If staging any entry fails, previously staged temps are cleaned up and no
+/// `owned` is the set of project-relative paths akit already owns (the current
+/// `.akit/kit.lock.json` materializations). A destination may be overwritten only
+/// if it does not exist, is already akit-owned, or its on-disk content byte-matches
+/// the source being materialized (idempotent re-materialize / exact-content
+/// adoption). Any other pre-existing destination is a foreign, unmanaged file: the
+/// whole apply is refused with an actionable error and nothing is committed.
+///
+/// If staging or the guard fails, previously staged temps are cleaned up and no
 /// destination is touched — the caller's prior destinations and lockfile stay
 /// intact. Commit renames are per-destination atomic; a failure mid-commit is
 /// surfaced with the offending path so the caller can report recovery state.
@@ -121,6 +130,7 @@ pub fn materialize_all(
     fs: &dyn FsTransport,
     project_root: &Path,
     items: &[MaterializeItem<'_>],
+    owned: &HashSet<String>,
 ) -> Result<Vec<MaterializationRecord>> {
     // Phase 1 — stage all to temps; on any failure, roll back staged temps.
     let mut staged = Vec::with_capacity(items.len());
@@ -136,6 +146,31 @@ pub fn materialize_all(
         }
     }
 
+    // Phase 1.5 — guard: refuse to clobber any destination akit does not own and
+    // whose content differs from the source. Checked across *all* destinations
+    // before committing any, so one foreign path fails the whole apply atomically.
+    for s in &staged {
+        match destination_is_writable(fs, s, owned) {
+            Ok(true) => {}
+            Ok(false) => {
+                for done in &staged {
+                    let _ = clear_destination(fs, &done.temp_abs);
+                }
+                anyhow::bail!(
+                    "refusing to overwrite {}: a file akit does not manage already exists there. \
+                     Remove it or run `akit adopt` to claim it, then reinstall.",
+                    s.record.path
+                );
+            }
+            Err(e) => {
+                for done in &staged {
+                    let _ = clear_destination(fs, &done.temp_abs);
+                }
+                return Err(e.context(format!("checking destination {}", s.record.path)));
+            }
+        }
+    }
+
     // Phase 2 — commit each staged temp via atomic rename.
     let mut records = Vec::with_capacity(staged.len());
     for s in &staged {
@@ -145,11 +180,39 @@ pub fn materialize_all(
     Ok(records)
 }
 
+/// Whether materialization may create/clear/overwrite the destination of `staged`.
+///
+/// Safe iff at least one holds: (1) the destination does not currently exist,
+/// (2) its path is already akit-owned (recorded in the current lockfile), or
+/// (3) its on-disk content byte-matches the source being materialized. Any other
+/// pre-existing destination is a foreign/unmanaged file and must not be clobbered.
+fn destination_is_writable(
+    fs: &dyn FsTransport,
+    staged: &Staged,
+    owned: &HashSet<String>,
+) -> Result<bool> {
+    // (1) Nothing there — free to create.
+    if fs.symlink_kind(&staged.final_abs)?.is_none() {
+        return Ok(true);
+    }
+    // (2) Already akit-owned — reinstall/reshape may replace its own materialization.
+    if owned.contains(staged.record.path.as_str()) {
+        return Ok(true);
+    }
+    // (3) Byte-identical to the source — idempotent re-materialize / exact adoption.
+    let source_hash = content_hash(fs, &staged.source)?;
+    let dest_hash = content_hash(fs, &staged.final_abs)?;
+    Ok(source_hash == dest_hash)
+}
+
 /// A materialization staged at `temp_abs`, ready to be atomically renamed onto
 /// `final_abs`. Holds the ownership record that describes the committed result.
 struct Staged {
     temp_abs: PathBuf,
     final_abs: PathBuf,
+    /// Absolute source the temp was staged from, used by the overwrite guard to
+    /// compare an unmanaged destination's content against the source.
+    source: PathBuf,
     record: MaterializationRecord,
 }
 
@@ -200,6 +263,7 @@ fn stage_one(
     Ok(Staged {
         temp_abs,
         final_abs,
+        source: item.source.clone(),
         record: MaterializationRecord {
             path: item.planned.path.clone(),
             mode,
@@ -561,7 +625,7 @@ mod tests {
             },
         ];
 
-        let records = materialize_all(&fs, &root, &items).unwrap();
+        let records = materialize_all(&fs, &root, &items, &HashSet::new()).unwrap();
         assert_eq!(records.len(), 2);
         assert!(root.join(".agents/skills/a/SKILL.md").exists());
         assert!(root.join(".agents/skills/b/SKILL.md").exists());
@@ -594,10 +658,141 @@ mod tests {
             },
         ];
 
-        assert!(materialize_all(&fs, &root, &items).is_err());
+        assert!(materialize_all(&fs, &root, &items, &HashSet::new()).is_err());
         // Nothing committed and no staging temps left behind (previous state intact).
         assert!(!root.join(".agents/skills/a").exists());
         assert!(!root.join(".agents/skills/missing").exists());
         assert!(!root.join(".agents/skills/.a.akit-stage").exists());
+    }
+
+    #[test]
+    fn materialize_all_refuses_to_overwrite_a_foreign_file() {
+        let tmp = TempDir::new().unwrap();
+        let fs = LocalFs;
+        let root = tmp.path().join("project");
+        let src = tmp.path().join("catalog/skills/deploy");
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::write(src.join("SKILL.md"), "source").unwrap();
+
+        // A pre-existing, unmanaged file sits exactly where we'd materialize.
+        let dest = root.join(".agents/skills/deploy");
+        std::fs::create_dir_all(&dest).unwrap();
+        std::fs::write(dest.join("SKILL.md"), "precious user content").unwrap();
+
+        let p = planned(".agents/skills/deploy", Mode::Copy, MatKind::SkillDir);
+        let items = vec![MaterializeItem {
+            source: src,
+            planned: &p,
+        }];
+
+        // Nothing is owned yet → refuse.
+        let err = materialize_all(&fs, &root, &items, &HashSet::new()).unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains(".agents/skills/deploy"), "{msg}");
+        assert!(msg.contains("does not manage"), "{msg}");
+        // The foreign file is byte-for-byte untouched and no stage temp survives.
+        assert_eq!(
+            std::fs::read_to_string(dest.join("SKILL.md")).unwrap(),
+            "precious user content"
+        );
+        assert!(!root.join(".agents/skills/.deploy.akit-stage").exists());
+    }
+
+    #[test]
+    fn materialize_all_adopts_a_byte_identical_foreign_file() {
+        let tmp = TempDir::new().unwrap();
+        let fs = LocalFs;
+        let root = tmp.path().join("project");
+        let src = tmp.path().join("catalog/skills/deploy");
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::write(src.join("SKILL.md"), "identical").unwrap();
+
+        // Pre-existing content that byte-matches the source is safe to adopt.
+        let dest = root.join(".agents/skills/deploy");
+        std::fs::create_dir_all(&dest).unwrap();
+        std::fs::write(dest.join("SKILL.md"), "identical").unwrap();
+
+        let p = planned(".agents/skills/deploy", Mode::Copy, MatKind::SkillDir);
+        let items = vec![MaterializeItem {
+            source: src,
+            planned: &p,
+        }];
+
+        let records = materialize_all(&fs, &root, &items, &HashSet::new()).unwrap();
+        assert_eq!(records.len(), 1);
+        assert_eq!(
+            std::fs::read_to_string(dest.join("SKILL.md")).unwrap(),
+            "identical"
+        );
+    }
+
+    #[test]
+    fn materialize_all_replaces_an_already_owned_destination() {
+        let tmp = TempDir::new().unwrap();
+        let fs = LocalFs;
+        let root = tmp.path().join("project");
+        let src = tmp.path().join("catalog/skills/deploy");
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::write(src.join("SKILL.md"), "v2").unwrap();
+
+        // A destination akit already owns (recorded) but whose bytes differ from
+        // the (updated) source must still be replaced on reinstall.
+        let dest = root.join(".agents/skills/deploy");
+        std::fs::create_dir_all(&dest).unwrap();
+        std::fs::write(dest.join("SKILL.md"), "v1").unwrap();
+
+        let p = planned(".agents/skills/deploy", Mode::Copy, MatKind::SkillDir);
+        let items = vec![MaterializeItem {
+            source: src,
+            planned: &p,
+        }];
+
+        let owned: HashSet<String> = [".agents/skills/deploy".to_string()].into_iter().collect();
+        let records = materialize_all(&fs, &root, &items, &owned).unwrap();
+        assert_eq!(records.len(), 1);
+        assert_eq!(
+            std::fs::read_to_string(dest.join("SKILL.md")).unwrap(),
+            "v2"
+        );
+    }
+
+    #[test]
+    fn materialize_all_fails_atomically_when_one_of_many_is_foreign() {
+        let tmp = TempDir::new().unwrap();
+        let fs = LocalFs;
+        let root = tmp.path().join("project");
+        for id in ["a", "b"] {
+            let src = tmp.path().join(format!("catalog/skills/{id}"));
+            std::fs::create_dir_all(&src).unwrap();
+            std::fs::write(src.join("SKILL.md"), id).unwrap();
+        }
+        // `b`'s destination is a pre-existing foreign file with different content.
+        let b_dest = root.join(".agents/skills/b");
+        std::fs::create_dir_all(&b_dest).unwrap();
+        std::fs::write(b_dest.join("SKILL.md"), "foreign").unwrap();
+
+        let pa = planned(".agents/skills/a", Mode::Copy, MatKind::SkillDir);
+        let pb = planned(".agents/skills/b", Mode::Copy, MatKind::SkillDir);
+        let items = vec![
+            MaterializeItem {
+                source: tmp.path().join("catalog/skills/a"),
+                planned: &pa,
+            },
+            MaterializeItem {
+                source: tmp.path().join("catalog/skills/b"),
+                planned: &pb,
+            },
+        ];
+
+        assert!(materialize_all(&fs, &root, &items, &HashSet::new()).is_err());
+        // The good destination was never written, the foreign one is intact, and
+        // no stage temps remain — the whole apply rolled back.
+        assert!(!root.join(".agents/skills/a").exists());
+        assert_eq!(
+            std::fs::read_to_string(b_dest.join("SKILL.md")).unwrap(),
+            "foreign"
+        );
+        assert!(!root.join(".agents/skills/.a.akit-stage").exists());
+        assert!(!root.join(".agents/skills/.b.akit-stage").exists());
     }
 }
