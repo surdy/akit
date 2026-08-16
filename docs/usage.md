@@ -1085,6 +1085,7 @@ single-item shape documented above.
 
 ```bash
 akit uninstall [--agent] [-H <id>]... <id>
+akit uninstall [-H <id>]... --bundle <name>
 ```
 
 - With **no** `-H`, fully uninstalls `<id>`: removes every materialization and drops the
@@ -1103,6 +1104,25 @@ Removed skill 'deploy-to-vercel' from selected harness(es); still installed for 
 
 With `--json`, `uninstall` emits the `RemoveReport` object: `id`, `item_type`, `removed_paths`,
 `remaining_harnesses` (empty on a full uninstall), and `not_installed`.
+
+#### `--bundle <name>` — uninstall a whole bundle
+
+With `--bundle <name>` (in place of an `<id>`), `uninstall` removes every install **tagged** with
+that bundle in `.akit/kit.lock.json`. Like legacy `rm --bundle`, it's driven by the lockfile tag,
+**not** the current manifest — a member dropped from `bundles/<name>.yml` after install is still
+removed, and a member re-installed standalone (which clears its tag) is left alone. `-H` applies
+the same scoped reshape to each member; no `-H` fully removes them. `--bundle` cannot be combined
+with `--agent` or a positional `<id>`; an untagged/unknown bundle is a successful no-op.
+
+```bash
+$ akit uninstall --bundle web
+Uninstalled bundle 'web' (2 item(s), 3 file(s) removed)
+  skill 'deploy' — removed (2 file(s))
+  skill 'lint' — removed (1 file(s))
+```
+
+With `--json`, it emits a `BundleRemoveReport` (`{ "bundle", "items": [RemoveReport…] }`), each
+member being the single-item `RemoveReport` shape above.
 
 ### `installed` — list harness-aware installs and their health
 

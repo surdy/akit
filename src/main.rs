@@ -172,8 +172,11 @@ enum Commands {
         /// Only remove from these harnesses (repeatable); omit to fully uninstall.
         #[arg(long = "harness", short = 'H', value_name = "ID")]
         harnesses: Vec<String>,
-        /// Catalog id of the skill/agent to uninstall.
-        id: String,
+        /// Uninstall every installed item tagged with this bundle.
+        #[arg(long)]
+        bundle: Option<String>,
+        /// Catalog id of the skill/agent to uninstall (omit with --bundle).
+        id: Option<String>,
     },
     /// List harness-aware installs recorded in `.akit/kit.lock.json`.
     Installed,
@@ -560,6 +563,7 @@ fn run() -> Result<()> {
         Commands::Uninstall {
             agent,
             harnesses,
+            bundle,
             id,
         } => {
             let project = Project::locate(cli.project.clone())?;
@@ -568,11 +572,30 @@ fn run() -> Result<()> {
             } else {
                 RemoveScope::Harnesses(parse_harnesses(harnesses)?)
             };
-            let report = install::remove(&project, item_type(*agent), id, scope)?;
-            if cli.json {
-                println!("{}", serde_json::to_string(&report)?);
-            } else {
-                print_uninstall_report(&report);
+            match (bundle.as_deref(), id.as_deref()) {
+                (Some(_), Some(_)) => {
+                    bail!("uninstall accepts either <id> or --bundle <name>, not both")
+                }
+                (None, None) => bail!("uninstall requires <id> or --bundle <name>"),
+                (Some(bundle), None) => {
+                    if *agent {
+                        bail!("uninstall --bundle cannot be combined with --agent");
+                    }
+                    let report = install::remove_bundle(&project, bundle, scope)?;
+                    if cli.json {
+                        println!("{}", serde_json::to_string(&report)?);
+                    } else {
+                        print_bundle_uninstall_report(&report);
+                    }
+                }
+                (None, Some(id)) => {
+                    let report = install::remove(&project, item_type(*agent), id, scope)?;
+                    if cli.json {
+                        println!("{}", serde_json::to_string(&report)?);
+                    } else {
+                        print_uninstall_report(&report);
+                    }
+                }
             }
         }
         Commands::Installed => {
@@ -1044,6 +1067,42 @@ fn print_uninstall_report(report: &install::RemoveReport) {
             type_name(report.item_type),
             report.id
         );
+    }
+}
+
+/// Print the outcome of `uninstall --bundle`: a header, then one line per member.
+fn print_bundle_uninstall_report(report: &install::BundleRemoveReport) {
+    if report.items.is_empty() {
+        println!("Bundle '{}' has no harness-aware installs", report.bundle);
+        return;
+    }
+    let files: usize = report.items.iter().map(|i| i.removed_paths.len()).sum();
+    println!(
+        "Uninstalled bundle '{}' ({} item(s), {files} file(s) removed)",
+        report.bundle,
+        report.items.len()
+    );
+    for item in &report.items {
+        if item.remaining_harnesses.is_empty() {
+            println!(
+                "  {} '{}' — removed ({} file(s))",
+                type_name(item.item_type),
+                item.id,
+                item.removed_paths.len()
+            );
+        } else {
+            let remaining = item
+                .remaining_harnesses
+                .iter()
+                .map(|h| h.as_str())
+                .collect::<Vec<_>>()
+                .join(", ");
+            println!(
+                "  {} '{}' — still installed for {remaining}",
+                type_name(item.item_type),
+                item.id
+            );
+        }
     }
 }
 

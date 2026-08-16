@@ -131,6 +131,19 @@ pub struct RemoveReport {
     pub not_installed: bool,
 }
 
+/// Outcome of uninstalling every member tagged with a bundle (issue #45).
+///
+/// Driven by the lockfile bundle tag, **not** the current manifest — so a member
+/// dropped from `bundles/<name>.yml` after install is still uninstalled here
+/// (matching legacy `rm --bundle`). `items` is empty when nothing carries the tag.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BundleRemoveReport {
+    /// The bundle name whose tagged members were removed.
+    pub bundle: String,
+    /// Per-member removal outcomes, in lockfile order.
+    pub items: Vec<RemoveReport>,
+}
+
 /// Outcome of [`reset`].
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct ResetReport {
@@ -430,6 +443,44 @@ pub fn remove_with(
             not_installed: false,
         })
     }
+}
+
+/// Uninstall every installed member tagged with `bundle`, applying `scope` to
+/// each (`RemoveScope::All` drops them entirely; `Harnesses` reshapes each to
+/// keep the rest). The set of members is read from the lockfile bundle tag, so
+/// this needs neither the catalog nor the manifest for a full uninstall.
+pub fn remove_bundle(
+    project: &Project,
+    bundle: &str,
+    scope: RemoveScope,
+) -> Result<BundleRemoveReport> {
+    remove_bundle_with(&LocalFs, project, bundle, scope)
+}
+
+/// [`remove_bundle`] against an explicit transport.
+pub fn remove_bundle_with(
+    fs: &dyn FsTransport,
+    project: &Project,
+    bundle: &str,
+    scope: RemoveScope,
+) -> Result<BundleRemoveReport> {
+    let lock = AkitLockfile::load_with(fs, &project.akit_lockfile_path())?;
+    // Snapshot the tagged members up front: `remove_with` reloads and rewrites
+    // the lockfile per item, so we can't iterate `lock.items` while removing.
+    let targets: Vec<(ItemType, String)> = lock
+        .items
+        .iter()
+        .filter(|i| i.bundle.as_deref() == Some(bundle))
+        .map(|i| (i.item_type, i.id.clone()))
+        .collect();
+    let mut items = Vec::with_capacity(targets.len());
+    for (item_type, id) in targets {
+        items.push(remove_with(fs, project, item_type, &id, scope.clone())?);
+    }
+    Ok(BundleRemoveReport {
+        bundle: bundle.to_string(),
+        items,
+    })
 }
 
 /// Remove *every* akit-owned materialization in the project and clear the
@@ -1030,6 +1081,92 @@ mod tests {
         // Up-front validation: the valid member was never installed.
         assert!(!f.project.root.join(".claude/skills/deploy").exists());
         assert!(status(&f.project).unwrap().is_empty());
+    }
+
+    #[test]
+    fn remove_bundle_uninstalls_only_tagged_members() {
+        let f = setup();
+        write_skill(&f.catalog, "deploy", None);
+        write_skill(&f.catalog, "lint", None);
+        write_skill(&f.catalog, "solo", None);
+        write_bundle(&f.catalog, "web", "skills: [deploy, lint]\n");
+        install_bundle(&f.project, &f.catalog, "web", &ctx(&[HarnessId::Claude])).unwrap();
+        // A standalone install (no bundle tag) must survive the bundle uninstall.
+        install(
+            &f.project,
+            &f.catalog,
+            ItemType::Skill,
+            "solo",
+            &ctx(&[HarnessId::Claude]),
+        )
+        .unwrap();
+
+        let report = remove_bundle(&f.project, "web", RemoveScope::All).unwrap();
+        assert_eq!(report.bundle, "web");
+        assert_eq!(report.items.len(), 2);
+        assert!(report.items.iter().all(|i| !i.not_installed));
+
+        assert!(!f.project.root.join(".claude/skills/deploy").exists());
+        assert!(!f.project.root.join(".claude/skills/lint").exists());
+        assert!(f.project.root.join(".claude/skills/solo").exists());
+
+        let items = status(&f.project).unwrap();
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].id, "solo");
+    }
+
+    #[test]
+    fn remove_bundle_with_no_tagged_members_is_empty() {
+        let f = setup();
+        write_skill(&f.catalog, "solo", None);
+        install(
+            &f.project,
+            &f.catalog,
+            ItemType::Skill,
+            "solo",
+            &ctx(&[HarnessId::Claude]),
+        )
+        .unwrap();
+
+        let report = remove_bundle(&f.project, "ghost", RemoveScope::All).unwrap();
+        assert!(report.items.is_empty());
+        // The untagged install is untouched.
+        assert_eq!(status(&f.project).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn remove_bundle_scoped_reshapes_members_and_keeps_the_tag() {
+        let f = setup();
+        write_skill(&f.catalog, "deploy", None);
+        write_bundle(&f.catalog, "web", "skills: [deploy]\n");
+        // Point the process catalog env at our temp catalog so the scoped-remove
+        // re-plan (which relocates via Catalog::locate) resolves the source.
+        unsafe { std::env::set_var(crate::catalog::ENV_CATALOG_DIR, &f.catalog.root) };
+        install_bundle(
+            &f.project,
+            &f.catalog,
+            "web",
+            &ctx(&[HarnessId::Copilot, HarnessId::Claude]),
+        )
+        .unwrap();
+
+        let report = remove_bundle(
+            &f.project,
+            "web",
+            RemoveScope::Harnesses(vec![HarnessId::Claude]),
+        )
+        .unwrap();
+        unsafe { std::env::remove_var(crate::catalog::ENV_CATALOG_DIR) };
+
+        assert_eq!(report.items.len(), 1);
+        assert_eq!(
+            report.items[0].remaining_harnesses,
+            vec![HarnessId::Copilot]
+        );
+        // Member survives (reshaped) and keeps its bundle tag.
+        let items = status(&f.project).unwrap();
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].bundle.as_deref(), Some("web"));
     }
 
     #[test]

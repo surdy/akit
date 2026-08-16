@@ -689,3 +689,76 @@ fn cli_install_rejects_id_and_bundle_together() {
         String::from_utf8_lossy(&out.stderr)
     );
 }
+
+#[test]
+fn cli_uninstall_bundle_removes_tagged_members_only() {
+    let tmp = tempfile::tempdir().unwrap();
+    let base = tmp.path();
+    let catalog_root = base.join("catalog");
+    make_skill(&catalog_root, "deploy");
+    make_skill(&catalog_root, "lint");
+    make_skill(&catalog_root, "solo");
+    make_bundle(&catalog_root, "web", "skills: [deploy, lint]\n");
+    let (proj, _project) = init_project(base);
+
+    assert!(
+        akit_install(
+            &proj,
+            &catalog_root,
+            "claude",
+            &["install", "--bundle", "web"]
+        )
+        .status
+        .success()
+    );
+    assert!(
+        akit_install(&proj, &catalog_root, "claude", &["install", "solo"])
+            .status
+            .success()
+    );
+
+    let out = akit_install(
+        &proj,
+        &catalog_root,
+        "claude",
+        &["uninstall", "--bundle", "web"],
+    );
+    assert!(
+        out.status.success(),
+        "uninstall failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("Uninstalled bundle 'web'"), "{stdout}");
+
+    assert!(!proj.join(".claude/skills/deploy").exists());
+    assert!(!proj.join(".claude/skills/lint").exists());
+    // The untagged standalone install survives.
+    assert!(proj.join(".claude/skills/solo/SKILL.md").is_file());
+    let lock = fs::read_to_string(proj.join(".akit/kit.lock.json")).unwrap();
+    assert!(lock.contains("\"id\": \"solo\""), "{lock}");
+    assert!(!lock.contains("\"bundle\": \"web\""), "{lock}");
+}
+
+#[test]
+fn cli_uninstall_rejects_id_and_bundle_together() {
+    let tmp = tempfile::tempdir().unwrap();
+    let base = tmp.path();
+    let catalog_root = base.join("catalog");
+    make_skill(&catalog_root, "deploy");
+    make_bundle(&catalog_root, "web", "skills: [deploy]\n");
+    let (proj, _project) = init_project(base);
+
+    let out = akit_install(
+        &proj,
+        &catalog_root,
+        "claude",
+        &["uninstall", "--bundle", "web", "deploy"],
+    );
+    assert!(!out.status.success());
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("either <id> or --bundle"),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
