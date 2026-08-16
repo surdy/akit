@@ -568,36 +568,38 @@ or `"modified"`; `mode` is `"copy"` or `"symlink"`. Each bundle's `state` is `"c
 > `status` lists what's **installed into the current project**. To list everything **available
 > in your catalog**, use [`akit ls`](#ls--list-everything-in-the-catalog).
 
-### `doctor` — read-only reconcile report
+### `doctor` — read-only harness-aware diagnosis
 
 ```bash
 akit doctor
 ```
 
-Checks the lockfile against the project filesystem, the current catalog, and
-`.git/info/exclude` without modifying anything.
+A read-only diagnosis of the harness-aware `.akit/kit.lock.json` state — item drift, bundle
+completeness, and git-exclude drift — without modifying anything. It is the richer companion to
+[`status`](#status--harness-aware-project-overview) and the read-only counterpart of
+[`sync`](#sync--repair-safe-lockfilefilesystemexclude-drift).
 
-- Reports each lockfile item as `ok`, `orphaned`, `missing`, or `drifted`.
-- Shows whether the catalog source exists, the project target exists, and the target's
-  `/.github/...` exclude line is present.
-- Reports missing managed exclude lines, including `/.copilot/kit.lock.json`.
-- Flags stale managed exclude lines (for example, a `/.github/skills/...` line with no matching
-  lockfile entry) but does not remove them.
-- Prints the same per-bundle completeness lines as [`status`](#status--list-installed-items)
-  (`complete` / `partial` / `unknown`). A `partial` bundle is **informational** — its missing
-  members were simply never installed — so it does not flip overall `Health`.
+- Prints the same bundle-grouped item table and per-bundle completeness lines as `status`
+  (HEALTH = `ok` / `degraded (uncovered: …)` / `missing-source`).
+- Reports git-exclude drift in **both** directions: `missing` managed lines the lockfile requires
+  (restore with `sync`) and `stale` lines with no owner (prune with `sync`).
+- Verdict `Doctor: ok`, or a summary of what's wrong (`N degraded`, `N missing-source`, missing/stale
+  exclude lines, `N partial bundle(s)`). A `partial` bundle is **informational** and does not by
+  itself make the verdict non-ok.
 
 Example:
 
 ```bash
 $ akit doctor
-BUNDLE  TYPE   ID             MODE     TARGET                                STATUS    EXCLUDE
--       skill  deploy-helper  symlink  .github/skills/deploy-helper          ok        present
+BUNDLE  ID             TYPE   HARNESSES  HEALTH
+-       deploy-helper  skill  claude     ok
+
 Exclude: ok
-Health: ok
+
+Doctor: ok
 ```
 
-With `--json`, `doctor` emits:
+With `--json`, `doctor` emits a `reconcile::Diagnosis`:
 
 ```json
 {
@@ -605,40 +607,30 @@ With `--json`, `doctor` emits:
     {
       "id": "deploy-helper",
       "type": "skill",
-      "mode": "symlink",
-      "target": ".github/skills/deploy-helper",
-      "bundle": null,
-      "status": "ok",
+      "source": "local",
+      "harnesses": ["claude"],
+      "materializations": [
+        { "path": ".claude/skills/deploy-helper", "mode": "copy", "covers": ["claude"], "drift": "clean" }
+      ],
       "source_present": true,
-      "target_present": true,
-      "exclude_present": true
+      "degraded": false
     }
   ],
   "bundles": [],
-  "exclude": {
-    "checked": true,
-    "path": "<project>/.git/info/exclude",
-    "lockfile_present": true,
-    "missing": [],
-    "stale": []
-  },
-  "summary": {
-    "total": 1,
-    "ok": 1,
-    "orphaned": 0,
-    "missing": 0,
-    "drifted": 0,
-    "missing_exclude_lines": 0,
-    "stale_exclude_lines": 0,
-    "partial_bundles": 0,
-    "not_a_git_repo": false,
-    "healthy": true
-  }
+  "stale_excludes": [],
+  "missing_excludes": [],
+  "lockfile_present": true,
+  "healthy": true
 }
 ```
 
-The top-level `bundles` array has the same shape as [`status`](#status--list-installed-items)'s,
-and `summary.partial_bundles` counts bundles in the `partial` state.
+`items` are the same `ItemHealth` objects [`status`](#status--harness-aware-project-overview) emits;
+`bundles` is its completeness array; `healthy` is true when nothing drifts and the exclude block
+matches the lockfile (partial bundles don't affect it).
+
+> **Breaking change:** `doctor` now diagnoses the harness-aware `.akit/kit.lock.json` (previously the
+> legacy `.copilot` lockfile). The `--json` shape changed from the old
+> `{ items, bundles, exclude, summary }` `DoctorReport` to the `Diagnosis` above.
 
 ### `sync` — repair safe lockfile/filesystem/exclude drift
 

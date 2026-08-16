@@ -7,12 +7,12 @@ use std::path::PathBuf;
 use akit::catalog::Catalog;
 use akit::config::LocalConfig;
 use akit::doctor;
-use akit::doctor::{DoctorReport, SyncReport};
+use akit::doctor::SyncReport;
 use akit::harness::HarnessId;
 use akit::install::{self, HarnessContext, RemoveScope};
 use akit::lockfile::{ItemType, Mode};
 use akit::ops;
-use akit::ops::{BundleHealth, BundleState, CatalogItem, HealthStatus};
+use akit::ops::{BundleHealth, BundleState, CatalogItem};
 use akit::project::Project;
 use akit::remote::{self, SourceSpec};
 use akit::search::{self, SearchHit};
@@ -67,11 +67,11 @@ enum Commands {
     /// List every skill and agent in your catalog.
     #[command(alias = "catalog")]
     Ls,
-    /// List items installed in this project and their health.
+    /// Harness-aware project overview: installed items, health, and bundle completeness (.akit).
     Status,
     /// Repair missing materializations and git-exclude lines from the lockfile.
     Sync,
-    /// Read-only reconcile report for lockfile, files, and git-exclude lines.
+    /// Read-only harness-aware diagnosis: item drift, bundle completeness, exclude drift (.akit).
     Doctor,
     /// Search your catalog by skill/agent frontmatter.
     Search {
@@ -394,11 +394,12 @@ fn run() -> Result<()> {
         Commands::Doctor => {
             let project = Project::locate(cli.project.clone())?;
             let catalog = Catalog::locate()?;
-            let report = doctor::diagnose(&project, &catalog)?;
+            // Read-only diagnosis over the harness-aware `.akit` lockfile.
+            let report = akit::reconcile::diagnose(&project, &catalog)?;
             if cli.json {
                 println!("{}", serde_json::to_string(&report)?);
             } else {
-                print_doctor_report(&report);
+                print_diagnosis(&report);
             }
         }
         Commands::Search { query } => {
@@ -1434,15 +1435,6 @@ fn mode_name(mode: Mode) -> &'static str {
     }
 }
 
-fn status_name(status: HealthStatus) -> &'static str {
-    match status {
-        HealthStatus::Ok => "ok",
-        HealthStatus::Orphaned => "orphaned",
-        HealthStatus::Missing => "missing",
-        HealthStatus::Drifted => "drifted",
-    }
-}
-
 fn created_name(mode: Mode) -> &'static str {
     match mode {
         Mode::Symlink => "linked",
@@ -1771,98 +1763,58 @@ fn print_status_table(items: &[akit::reconcile::ItemHealth]) {
     }
 }
 
-fn print_doctor_report(report: &DoctorReport) {
-    print_doctor_table(report);
-    print_bundle_health(&report.bundles);
-    print_exclude_health(report);
-    if report.summary.healthy {
-        println!("Health: ok");
+/// Print a read-only `doctor` diagnosis over the harness-aware `.akit` state:
+/// the item table, per-bundle completeness, exclude drift, then a verdict.
+fn print_diagnosis(d: &akit::reconcile::Diagnosis) {
+    print_status_table(&d.items);
+    print_bundle_health(&d.bundles);
+
+    if d.missing_excludes.is_empty() && d.stale_excludes.is_empty() {
+        // No exclude drift — say so only when there is a lockfile to compare.
+        if d.lockfile_present {
+            println!("\nExclude: ok");
+        }
     } else {
-        println!(
-            "Health: {} issue(s): {} orphaned, {} missing, {} drifted, {} missing exclude, {} stale exclude",
-            report.summary.total - report.summary.ok
-                + report.summary.missing_exclude_lines
-                + report.summary.stale_exclude_lines,
-            report.summary.orphaned,
-            report.summary.missing,
-            report.summary.drifted,
-            report.summary.missing_exclude_lines,
-            report.summary.stale_exclude_lines
-        );
-    }
-}
-
-fn print_doctor_table(report: &DoctorReport) {
-    let mut bundle_width = "BUNDLE".len();
-    let mut type_width = "TYPE".len();
-    let mut id_width = "ID".len();
-    let mut mode_width = "MODE".len();
-    let mut target_width = "TARGET".len();
-
-    for item in &report.items {
-        bundle_width = bundle_width.max(item.bundle.as_deref().unwrap_or("-").len());
-        type_width = type_width.max(type_name(item.item_type).len());
-        id_width = id_width.max(item.id.len());
-        mode_width = mode_width.max(mode_name(item.mode).len());
-        target_width = target_width.max(item.target.len());
-    }
-
-    println!(
-        "{:<bundle_width$}  {:<type_width$}  {:<id_width$}  {:<mode_width$}  {:<target_width$}  {:<8}  EXCLUDE",
-        "BUNDLE", "TYPE", "ID", "MODE", "TARGET", "STATUS"
-    );
-    let mut ordered: Vec<_> = report.items.iter().collect();
-    ordered.sort_by(|a, b| match (a.bundle.as_deref(), b.bundle.as_deref()) {
-        (Some(a_bundle), Some(b_bundle)) => a_bundle.cmp(b_bundle),
-        (Some(_), None) => std::cmp::Ordering::Less,
-        (None, Some(_)) => std::cmp::Ordering::Greater,
-        (None, None) => std::cmp::Ordering::Equal,
-    });
-    for item in ordered {
-        println!(
-            "{:<bundle_width$}  {:<type_width$}  {:<id_width$}  {:<mode_width$}  {:<target_width$}  {:<8}  {}",
-            item.bundle.as_deref().unwrap_or("-"),
-            type_name(item.item_type),
-            item.id,
-            mode_name(item.mode),
-            item.target,
-            status_name(item.status),
-            exclude_status_name(report.exclude.checked, item.exclude_present)
-        );
-    }
-}
-
-fn exclude_status_name(checked: bool, present: bool) -> &'static str {
-    if !checked {
-        "n/a"
-    } else if present {
-        "present"
-    } else {
-        "missing"
-    }
-}
-
-fn print_exclude_health(report: &DoctorReport) {
-    if !report.exclude.checked {
-        println!("Exclude: not checked (not a git repository)");
-        return;
-    }
-    if report.exclude.missing.is_empty() && report.exclude.stale.is_empty() {
-        println!("Exclude: ok");
-        return;
-    }
-    if !report.exclude.missing.is_empty() {
-        println!("Missing exclude lines:");
-        for line in &report.exclude.missing {
-            println!("  {line}");
+        println!("\ngit excludes:");
+        for line in &d.missing_excludes {
+            println!("  missing: {line}  (run `akit sync`)");
+        }
+        for line in &d.stale_excludes {
+            println!("  stale:   {line}  (run `akit sync`)");
         }
     }
-    if !report.exclude.stale.is_empty() {
-        println!("Stale exclude lines (not removed):");
-        for line in &report.exclude.stale {
-            println!("  {line}");
-        }
+
+    if d.healthy {
+        println!("\nDoctor: ok");
+        return;
     }
+    let degraded = d.items.iter().filter(|i| i.degraded).count();
+    let missing_source = d.items.iter().filter(|i| !i.source_present).count();
+    let partial = d
+        .bundles
+        .iter()
+        .filter(|b| b.state == BundleState::Partial)
+        .count();
+    let mut parts = Vec::new();
+    if degraded > 0 {
+        parts.push(format!("{degraded} degraded"));
+    }
+    if missing_source > 0 {
+        parts.push(format!("{missing_source} missing-source"));
+    }
+    if !d.missing_excludes.is_empty() {
+        parts.push(format!(
+            "{} missing exclude line(s)",
+            d.missing_excludes.len()
+        ));
+    }
+    if !d.stale_excludes.is_empty() {
+        parts.push(format!("{} stale exclude line(s)", d.stale_excludes.len()));
+    }
+    if partial > 0 {
+        parts.push(format!("{partial} partial bundle(s)"));
+    }
+    println!("\nDoctor: {}", parts.join(", "));
 }
 
 fn print_sync_report(report: &SyncReport) {

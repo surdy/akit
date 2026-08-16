@@ -212,6 +212,53 @@ pub fn akit_bundle_health_with(
         .collect())
 }
 
+/// A read-only diagnosis of the harness-aware project state — the `.akit`
+/// counterpart of legacy `doctor::diagnose`. Extends [`health`] with per-bundle
+/// completeness and **both** exclude-drift directions (stale *and* missing).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Diagnosis {
+    /// Per-item health (drift, harness coverage, source presence, bundle tag).
+    pub items: Vec<ItemHealth>,
+    /// Per-bundle completeness against the catalog manifests.
+    pub bundles: Vec<BundleHealth>,
+    /// Managed exclude lines present but no longer owned (prune via `sync`).
+    pub stale_excludes: Vec<String>,
+    /// Owned paths missing their managed exclude line (restore via `sync`).
+    pub missing_excludes: Vec<String>,
+    /// Whether an `.akit/kit.lock.json` exists.
+    pub lockfile_present: bool,
+    /// True when nothing drifts and the exclude block matches the lockfile.
+    /// Partial bundles are informational and do **not** make this false.
+    pub healthy: bool,
+}
+
+/// Read-only diagnosis over `.akit`: item drift + bundle completeness + exclude
+/// drift (stale and missing). Never mutates anything.
+pub fn diagnose(project: &Project, catalog: &Catalog) -> Result<Diagnosis> {
+    diagnose_with(&LocalFs, project, catalog)
+}
+
+/// [`diagnose`] against an explicit transport.
+pub fn diagnose_with(
+    fs: &dyn FsTransport,
+    project: &Project,
+    catalog: &Catalog,
+) -> Result<Diagnosis> {
+    let health = health_with(fs, project, catalog)?;
+    let bundles = akit_bundle_health_with(fs, project, catalog)?;
+    let lock = AkitLockfile::load_with(fs, &project.akit_lockfile_path())?;
+    let missing_excludes = missing_exclude_lines(fs, project, &lock);
+    let healthy = health.healthy && missing_excludes.is_empty();
+    Ok(Diagnosis {
+        items: health.items,
+        bundles,
+        stale_excludes: health.stale_excludes,
+        missing_excludes,
+        lockfile_present: health.lockfile_present,
+        healthy,
+    })
+}
+
 /// Outcome of a [`repair`].
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct RepairReport {
@@ -522,6 +569,23 @@ fn stale_exclude_lines(
         .collect()
 }
 
+/// Managed exclude lines the lockfile requires that are absent from the exclude
+/// file — the inverse of [`stale_exclude_lines`]. `sync`/`repair` restores these.
+fn missing_exclude_lines(
+    fs: &dyn FsTransport,
+    project: &Project,
+    lock: &AkitLockfile,
+) -> Vec<String> {
+    let Some(excl) = project.git_info_exclude_path() else {
+        return Vec::new();
+    };
+    let current = gitexclude::managed_lines(fs, &excl).unwrap_or_default();
+    install::desired_excludes(lock)
+        .into_iter()
+        .filter(|l| !current.contains(l))
+        .collect()
+}
+
 fn sorted(mut v: Vec<HarnessId>) -> Vec<HarnessId> {
     v.sort();
     v.dedup();
@@ -592,6 +656,31 @@ mod tests {
 
     fn excludes(project: &Project) -> Vec<String> {
         gitexclude::managed_lines(&LocalFs, &project.git_info_exclude_path().unwrap()).unwrap()
+    }
+
+    #[test]
+    fn diagnose_is_healthy_after_install_then_flags_drift_and_missing_excludes() {
+        let f = setup();
+        install_skill(&f, "deploy", &[HarnessId::Claude]);
+
+        let d = diagnose(&f.project, &f.catalog).unwrap();
+        assert!(d.healthy, "{d:?}");
+        assert!(d.stale_excludes.is_empty());
+        assert!(d.missing_excludes.is_empty());
+        assert_eq!(d.items.len(), 1);
+
+        // Delete the materialization → drift makes the item degraded.
+        std::fs::remove_dir_all(f.project.root.join(".claude/skills/deploy")).unwrap();
+        // Wipe the managed exclude block → its owned lines are now missing.
+        std::fs::write(f.project.git_info_exclude_path().unwrap(), "").unwrap();
+
+        let d = diagnose(&f.project, &f.catalog).unwrap();
+        assert!(!d.healthy);
+        assert!(d.items[0].degraded);
+        assert!(
+            !d.missing_excludes.is_empty(),
+            "expected missing exclude lines: {d:?}"
+        );
     }
 
     #[test]

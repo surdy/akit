@@ -2,7 +2,7 @@
 //! pipeline (resolve → materialize/remove → gitignore → record in lockfile).
 
 use anyhow::{Context, Result};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::io::ErrorKind;
 use std::path::PathBuf;
@@ -104,7 +104,7 @@ pub struct ListItem {
 }
 
 /// Whether an installed bundle has all its manifest members present.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum BundleState {
     /// Every member declared by `bundles/<name>.yml` is installed.
@@ -117,7 +117,7 @@ pub enum BundleState {
 
 /// Completeness of one installed bundle, comparing the project lockfile's
 /// bundle-tagged entries against the catalog `bundles/<name>.yml` manifest.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BundleHealth {
     pub name: String,
     /// Members declared by the manifest; `None` when the manifest is unreadable.

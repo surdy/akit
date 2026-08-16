@@ -454,3 +454,38 @@ fn install_symlink_dry_run_shows_symlink_mode() {
     // Nothing materialized.
     assert!(!project.join(".claude/skills/demo").exists());
 }
+
+// ── `doctor` repointed onto `.akit` (issue #45) ──────────────────────────────
+
+#[test]
+fn doctor_reports_ok_then_degraded_over_akit() {
+    let (_tmp, catalog, project) = setup();
+    assert!(akit(&project, &catalog, &["install", "-H", "claude", "demo"]).1);
+
+    let (out, ok) = akit(&project, &catalog, &["doctor"]);
+    assert!(ok, "doctor failed: {out}");
+    assert!(out.contains("Doctor: ok"), "{out}");
+
+    // Delete the materialization → doctor must flag it degraded (non-ok verdict).
+    std::fs::remove_dir_all(project.join(".claude/skills/demo")).unwrap();
+    let (out, ok) = akit(&project, &catalog, &["doctor"]);
+    assert!(ok, "doctor failed: {out}");
+    assert!(
+        out.contains("degraded"),
+        "expected degraded verdict:\n{out}"
+    );
+    assert!(!out.contains("Doctor: ok"), "{out}");
+}
+
+#[test]
+fn doctor_json_is_a_diagnosis_over_akit() {
+    let (_tmp, catalog, project) = setup();
+    akit(&project, &catalog, &["install", "-H", "claude", "demo"]);
+    let (out, ok) = akit(&project, &catalog, &["--json", "doctor"]);
+    assert!(ok, "doctor --json failed: {out}");
+    let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+    assert!(v["items"].is_array());
+    assert!(v["bundles"].is_array());
+    assert_eq!(v["healthy"], true);
+    assert!(v["missing_excludes"].is_array() && v["stale_excludes"].is_array());
+}
