@@ -5,7 +5,7 @@
 
 It exposes two command families. The **legacy** commands
 ([`add`](#add--pull-a-skill-or-agent-into-the-project) / [`rm`](#rm--remove-a-skill-or-agent-from-the-project)
-/ [`status`](#status--list-installed-items) / [`sync`](#sync--repair-safe-lockfilefilesystemexclude-drift)
+/ [`status`](#status--harness-aware-project-overview) / [`sync`](#sync--repair-safe-lockfilefilesystemexclude-drift)
 / [`doctor`](#doctor--read-only-reconcile-report)) materialize into `.github/{skills,agents}` for
 GitHub Copilot CLI. The newer **harness-aware** commands
 ([`install`](#install--install-a-skill-or-agent-for-one-or-more-harnesses) /
@@ -638,72 +638,41 @@ matches the lockfile (partial bundles don't affect it).
 akit sync
 ```
 
-Reconciles the project from the lockfile. It is idempotent: running it again after a clean sync is a
-no-op.
+Reconciles the project from the harness-aware `.akit/kit.lock.json`. It is **exactly equivalent to
+[`repair`](#repair--detach--forget--adopt--maintain-akit-ownership)** (kept as the familiar name), and
+idempotent — running it again after a clean sync is a no-op.
 
-Repairs:
+Repairs, touching only akit-owned paths:
 
-- Missing materialized targets, using the recorded `mode` (`symlink` or `copy`) and the current
-  catalog source.
-- Missing `.git/info/exclude` lines for locked targets.
-- The lockfile's own `/.copilot/kit.lock.json` exclude line.
+- Re-materializes **missing** owned files from the current catalog source (using each
+  materialization's recorded mode).
+- Resyncs the managed `.git/info/exclude` block from the lockfile — restoring missing lines and
+  pruning stale ones — including the `/.akit/kit.lock.json` line.
 
-Does **not** silently delete or overwrite user data:
-
-- Orphaned items whose catalog source is gone are reported and skipped.
-- Drifted copy-mode targets are reported and not overwritten.
-- Stale exclude lines are reported and not removed.
+Does **not** overwrite user data: a **locally-modified** owned file is a conflict and is reported,
+not overwritten; an item whose catalog source is gone is reported, not touched.
 
 Example:
 
 ```bash
 $ akit sync
-Restored skill 'deploy-helper' -> .github/skills/deploy-helper (symlink)
-Added exclude /.copilot/kit.lock.json
+Restored 1 missing file(s):
+  .claude/skills/deploy-helper
 ```
 
-With `--json`, `sync` emits:
+With `--json`, `sync` emits a `reconcile::RepairReport` (identical to `repair`):
 
 ```json
 {
-  "items": [
-    {
-      "id": "deploy-helper",
-      "type": "skill",
-      "mode": "symlink",
-      "target": ".github/skills/deploy-helper",
-      "bundle": null,
-      "status_before": "missing",
-      "status_after": "ok",
-      "source_present": true,
-      "restored": true,
-      "exclude_added": false,
-      "skipped_orphan": false,
-      "drifted": false
-    }
-  ],
-  "exclude": {
-    "checked": true,
-    "path": "<project>/.git/info/exclude",
-    "lockfile_added": true,
-    "target_lines_added": [],
-    "missing_after": [],
-    "stale": []
-  },
-  "summary": {
-    "total": 1,
-    "restored": 1,
-    "exclude_added": 1,
-    "skipped_orphan": 0,
-    "drifted": 0,
-    "missing_after": 0,
-    "missing_exclude_lines": 0,
-    "stale_exclude_lines": 0,
-    "not_a_git_repo": false,
-    "healthy": true
-  }
+  "restored_paths": [".claude/skills/deploy-helper"],
+  "skipped_modified": [],
+  "missing_source": []
 }
 ```
+
+> **Breaking change:** `sync` now repairs the harness-aware `.akit/kit.lock.json` (previously the
+> legacy `.copilot` lockfile). Its `--json` is now the three-list `RepairReport` rather than the
+> old `SyncReport` (`{ items, exclude, summary }`).
 
 ### `search` — search the catalog
 
@@ -834,7 +803,7 @@ item's frontmatter `name`), `ls` is the catalog-wide inventory keyed by id, and 
 records each item's provenance:
 
 - `ls` (catalog scope) lists what's **available in your catalog**;
-  [`status`](#status--list-installed-items) (project scope) lists what's **installed into the
+  [`status`](#status--harness-aware-project-overview) (project scope) lists what's **installed into the
   current project**.
 - The `ORIGIN` column shows `owner/repo/path[#ref]` for items recorded as pulled in the
   manifest (`akit.yml`), or `local` for hand-authored items.

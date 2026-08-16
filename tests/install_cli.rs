@@ -489,3 +489,25 @@ fn doctor_json_is_a_diagnosis_over_akit() {
     assert_eq!(v["healthy"], true);
     assert!(v["missing_excludes"].is_array() && v["stale_excludes"].is_array());
 }
+
+// ── `sync` repointed onto `.akit` (== `repair`) (issue #45) ──────────────────
+
+#[test]
+fn sync_restores_a_missing_materialization_over_akit() {
+    let (_tmp, catalog, project) = setup();
+    assert!(akit(&project, &catalog, &["install", "-H", "claude", "demo"]).1);
+    let dest = project.join(".claude/skills/demo");
+    assert!(dest.exists());
+
+    // Delete the owned materialization, then `sync` must restore it from the catalog.
+    std::fs::remove_dir_all(&dest).unwrap();
+    let (out, ok) = akit(&project, &catalog, &["sync"]);
+    assert!(ok, "sync failed: {out}");
+    assert!(out.contains("Restored"), "{out}");
+    assert!(dest.join("SKILL.md").is_file());
+
+    // Idempotent: a second sync finds nothing to do.
+    let (out, ok) = akit(&project, &catalog, &["sync"]);
+    assert!(ok, "sync failed: {out}");
+    assert!(out.contains("Nothing to repair"), "{out}");
+}

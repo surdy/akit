@@ -6,8 +6,6 @@ use std::path::PathBuf;
 
 use akit::catalog::Catalog;
 use akit::config::LocalConfig;
-use akit::doctor;
-use akit::doctor::SyncReport;
 use akit::harness::HarnessId;
 use akit::install::{self, HarnessContext, RemoveScope};
 use akit::lockfile::{ItemType, Mode};
@@ -69,7 +67,7 @@ enum Commands {
     Ls,
     /// Harness-aware project overview: installed items, health, and bundle completeness (.akit).
     Status,
-    /// Repair missing materializations and git-exclude lines from the lockfile.
+    /// Re-materialize missing akit-owned files and resync git-excludes (.akit; same as `repair`).
     Sync,
     /// Read-only harness-aware diagnosis: item drift, bundle completeness, exclude drift (.akit).
     Doctor,
@@ -384,11 +382,13 @@ fn run() -> Result<()> {
         Commands::Sync => {
             let project = Project::locate(cli.project.clone())?;
             let catalog = Catalog::locate()?;
-            let report = doctor::sync(&project, &catalog)?;
+            // Harness-aware repair over `.akit`: re-materialize missing owned files
+            // and resync the managed git-exclude block. Equivalent to `repair`.
+            let report = akit::reconcile::repair(&project, &catalog)?;
             if cli.json {
                 println!("{}", serde_json::to_string(&report)?);
             } else {
-                print_sync_report(&report);
+                print_repair_report(&report);
             }
         }
         Commands::Doctor => {
@@ -1815,65 +1815,6 @@ fn print_diagnosis(d: &akit::reconcile::Diagnosis) {
         parts.push(format!("{partial} partial bundle(s)"));
     }
     println!("\nDoctor: {}", parts.join(", "));
-}
-
-fn print_sync_report(report: &SyncReport) {
-    let mut printed = false;
-    for item in &report.items {
-        if item.restored {
-            println!(
-                "Restored {} '{}' -> {} ({})",
-                type_name(item.item_type),
-                item.id,
-                item.target,
-                mode_name(item.mode)
-            );
-            printed = true;
-        }
-        if item.exclude_added {
-            println!("Added exclude /{}", item.target);
-            printed = true;
-        }
-        if item.skipped_orphan {
-            println!(
-                "Skipped orphaned {} '{}' -> {} (source missing or unsafe to overwrite)",
-                type_name(item.item_type),
-                item.id,
-                item.target
-            );
-            printed = true;
-        }
-        if item.drifted {
-            println!(
-                "Drifted {} '{}' -> {} (not overwritten)",
-                type_name(item.item_type),
-                item.id,
-                item.target
-            );
-            printed = true;
-        }
-    }
-    if report.exclude.lockfile_added {
-        println!("Added exclude /.copilot/kit.lock.json");
-        printed = true;
-    }
-    if !report.exclude.stale.is_empty() {
-        println!("Stale exclude lines (not removed):");
-        for line in &report.exclude.stale {
-            println!("  {line}");
-        }
-        printed = true;
-    }
-    if !report.exclude.missing_after.is_empty() {
-        println!("Missing exclude lines remaining:");
-        for line in &report.exclude.missing_after {
-            println!("  {line}");
-        }
-        printed = true;
-    }
-    if !printed {
-        println!("Already in sync");
-    }
 }
 
 fn print_catalog_table(items: &[CatalogItem]) {
