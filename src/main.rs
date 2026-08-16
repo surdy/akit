@@ -12,7 +12,7 @@ use akit::harness::HarnessId;
 use akit::install::{self, HarnessContext, RemoveScope};
 use akit::lockfile::{ItemType, Mode};
 use akit::ops;
-use akit::ops::{CatalogItem, HealthStatus, ListItem};
+use akit::ops::{BundleHealth, BundleState, CatalogItem, HealthStatus, ListItem};
 use akit::project::Project;
 use akit::remote::{self, SourceSpec};
 use akit::search::{self, SearchHit};
@@ -298,10 +298,21 @@ fn run() -> Result<()> {
         Commands::Status => {
             let project = Project::locate(cli.project.clone())?;
             let items = ops::list_items(&project)?;
+            // The catalog is only needed to read bundle manifests; a missing
+            // catalog degrades bundles to `unknown` rather than failing status.
+            let catalog = Catalog::locate().ok();
+            let bundles = ops::bundle_health(&project, catalog.as_ref())?;
             if cli.json {
-                println!("{}", serde_json::to_string(&items)?);
+                println!(
+                    "{}",
+                    serde_json::to_string(&StatusReport {
+                        items: &items,
+                        bundles: &bundles,
+                    })?
+                );
             } else {
                 print_table(&items);
+                print_bundle_health(&bundles);
             }
         }
         Commands::Sync => {
@@ -938,6 +949,48 @@ fn remove_report_line(report: &ops::RemoveReport) -> String {
     )
 }
 
+/// JSON shape for `status`: installed items plus per-bundle completeness.
+#[derive(serde::Serialize)]
+struct StatusReport<'a> {
+    items: &'a [ListItem],
+    bundles: &'a [BundleHealth],
+}
+
+/// Print a one-line-per-bundle completeness summary below the item table.
+fn print_bundle_health(bundles: &[BundleHealth]) {
+    if bundles.is_empty() {
+        return;
+    }
+    println!();
+    for b in bundles {
+        match b.state {
+            BundleState::Complete => {
+                let expected = b.expected.unwrap_or(b.installed);
+                println!(
+                    "Bundle '{}': complete ({}/{})",
+                    b.name, b.installed, expected
+                );
+            }
+            BundleState::Partial => {
+                let expected = b.expected.unwrap_or(b.installed);
+                println!(
+                    "Bundle '{}': partial ({}/{}) — missing: {}",
+                    b.name,
+                    b.installed,
+                    expected,
+                    b.missing.join(", ")
+                );
+            }
+            BundleState::Unknown => {
+                println!(
+                    "Bundle '{}': unknown (manifest unavailable; {} installed)",
+                    b.name, b.installed
+                );
+            }
+        }
+    }
+}
+
 fn print_table(items: &[ListItem]) {
     let mut bundle_width = "BUNDLE".len();
     let mut type_width = "TYPE".len();
@@ -979,6 +1032,7 @@ fn print_table(items: &[ListItem]) {
 
 fn print_doctor_report(report: &DoctorReport) {
     print_doctor_table(report);
+    print_bundle_health(&report.bundles);
     print_exclude_health(report);
     if report.summary.healthy {
         println!("Health: ok");

@@ -9,13 +9,15 @@ use crate::catalog::Catalog;
 use crate::fsops;
 use crate::gitexclude;
 use crate::lockfile::{ItemType, LockItem, Lockfile, Mode};
-use crate::ops::{self, HealthStatus, LOCKFILE_REL};
+use crate::ops::{self, BundleHealth, BundleState, HealthStatus, LOCKFILE_REL};
 use crate::project::Project;
 
 /// Read-only health report for lockfile items and managed git-exclude lines.
 #[derive(Debug, Serialize)]
 pub struct DoctorReport {
     pub items: Vec<DoctorItem>,
+    /// Per-bundle completeness for every bundle referenced by the lockfile.
+    pub bundles: Vec<BundleHealth>,
     pub exclude: ExcludeHealth,
     pub summary: DoctorSummary,
 }
@@ -56,6 +58,8 @@ pub struct DoctorSummary {
     pub drifted: usize,
     pub missing_exclude_lines: usize,
     pub stale_exclude_lines: usize,
+    /// Bundles with at least one declared member not installed.
+    pub partial_bundles: usize,
     pub not_a_git_repo: bool,
     pub healthy: bool,
 }
@@ -130,10 +134,12 @@ pub fn diagnose(project: &Project, catalog: &Catalog) -> Result<DoctorReport> {
         .iter()
         .map(|item| doctor_item(project, catalog, item, exclude.lines.as_ref()))
         .collect::<Result<Vec<_>>>()?;
-    let summary = doctor_summary(&items, &exclude.health);
+    let bundles = ops::bundle_health_from_items(&lockfile.items, Some(catalog));
+    let summary = doctor_summary(&items, &bundles, &exclude.health);
 
     Ok(DoctorReport {
         items,
+        bundles,
         exclude: exclude.health,
         summary,
     })
@@ -362,7 +368,11 @@ fn is_managed_exclude_line(line: &str) -> bool {
         || line.starts_with("/.github/agents/")
 }
 
-fn doctor_summary(items: &[DoctorItem], exclude: &ExcludeHealth) -> DoctorSummary {
+fn doctor_summary(
+    items: &[DoctorItem],
+    bundles: &[BundleHealth],
+    exclude: &ExcludeHealth,
+) -> DoctorSummary {
     let ok = items
         .iter()
         .filter(|item| item.status == HealthStatus::Ok)
@@ -381,6 +391,10 @@ fn doctor_summary(items: &[DoctorItem], exclude: &ExcludeHealth) -> DoctorSummar
         .count();
     let missing_exclude_lines = exclude.missing.len();
     let stale_exclude_lines = exclude.stale.len();
+    let partial_bundles = bundles
+        .iter()
+        .filter(|b| b.state == BundleState::Partial)
+        .count();
     DoctorSummary {
         total: items.len(),
         ok,
@@ -389,7 +403,11 @@ fn doctor_summary(items: &[DoctorItem], exclude: &ExcludeHealth) -> DoctorSummar
         drifted,
         missing_exclude_lines,
         stale_exclude_lines,
+        partial_bundles,
         not_a_git_repo: !exclude.checked,
+        // A partial bundle is informational (its missing members were never
+        // installed), not a lockfile-vs-filesystem defect, so it does not flip
+        // `healthy`.
         healthy: orphaned == 0
             && missing == 0
             && drifted == 0

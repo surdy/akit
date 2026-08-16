@@ -417,6 +417,16 @@ show `-`. Health values:
 - `missing`: lockfile entry exists but the target is gone.
 - `drifted`: copy-mode target exists, but its content differs from the current catalog source.
 
+Below the table, `status` prints one line per installed bundle summarizing its **completeness**
+against the catalog `bundles/<name>.yml` manifest:
+
+- `complete`: every member the manifest declares is installed.
+- `partial`: some declared members are not installed (the missing ids are listed). This also
+  surfaces a bundle whose manifest *grew* upstream after you installed it — reporting never
+  mutates the lockfile.
+- `unknown`: the manifest could not be read (absent, unparseable, or no catalog is available); a
+  warning is written to stderr and the installed count is still reported.
+
 Example:
 
 ```bash
@@ -425,11 +435,43 @@ BUNDLE  TYPE   ID                MODE     TARGET                                
 web     skill  deploy-to-vercel  symlink  .github/skills/deploy-to-vercel             ok
 web     agent  code-reviewer     symlink  .github/agents/code-reviewer.agent.md       ok
 -       skill  deploy-helper     symlink  .github/skills/deploy-helper                ok
+
+Bundle 'web': partial (2/3) — missing: lint-fix
 ```
 
-With `--json`, `status` is serialized as lowercase (`"ok"`, `"orphaned"`, `"missing"`, or
-`"drifted"`), `mode` is `"symlink"` or `"copy"`, and every item includes `bundle` (`null` for
-standalone items).
+With `--json`, `status` emits an object with `items` and `bundles`:
+
+```json
+{
+  "items": [
+    {
+      "id": "deploy-to-vercel",
+      "type": "skill",
+      "mode": "symlink",
+      "target": ".github/skills/deploy-to-vercel",
+      "bundle": "web",
+      "status": "ok"
+    }
+  ],
+  "bundles": [
+    {
+      "name": "web",
+      "expected": 3,
+      "installed": 2,
+      "missing": ["lint-fix"],
+      "state": "partial"
+    }
+  ]
+}
+```
+
+Each item's `status` is lowercase (`"ok"`, `"orphaned"`, `"missing"`, or `"drifted"`), `mode`
+is `"symlink"` or `"copy"`, and `bundle` is `null` for standalone items. Each bundle's `state`
+is `"complete"`, `"partial"`, or `"unknown"`; `missing` is empty except for `partial`; and
+`expected` is omitted for `unknown` (the manifest count is unknown).
+
+> **Note:** prior to this the `status --json` output was a bare array of items. It is now the
+> `{ "items", "bundles" }` object shown above.
 
 > `status` lists what's **installed into the current project**. To list everything **available
 > in your catalog**, use [`akit ls`](#ls--list-everything-in-the-catalog).
@@ -449,6 +491,9 @@ Checks the lockfile against the project filesystem, the current catalog, and
 - Reports missing managed exclude lines, including `/.copilot/kit.lock.json`.
 - Flags stale managed exclude lines (for example, a `/.github/skills/...` line with no matching
   lockfile entry) but does not remove them.
+- Prints the same per-bundle completeness lines as [`status`](#status--list-installed-items)
+  (`complete` / `partial` / `unknown`). A `partial` bundle is **informational** — its missing
+  members were simply never installed — so it does not flip overall `Health`.
 
 Example:
 
@@ -477,6 +522,7 @@ With `--json`, `doctor` emits:
       "exclude_present": true
     }
   ],
+  "bundles": [],
   "exclude": {
     "checked": true,
     "path": "<project>/.git/info/exclude",
@@ -492,11 +538,15 @@ With `--json`, `doctor` emits:
     "drifted": 0,
     "missing_exclude_lines": 0,
     "stale_exclude_lines": 0,
+    "partial_bundles": 0,
     "not_a_git_repo": false,
     "healthy": true
   }
 }
 ```
+
+The top-level `bundles` array has the same shape as [`status`](#status--list-installed-items)'s,
+and `summary.partial_bundles` counts bundles in the `partial` state.
 
 ### `sync` — repair safe lockfile/filesystem/exclude drift
 

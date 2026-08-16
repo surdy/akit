@@ -5,7 +5,7 @@ use std::process::Command;
 
 use akit::catalog::Catalog;
 use akit::lockfile::{ItemType, Lockfile, Mode};
-use akit::ops::{self, HealthStatus};
+use akit::ops::{self, BundleState, HealthStatus};
 use akit::project::Project;
 
 fn git(args: &[&str], cwd: &Path) -> std::process::Output {
@@ -382,4 +382,155 @@ fn cli_status_labels_and_groups_bundle_items() {
     assert!(lines[2].contains("zeta-skill"), "{stdout}");
     assert!(lines[3].starts_with('-'), "{stdout}");
     assert!(lines[3].contains("standalone"), "{stdout}");
+}
+
+#[test]
+fn bundle_health_reports_complete_when_all_members_installed() {
+    let tmp = tempfile::tempdir().unwrap();
+    let base = tmp.path();
+    let catalog_root = base.join("catalog");
+    make_skill(&catalog_root, "a");
+    make_skill(&catalog_root, "b");
+    make_agent(&catalog_root, "rev");
+    make_bundle(&catalog_root, "demo", "skills: [a, b]\nagents: [rev]\n");
+    let catalog = Catalog::with_root(&catalog_root);
+    let (_proj, project) = init_project(base);
+
+    ops::add_bundle(&project, &catalog, "demo", Mode::Symlink).unwrap();
+
+    let health = ops::bundle_health(&project, Some(&catalog)).unwrap();
+    assert_eq!(health.len(), 1);
+    let demo = &health[0];
+    assert_eq!(demo.name, "demo");
+    assert_eq!(demo.state, BundleState::Complete);
+    assert_eq!(demo.expected, Some(3));
+    assert_eq!(demo.installed, 3);
+    assert!(demo.missing.is_empty());
+}
+
+#[test]
+fn bundle_health_reports_partial_after_a_member_is_removed_post_install() {
+    let tmp = tempfile::tempdir().unwrap();
+    let base = tmp.path();
+    let catalog_root = base.join("catalog");
+    make_skill(&catalog_root, "a");
+    make_skill(&catalog_root, "b");
+    make_agent(&catalog_root, "rev");
+    make_bundle(&catalog_root, "demo", "skills: [a, b]\nagents: [rev]\n");
+    let catalog = Catalog::with_root(&catalog_root);
+    let (_proj, project) = init_project(base);
+
+    ops::add_bundle(&project, &catalog, "demo", Mode::Symlink).unwrap();
+    // User removes one member of the installed bundle.
+    ops::remove_item(&project, ItemType::Skill, "b").unwrap();
+
+    let health = ops::bundle_health(&project, Some(&catalog)).unwrap();
+    let demo = &health[0];
+    assert_eq!(demo.state, BundleState::Partial);
+    assert_eq!(demo.expected, Some(3));
+    assert_eq!(demo.installed, 2);
+    assert_eq!(demo.missing, vec!["b".to_string()]);
+}
+
+#[test]
+fn bundle_health_reports_partial_when_a_member_was_never_added() {
+    let tmp = tempfile::tempdir().unwrap();
+    let base = tmp.path();
+    let catalog_root = base.join("catalog");
+    make_skill(&catalog_root, "a");
+    make_skill(&catalog_root, "b");
+    make_skill(&catalog_root, "c");
+    make_bundle(&catalog_root, "demo", "skills: [a, b, c]\n");
+    let catalog = Catalog::with_root(&catalog_root);
+    let (_proj, project) = init_project(base);
+
+    // Install only two of the three declared members, tagged with the bundle.
+    ops::add_item(
+        &project,
+        &catalog,
+        ItemType::Skill,
+        "a",
+        Mode::Symlink,
+        Some("demo"),
+    )
+    .unwrap();
+    ops::add_item(
+        &project,
+        &catalog,
+        ItemType::Skill,
+        "b",
+        Mode::Symlink,
+        Some("demo"),
+    )
+    .unwrap();
+
+    let health = ops::bundle_health(&project, Some(&catalog)).unwrap();
+    assert_eq!(health.len(), 1);
+    let demo = &health[0];
+    assert_eq!(demo.state, BundleState::Partial);
+    assert_eq!(demo.expected, Some(3));
+    assert_eq!(demo.installed, 2);
+    assert_eq!(demo.missing, vec!["c".to_string()]);
+}
+
+#[test]
+fn bundle_health_partial_when_manifest_grows_after_install_without_mutating_lockfile() {
+    let tmp = tempfile::tempdir().unwrap();
+    let base = tmp.path();
+    let catalog_root = base.join("catalog");
+    make_skill(&catalog_root, "a");
+    make_skill(&catalog_root, "b");
+    make_skill(&catalog_root, "c");
+    make_bundle(&catalog_root, "demo", "skills: [a, b]\n");
+    let catalog = Catalog::with_root(&catalog_root);
+    let (_proj, project) = init_project(base);
+
+    ops::add_bundle(&project, &catalog, "demo", Mode::Symlink).unwrap();
+    let before = Lockfile::load(&project.lockfile_path()).unwrap();
+
+    // Manifest gains a third member upstream; the project is untouched.
+    make_bundle(&catalog_root, "demo", "skills: [a, b, c]\n");
+
+    let health = ops::bundle_health(&project, Some(&catalog)).unwrap();
+    let demo = &health[0];
+    assert_eq!(demo.state, BundleState::Partial);
+    assert_eq!(demo.expected, Some(3));
+    assert_eq!(demo.installed, 2);
+    assert_eq!(demo.missing, vec!["c".to_string()]);
+
+    let after = Lockfile::load(&project.lockfile_path()).unwrap();
+    assert_eq!(
+        before.items, after.items,
+        "reporting must not mutate the lockfile"
+    );
+}
+
+#[test]
+fn bundle_health_reports_unknown_when_manifest_is_absent() {
+    let tmp = tempfile::tempdir().unwrap();
+    let base = tmp.path();
+    let catalog_root = base.join("catalog");
+    make_skill(&catalog_root, "a");
+    let catalog = Catalog::with_root(&catalog_root);
+    let (_proj, project) = init_project(base);
+
+    // Tagged with a bundle whose manifest does not exist in the catalog.
+    ops::add_item(
+        &project,
+        &catalog,
+        ItemType::Skill,
+        "a",
+        Mode::Symlink,
+        Some("ghost"),
+    )
+    .unwrap();
+
+    let health = ops::bundle_health(&project, Some(&catalog)).unwrap();
+    assert_eq!(health.len(), 1);
+    let ghost = &health[0];
+    assert_eq!(ghost.name, "ghost");
+    assert_eq!(ghost.state, BundleState::Unknown);
+    assert_eq!(ghost.expected, None);
+    assert_eq!(ghost.installed, 1);
+    assert!(ghost.missing.is_empty());
 }

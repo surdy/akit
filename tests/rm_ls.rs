@@ -182,5 +182,8 @@ fn cli_status_outputs_json_without_catalog() {
         "akit failed: {}",
         String::from_utf8_lossy(&output.stderr)
     );
-    assert_eq!(String::from_utf8_lossy(&output.stdout), "[]\n");
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        "{\"items\":[],\"bundles\":[]}\n"
+    );
 }

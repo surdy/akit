@@ -102,6 +102,124 @@ pub struct ListItem {
     pub status: HealthStatus,
 }
 
+/// Whether an installed bundle has all its manifest members present.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum BundleState {
+    /// Every member declared by `bundles/<name>.yml` is installed.
+    Complete,
+    /// Some declared members are not installed.
+    Partial,
+    /// The bundle manifest could not be read, so completeness is undetermined.
+    Unknown,
+}
+
+/// Completeness of one installed bundle, comparing the project lockfile's
+/// bundle-tagged entries against the catalog `bundles/<name>.yml` manifest.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct BundleHealth {
+    pub name: String,
+    /// Members declared by the manifest; `None` when the manifest is unreadable.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expected: Option<usize>,
+    /// Manifest members currently present in the lockfile.
+    pub installed: usize,
+    /// Declared members not installed (ids only); empty for `Complete`/`Unknown`.
+    pub missing: Vec<String>,
+    pub state: BundleState,
+}
+
+/// Report per-bundle completeness for every bundle referenced by the project lockfile.
+///
+/// See [`bundle_health_from_items`] for the semantics; this loads the lockfile first.
+pub fn bundle_health(project: &Project, catalog: Option<&Catalog>) -> Result<Vec<BundleHealth>> {
+    let lockfile = Lockfile::load(&project.lockfile_path())?;
+    Ok(bundle_health_from_items(&lockfile.items, catalog))
+}
+
+/// Compute per-bundle completeness from already-loaded lockfile items.
+///
+/// For each distinct bundle tag among `items`, the manifest `bundles/<name>.yml`
+/// is loaded and its declared members compared to what is installed. A bundle
+/// whose manifest is missing or unreadable (or when no catalog is available)
+/// degrades to [`BundleState::Unknown`] with a stderr warning, rather than
+/// failing the whole report. This never mutates the lockfile or the manifest.
+pub fn bundle_health_from_items(
+    items: &[LockItem],
+    catalog: Option<&Catalog>,
+) -> Vec<BundleHealth> {
+    // Distinct bundle names, sorted, preserving determinism.
+    let mut names: Vec<&str> = items
+        .iter()
+        .filter_map(|i| i.bundle.as_deref())
+        .collect::<HashSet<_>>()
+        .into_iter()
+        .collect();
+    names.sort_unstable();
+
+    names
+        .into_iter()
+        .map(|name| {
+            // (type, id) pairs installed under this bundle tag.
+            let installed_members: HashSet<(ItemType, &str)> = items
+                .iter()
+                .filter(|i| i.bundle.as_deref() == Some(name))
+                .map(|i| (i.item_type, i.id.as_str()))
+                .collect();
+
+            match catalog.map(|c| bundle::load(c, name)) {
+                Some(Ok(manifest)) => {
+                    let mut missing: Vec<String> = manifest
+                        .items
+                        .iter()
+                        .filter(|m| !installed_members.contains(&(m.item_type, m.id.as_str())))
+                        .map(|m| m.id.clone())
+                        .collect();
+                    missing.sort_unstable();
+                    let expected = manifest.items.len();
+                    let installed = expected - missing.len();
+                    let state = if missing.is_empty() {
+                        BundleState::Complete
+                    } else {
+                        BundleState::Partial
+                    };
+                    BundleHealth {
+                        name: name.to_string(),
+                        expected: Some(expected),
+                        installed,
+                        missing,
+                        state,
+                    }
+                }
+                Some(Err(err)) => {
+                    eprintln!(
+                        "warning: bundle '{name}': manifest unreadable ({err}); reporting state 'unknown'"
+                    );
+                    BundleHealth {
+                        name: name.to_string(),
+                        expected: None,
+                        installed: installed_members.len(),
+                        missing: Vec::new(),
+                        state: BundleState::Unknown,
+                    }
+                }
+                None => {
+                    eprintln!(
+                        "warning: bundle '{name}': catalog not found; reporting state 'unknown'"
+                    );
+                    BundleHealth {
+                        name: name.to_string(),
+                        expected: None,
+                        installed: installed_members.len(),
+                        missing: Vec::new(),
+                        state: BundleState::Unknown,
+                    }
+                }
+            }
+        })
+        .collect()
+}
+
 /// One skill or agent present in the catalog, as listed by `catalog ls`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct CatalogItem {
