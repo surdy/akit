@@ -12,8 +12,10 @@ GitHub Copilot CLI. The newer **harness-aware** commands
 [`uninstall`](#uninstall--remove-a-harness-aware-install) /
 [`installed`](#installed--list-harness-aware-installs-and-their-health) /
 [`reset`](#reset--remove-every-harness-aware-install) /
-[`verify`](#verify--check-harness-support-on-this-host)) materialize into **each** selected
-harness's own discovery paths across Copilot, Claude Code, Codex, Gemini, and OpenCode — see
+[`verify`](#verify--check-harness-support-on-this-host) /
+[`repair`/`detach`/`forget`/`adopt`](#repair--detach--forget--adopt--maintain-akit-ownership))
+materialize into **each** selected harness's own discovery paths across Copilot, Claude Code,
+Codex, Gemini, and OpenCode — see
 [Harness-aware commands](#harness-aware-commands-the-akit-engine).
 
 ## Install / build
@@ -1141,6 +1143,70 @@ With `--json`, `verify` emits an array of `HostVerification` objects (`harness`,
 `binary`, `present`, `version`, `minVersion`, `versionOk`, `skillSupported`, `agentSupported`,
 `verified`, `detail` — camelCase keys). The same routine is what an embedding host runs against a
 remote host over SSH before enabling kit support there.
+
+### `repair` / `detach` / `forget` / `adopt` — maintain `.akit` ownership
+
+Where [`installed`](#installed--list-harness-aware-installs-and-their-health) *reports* drift
+read-only, these commands *act* on it. Every one operates strictly on the ownership recorded in
+`.akit/kit.lock.json`: they never overwrite, delete, or claim unmanaged bytes without an exact
+content match, so they are always safe to run.
+
+```bash
+akit repair
+```
+
+Re-materializes every **missing** akit-owned file from its catalog source and resyncs the managed
+`.git/info/exclude` block (pruning stale lines). A locally **modified** copy is a conflict and is
+left untouched; an item whose catalog source is gone is reported, not repaired. This is the
+"put it back the way the lockfile says" command.
+
+```bash
+$ akit repair
+Restored 1 missing file(s):
+  .agents/skills/deploy-to-vercel
+Skipped 1 locally-modified file(s) (not overwritten):
+  .claude/agents/reviewer.md
+```
+
+With `--json`, `repair` emits a `RepairReport` (`restored_paths`, `skipped_modified`,
+`missing_source`).
+
+```bash
+akit detach [--agent] <id>
+```
+
+Drops akit's ownership of an item while **keeping its files on disk**, and removes its managed
+exclude lines so Git can now see them. Use this to "graduate" a materialized skill/agent into
+tracked project files that you maintain yourself.
+
+```bash
+akit forget [--agent] <id>
+```
+
+Drops an **orphaned** ownership record (e.g. whose files you already deleted by hand) without
+touching any files, then resyncs the exclude block. Reports cleanly when there is no such record.
+
+```bash
+akit adopt [--agent] [--harness <id> …] <id>
+```
+
+The inverse of a lost lockfile: claims **already-present, exact-content** files as akit-owned
+without rewriting a byte — the safe recovery when `.akit/kit.lock.json` was deleted but the
+materialized files still match the catalog. A destination that exists but differs is reported as a
+conflict and never overwritten; an absent destination is simply not adopted (use `install`
+instead). Target harnesses resolve exactly as they do for
+[`install`](#target-harness-selection) (`--harness`/`-H` → `AKIT_HARNESSES` →
+`.akit/config.json` → interactive picker).
+
+```bash
+$ akit adopt -H copilot deploy-to-vercel
+Adopted skill 'deploy-to-vercel' for copilot:
+  .agents/skills/deploy-to-vercel
+```
+
+All three of `detach`/`forget`/`adopt` accept `--json` (`detach`/`forget` emit a `DetachReport`
+with `id`, `type`, `paths`, `not_installed`; `adopt` emits an `AdoptReport` with `harnesses`,
+`adopted_paths`, `conflicts`).
 
 ## How it stays out of your repo
 

@@ -179,6 +179,39 @@ enum Commands {
     },
     /// Probe + statically verify harness support on this host (no model/LLM).
     Verify,
+    /// Re-materialize missing akit-owned files and prune stale git-exclude lines.
+    ///
+    /// Operates only on paths recorded in `.akit/kit.lock.json`. Locally modified
+    /// copies are conflicts and are never overwritten; items whose catalog source
+    /// is gone are reported, not touched.
+    Repair,
+    /// Stop managing an install but keep its files on disk (make them git-visible).
+    Detach {
+        /// Detach an agent instead of a skill.
+        #[arg(long)]
+        agent: bool,
+        /// Catalog id of the installed skill/agent to detach.
+        id: String,
+    },
+    /// Drop an orphaned ownership record whose files are already gone.
+    Forget {
+        /// Forget an agent instead of a skill.
+        #[arg(long)]
+        agent: bool,
+        /// Catalog id of the ownership record to forget.
+        id: String,
+    },
+    /// Claim already-present, exact-content files as akit-owned (lost-lockfile recovery).
+    Adopt {
+        /// Adopt an agent instead of a skill.
+        #[arg(long)]
+        agent: bool,
+        /// Target harness (repeatable). Overrides `AKIT_HARNESSES` and `.akit/config.json`.
+        #[arg(long = "harness", short = 'H', value_name = "ID")]
+        harnesses: Vec<String>,
+        /// Catalog id of the skill/agent to adopt.
+        id: String,
+    },
 }
 
 fn main() {
@@ -550,6 +583,49 @@ fn run() -> Result<()> {
                 }
             }
         }
+        Commands::Repair => {
+            let project = Project::locate(cli.project.clone())?;
+            let catalog = Catalog::locate()?;
+            let report = akit::reconcile::repair(&project, &catalog)?;
+            if cli.json {
+                println!("{}", serde_json::to_string(&report)?);
+            } else {
+                print_repair_report(&report);
+            }
+        }
+        Commands::Detach { agent, id } => {
+            let project = Project::locate(cli.project.clone())?;
+            let report = akit::reconcile::detach(&project, item_type(*agent), id)?;
+            if cli.json {
+                println!("{}", serde_json::to_string(&report)?);
+            } else {
+                print_detach_report(&report, DropKind::Detach);
+            }
+        }
+        Commands::Forget { agent, id } => {
+            let project = Project::locate(cli.project.clone())?;
+            let report = akit::reconcile::forget(&project, item_type(*agent), id)?;
+            if cli.json {
+                println!("{}", serde_json::to_string(&report)?);
+            } else {
+                print_detach_report(&report, DropKind::Forget);
+            }
+        }
+        Commands::Adopt {
+            agent,
+            harnesses,
+            id,
+        } => {
+            let project = Project::locate(cli.project.clone())?;
+            let catalog = Catalog::locate()?;
+            let ctx = resolve_install_harnesses(harnesses, &project)?;
+            let report = akit::reconcile::adopt(&project, &catalog, item_type(*agent), id, &ctx)?;
+            if cli.json {
+                println!("{}", serde_json::to_string(&report)?);
+            } else {
+                print_adopt_report(&report);
+            }
+        }
     }
     Ok(())
 }
@@ -916,6 +992,105 @@ fn print_stale_excludes(stale: &[String]) {
     println!("Stale exclude lines (not owned by any install):");
     for line in stale {
         println!("  {line}");
+    }
+}
+
+fn print_repair_report(report: &akit::reconcile::RepairReport) {
+    if report.restored_paths.is_empty()
+        && report.skipped_modified.is_empty()
+        && report.missing_source.is_empty()
+    {
+        println!("Nothing to repair — all akit-owned files are present.");
+        return;
+    }
+    if !report.restored_paths.is_empty() {
+        println!("Restored {} missing file(s):", report.restored_paths.len());
+        for p in &report.restored_paths {
+            println!("  {p}");
+        }
+    }
+    if !report.skipped_modified.is_empty() {
+        println!(
+            "Skipped {} locally-modified file(s) (not overwritten):",
+            report.skipped_modified.len()
+        );
+        for p in &report.skipped_modified {
+            println!("  {p}");
+        }
+    }
+    if !report.missing_source.is_empty() {
+        println!(
+            "Cannot repair {} item(s) — catalog source is gone:",
+            report.missing_source.len()
+        );
+        for id in &report.missing_source {
+            println!("  {id}");
+        }
+    }
+}
+
+/// Which ownership-drop verb produced a [`DetachReport`], for phrasing output.
+enum DropKind {
+    Detach,
+    Forget,
+}
+
+fn print_detach_report(report: &akit::reconcile::DetachReport, kind: DropKind) {
+    if report.not_installed {
+        println!(
+            "{} '{}' has no akit ownership record.",
+            title_case(type_name(report.item_type)),
+            report.id
+        );
+        return;
+    }
+    match kind {
+        DropKind::Detach => println!(
+            "Detached {} '{}' — {} file(s) kept on disk and made git-visible.",
+            type_name(report.item_type),
+            report.id,
+            report.paths.len()
+        ),
+        DropKind::Forget => println!(
+            "Forgot {} '{}' — dropped {} ownership record(s).",
+            type_name(report.item_type),
+            report.id,
+            report.paths.len()
+        ),
+    }
+    for p in &report.paths {
+        println!("  {p}");
+    }
+}
+
+fn print_adopt_report(report: &akit::reconcile::AdoptReport) {
+    if report.adopted_paths.is_empty() && report.conflicts.is_empty() {
+        println!(
+            "Nothing to adopt for {} '{}' — no matching files on disk.",
+            type_name(report.item_type),
+            report.id
+        );
+        return;
+    }
+    if !report.adopted_paths.is_empty() {
+        println!(
+            "Adopted {} '{}' for {}:",
+            type_name(report.item_type),
+            report.id,
+            covers_str(&report.harnesses)
+        );
+        for p in &report.adopted_paths {
+            println!("  {p}");
+        }
+    }
+    if !report.conflicts.is_empty() {
+        println!(
+            "Skipped {} file(s) that differ from the catalog source (not overwritten):",
+            report.conflicts.len()
+        );
+        for p in &report.conflicts {
+            println!("  {p}");
+        }
     }
 }
 

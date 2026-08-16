@@ -301,6 +301,81 @@ fn install_prints_per_harness_reload_for_agents() {
 }
 
 #[test]
+fn repair_restores_a_deleted_materialization() {
+    let (_tmp, catalog, project) = setup();
+    akit(&project, &catalog, &["install", "-H", "copilot", "demo"]);
+    let mat = project.join(".agents/skills/demo");
+    fs::remove_dir_all(&mat).unwrap();
+
+    let (out, ok) = akit(&project, &catalog, &["repair"]);
+    assert!(ok, "repair failed:\n{out}");
+    assert!(out.contains("Restored"), "no restore line:\n{out}");
+    assert!(mat.join("SKILL.md").exists(), "file not restored");
+    // Health is clean again.
+    let (listed, _) = akit(&project, &catalog, &["installed"]);
+    assert!(listed.contains("Health: ok"), "not healthy:\n{listed}");
+}
+
+#[test]
+fn repair_leaves_locally_modified_files_untouched() {
+    let (_tmp, catalog, project) = setup();
+    akit(&project, &catalog, &["install", "-H", "copilot", "demo"]);
+    let skill = project.join(".agents/skills/demo/SKILL.md");
+    fs::write(&skill, "edited by user").unwrap();
+
+    let (json, ok) = akit(&project, &catalog, &["--json", "repair"]);
+    assert!(ok, "repair failed:\n{json}");
+    let v: serde_json::Value = serde_json::from_str(&json).expect("RepairReport json");
+    assert_eq!(v["skipped_modified"][0], ".agents/skills/demo", "{json}");
+    assert!(v["restored_paths"].as_array().unwrap().is_empty(), "{json}");
+    assert_eq!(fs::read_to_string(&skill).unwrap(), "edited by user");
+}
+
+#[test]
+fn detach_keeps_files_and_drops_ownership() {
+    let (_tmp, catalog, project) = setup();
+    akit(&project, &catalog, &["install", "-H", "copilot", "demo"]);
+    let mat = project.join(".agents/skills/demo");
+
+    let (out, ok) = akit(&project, &catalog, &["detach", "demo"]);
+    assert!(ok, "detach failed:\n{out}");
+    assert!(out.contains("Detached"), "no detach line:\n{out}");
+    // Bytes preserved, ownership gone.
+    assert!(mat.join("SKILL.md").exists(), "files should be kept");
+    let (listed, _) = akit(&project, &catalog, &["installed"]);
+    assert!(
+        listed.contains("No harness-aware installs"),
+        "still owned:\n{listed}"
+    );
+}
+
+#[test]
+fn forget_reports_when_no_record_exists() {
+    let (_tmp, catalog, project) = setup();
+    let (json, ok) = akit(&project, &catalog, &["--json", "forget", "ghost"]);
+    assert!(ok, "forget failed:\n{json}");
+    let v: serde_json::Value = serde_json::from_str(&json).expect("DetachReport json");
+    assert_eq!(v["not_installed"], true, "{json}");
+}
+
+#[test]
+fn adopt_reclaims_ownership_after_lost_lockfile() {
+    let (_tmp, catalog, project) = setup();
+    akit(&project, &catalog, &["install", "-H", "copilot", "demo"]);
+    // Simulate a lost lockfile while the materialized files remain intact.
+    fs::remove_file(project.join(".akit/kit.lock.json")).unwrap();
+    let (listed, _) = akit(&project, &catalog, &["installed"]);
+    assert!(listed.contains("No harness-aware installs"), "{listed}");
+
+    let (out, ok) = akit(&project, &catalog, &["adopt", "-H", "copilot", "demo"]);
+    assert!(ok, "adopt failed:\n{out}");
+    assert!(out.contains("Adopted"), "no adopt line:\n{out}");
+    let (listed, _) = akit(&project, &catalog, &["installed"]);
+    assert!(listed.contains("demo"), "not re-adopted:\n{listed}");
+    assert!(listed.contains("Health: ok"), "not healthy:\n{listed}");
+}
+
+#[test]
 fn reset_preview_lists_owned_paths_before_refusing_non_interactively() {
     let (_tmp, catalog, project) = setup();
     akit(&project, &catalog, &["install", "-H", "copilot", "demo"]);
