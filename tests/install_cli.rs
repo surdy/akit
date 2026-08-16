@@ -170,3 +170,54 @@ fn reset_removes_all_owned_files() {
         "installed after reset:\n{listed}"
     );
 }
+
+#[test]
+fn installed_reports_ok_health_and_health_report_json() {
+    let (_tmp, catalog, project) = setup();
+    akit(
+        &project,
+        &catalog,
+        &["install", "-H", "copilot", "-H", "codex", "demo"],
+    );
+
+    let (listed, ok) = akit(&project, &catalog, &["installed"]);
+    assert!(ok, "installed failed:\n{listed}");
+    assert!(listed.contains("HEALTH"), "no health column:\n{listed}");
+    assert!(listed.contains("copilot, codex"), "harnesses:\n{listed}");
+    assert!(
+        listed.contains("Health: ok"),
+        "expected ok health:\n{listed}"
+    );
+
+    let (json, ok) = akit(&project, &catalog, &["--json", "installed"]);
+    assert!(ok);
+    let v: serde_json::Value = serde_json::from_str(&json).expect("HealthReport json");
+    assert_eq!(v["healthy"], true, "{json}");
+    assert_eq!(v["items"][0]["id"], "demo", "{json}");
+    assert_eq!(v["items"][0]["degraded"], false, "{json}");
+}
+
+#[test]
+fn installed_reports_degraded_when_a_materialization_is_deleted() {
+    let (_tmp, catalog, project) = setup();
+    akit(&project, &catalog, &["install", "-H", "copilot", "demo"]);
+    // The single shared destination for copilot is `.agents/skills/demo`.
+    let mat = project.join(".agents/skills/demo");
+    assert!(mat.exists());
+    fs::remove_dir_all(&mat).unwrap();
+
+    let (listed, ok) = akit(&project, &catalog, &["installed"]);
+    assert!(ok, "installed failed:\n{listed}");
+    assert!(listed.contains("degraded"), "expected degraded:\n{listed}");
+    assert!(
+        listed.contains("uncovered: copilot"),
+        "uncovered harness:\n{listed}"
+    );
+
+    let (json, ok) = akit(&project, &catalog, &["--json", "installed"]);
+    assert!(ok);
+    let v: serde_json::Value = serde_json::from_str(&json).expect("HealthReport json");
+    assert_eq!(v["healthy"], false, "{json}");
+    assert_eq!(v["items"][0]["degraded"], true, "{json}");
+    assert_eq!(v["items"][0]["source_present"], true, "{json}");
+}

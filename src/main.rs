@@ -481,11 +481,15 @@ fn run() -> Result<()> {
         }
         Commands::Installed => {
             let project = Project::locate(cli.project.clone())?;
-            let lock = akit::ownership::AkitLockfile::load(&project.akit_lockfile_path())?;
+            // The catalog is needed to tell whether each install's source still
+            // exists; health also reports per-materialization drift and degraded
+            // (uncovered) harnesses.
+            let catalog = Catalog::locate()?;
+            let report = akit::reconcile::health(&project, &catalog)?;
             if cli.json {
-                println!("{}", serde_json::to_string(&lock.items)?);
+                println!("{}", serde_json::to_string(&report)?);
             } else {
-                print_installed_table(&lock.items);
+                print_installed_health(&report);
             }
         }
         Commands::Reset { yes } => {
@@ -713,24 +717,96 @@ fn print_uninstall_report(report: &install::RemoveReport) {
     }
 }
 
-fn print_installed_table(items: &[akit::ownership::Installation]) {
-    if items.is_empty() {
+/// Per-item health label + the harnesses left uncovered when degraded.
+fn item_health_label(item: &akit::reconcile::ItemHealth) -> String {
+    if !item.source_present {
+        return "missing-source".to_string();
+    }
+    if !item.degraded {
+        return "ok".to_string();
+    }
+    // Harnesses covered by at least one clean materialization.
+    let mut clean: Vec<HarnessId> = Vec::new();
+    for m in &item.materializations {
+        if m.drift == akit::materialize::Drift::Clean {
+            for h in &m.covers {
+                if !clean.contains(h) {
+                    clean.push(*h);
+                }
+            }
+        }
+    }
+    let uncovered: Vec<&str> = item
+        .harnesses
+        .iter()
+        .filter(|h| !clean.contains(h))
+        .map(|h| h.as_str())
+        .collect();
+    if uncovered.is_empty() {
+        "degraded".to_string()
+    } else {
+        format!("degraded (uncovered: {})", uncovered.join(", "))
+    }
+}
+
+fn print_installed_health(report: &akit::reconcile::HealthReport) {
+    if report.items.is_empty() {
         println!("No harness-aware installs in this project.");
+        if !report.stale_excludes.is_empty() {
+            print_stale_excludes(&report.stale_excludes);
+        }
         return;
     }
-    println!("{:<28} {:<7} HARNESSES", "ID", "TYPE");
-    for item in items {
+    println!("{:<28} {:<7} {:<24} HEALTH", "ID", "TYPE", "HARNESSES");
+    let mut degraded = 0usize;
+    let mut missing_source = 0usize;
+    for item in &report.items {
         let harnesses = item
             .harnesses
             .iter()
             .map(|h| h.as_str())
             .collect::<Vec<_>>()
             .join(", ");
+        let health = item_health_label(item);
+        if !item.source_present {
+            missing_source += 1;
+        } else if item.degraded {
+            degraded += 1;
+        }
         println!(
-            "{:<28} {:<7} {harnesses}",
+            "{:<28} {:<7} {:<24} {health}",
             item.id,
-            type_name(item.item_type)
+            type_name(item.item_type),
+            harnesses
         );
+    }
+    if !report.stale_excludes.is_empty() {
+        print_stale_excludes(&report.stale_excludes);
+    }
+    if report.healthy {
+        println!("Health: ok");
+    } else {
+        let mut parts = Vec::new();
+        if degraded > 0 {
+            parts.push(format!("{degraded} degraded"));
+        }
+        if missing_source > 0 {
+            parts.push(format!("{missing_source} missing-source"));
+        }
+        if !report.stale_excludes.is_empty() {
+            parts.push(format!(
+                "{} stale exclude line(s)",
+                report.stale_excludes.len()
+            ));
+        }
+        println!("Health: {}", parts.join(", "));
+    }
+}
+
+fn print_stale_excludes(stale: &[String]) {
+    println!("Stale exclude lines (not owned by any install):");
+    for line in stale {
+        println!("  {line}");
     }
 }
 
