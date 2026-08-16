@@ -4,11 +4,19 @@ A standalone, harness-agnostic CLI for **on-demand personal agent customizations
 
 Keep your skills and custom agents in one central catalog, or pull a remote
 `owner/repo/path[#ref]` source through the git-fetch cache, then activate only the ones you
-need in a project on demand — one at a time or as named bundles — materialized into
-`.github/{skills,agents}` via **symlink** or `akit add --copy` (with auto copy fallback on
-symlink failure), kept **personal +
-gitignored** (`.git/info/exclude`), and tracked by a per-project **lockfile**. Remove them just
-as easily.
+need in a project on demand — one at a time or as named bundles — kept **personal + gitignored**
+(`.git/info/exclude`) and tracked by a per-project **lockfile**. Remove them just as easily.
+
+akit ships two command families:
+
+- **Legacy (Copilot-shaped):** `add`/`rm`/`status`/`sync`/`doctor` materialize into
+  `.github/{skills,agents}` via **symlink** or `akit add --copy` (with auto copy fallback on
+  symlink failure), tracked in `.copilot/kit.lock.json`.
+- **Harness-aware (shipped):** `install`/`uninstall`/`installed`/`reset`/`verify` materialize an
+  item into **each** selected harness's own discovery paths — across **GitHub Copilot CLI,
+  Claude Code, OpenAI Codex CLI, Gemini CLI, and OpenCode** — sharing a directory when several
+  harnesses read the same one, tracked in `.akit/kit.lock.json`. `akit verify` checks which of
+  the five are actually usable on the host. See [`docs/usage.md`](docs/usage.md#harness-aware-commands-the-akit-engine).
 
 > Status/Usage: see [`docs/usage.md`](docs/usage.md). Design + plan in [`docs/design.md`](docs/design.md).
 > Embedding akit as a library: see [`docs/embedding.md`](docs/embedding.md).
@@ -37,7 +45,9 @@ See [`docs/design.md`](docs/design.md) for the full design, decisions, and Phase
 - **Phase 2 — pterm GUI**: search palette, per-project "active kits" panel, launch-dialog hook.
 - **Phase 3 — multiple sources / APM backend**: `owner/repo/path[#ref]` manifests. The current
   stretch implementation proves that source shape with a git-fetch cache, pending APM.
-- **Phase 4 — cross-harness**: Codex / Claude targets.
+- **Phase 4 — cross-harness (shipped)**: the harness-aware `install`/`uninstall`/`installed`/
+  `reset`/`verify` family targets Copilot, Claude, Codex, Gemini, and OpenCode, materializing
+  into each harness's own discovery paths and tracking ownership in `.akit/kit.lock.json`.
 
 ## Shared contracts (frozen by issue #1, the walking skeleton)
 

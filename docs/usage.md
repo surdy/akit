@@ -3,6 +3,19 @@
 `akit` pulls personal agent customizations (skills and custom agents) from a central
 **catalog** into a project on demand, kept personal and gitignored, tracked by a lockfile.
 
+It exposes two command families. The **legacy** commands
+([`add`](#add--pull-a-skill-or-agent-into-the-project) / [`rm`](#rm--remove-a-skill-or-agent-from-the-project)
+/ [`status`](#status--list-installed-items) / [`sync`](#sync--repair-safe-lockfilefilesystemexclude-drift)
+/ [`doctor`](#doctor--read-only-reconcile-report)) materialize into `.github/{skills,agents}` for
+GitHub Copilot CLI. The newer **harness-aware** commands
+([`install`](#install--install-a-skill-or-agent-for-one-or-more-harnesses) /
+[`uninstall`](#uninstall--remove-a-harness-aware-install) /
+[`installed`](#installed--list-harness-aware-installs-and-their-health) /
+[`reset`](#reset--remove-every-harness-aware-install) /
+[`verify`](#verify--check-harness-support-on-this-host)) materialize into **each** selected
+harness's own discovery paths across Copilot, Claude Code, Codex, Gemini, and OpenCode — see
+[Harness-aware commands](#harness-aware-commands-the-akit-engine).
+
 ## Install / build
 
 ```bash
@@ -833,8 +846,306 @@ For `ls`, `--json` emits a stable array of objects:
 `type` is `"skill"` or `"agent"`. `description` is the frontmatter description (empty when
 absent). `source` is present only for pulled items; hand-authored (local) items omit it.
 
+## Harness-aware commands (the `.akit` engine)
+
+The commands above (`add`/`rm`/`status`/`sync`/`doctor`) are the **legacy, Copilot-shaped**
+family: they materialize into `.github/{skills,agents}` and track ownership in
+`.copilot/kit.lock.json`. Alongside them, akit ships a **harness-aware install engine** that
+materializes an item into **each selected harness's own discovery paths** — GitHub Copilot CLI,
+Claude Code, OpenAI Codex CLI, Gemini CLI, and OpenCode — and tracks that in a separate,
+local-only `.akit/kit.lock.json`.
+
+- **Skills** are portable `SKILL.md` directories, and several harnesses read the *same* project
+  directory, so a single materialization can serve several harnesses. The planner runs a set
+  cover over the registry's skill paths to minimize physical copies:
+
+  | Path | Discovered by |
+  |---|---|
+  | `.agents/skills/<id>` | copilot, codex, gemini, opencode |
+  | `.claude/skills/<id>` | copilot, claude, opencode |
+
+  Installing for all five harnesses therefore needs exactly **two** directories
+  (`.agents/skills` + `.claude/skills`). No shared skill path is symlink-verified end-to-end
+  yet, so skills materialize as **copies**.
+
+- **Custom agents** share nothing — every harness uses a proprietary directory, filename, and
+  format — so an agent is materialized **once per harness** from an explicit native variant:
+
+  | Harness | Agent destination | Format |
+  |---|---|---|
+  | copilot | `.github/agents/<id>.agent.md` | Markdown + YAML |
+  | claude | `.claude/agents/<id>.md` | Markdown + YAML |
+  | codex | `.codex/agents/<id>.toml` | TOML |
+  | gemini | `.gemini/agents/<id>.md` | Markdown + YAML |
+  | opencode | `.opencode/agent/<id>.md` (probe-gated) | Markdown + YAML |
+
+  Harness-aware agents come from a catalog **agent package** — a directory `agents/<id>/`
+  holding an `agent.yml` descriptor plus one native file per harness it supports. akit copies a
+  variant's bytes **verbatim**; it never converts one format to another. (This is a distinct
+  catalog shape from the legacy `agents/<id>.agent.md` single file that
+  [`add`](#add--pull-a-skill-or-agent-into-the-project) / [`pull`](#pull--fetch-a-remote-source-into-the-catalog)
+  use.) A selected harness with no matching variant — or OpenCode's probe-gated target, whose
+  exact directory is version-dependent — is reported as a **skipped** issue, not installed.
+
+Everything the engine writes (both materializations and the `.akit/kit.lock.json` itself) is
+added to `.git/info/exclude`, so it never touches your tracked `.gitignore` and `git status`
+stays clean.
+
+### Target harness selection
+
+`install` needs a target harness set. It is resolved in this precedence order, first match wins:
+
+1. Explicit `--harness`/`-H` flags (repeatable; each value may itself be a comma/space-separated
+   list, e.g. `-H claude,codex`).
+2. The `AKIT_HARNESSES` environment variable (a comma/space-separated list).
+3. A project's `.akit/config.json` `harnesses` array.
+4. An interactive picker (only when stdin is a terminal).
+
+When none of these yields a harness **and** stdin is not a terminal, `install` fails with an
+actionable message rather than hanging — pass `--harness`, set `AKIT_HARNESSES`, or add
+`harnesses` to `.akit/config.json`. Unknown ids are rejected with the supported list.
+
+`.akit/config.json` records per-project defaults:
+
+```json
+{ "harnesses": ["copilot", "claude"] }
+```
+
+Only the five supported ids are accepted (`copilot`, `claude`, `codex`, `gemini`, `opencode`);
+an unknown id makes the config fail to load. `AKIT_HARNESSES` overrides the config, and explicit
+flags override both:
+
+```bash
+export AKIT_HARNESSES="claude codex"
+akit install deploy-to-vercel            # installs for claude + codex
+akit install -H claude deploy-to-vercel  # flags win: claude only
+```
+
+### `install` — install a skill or agent for one or more harnesses
+
+```bash
+akit install [--agent] [-H <id>]... [--dry-run] <id>
+```
+
+Installs (or reshapes) catalog item `<id>` for exactly the resolved harness set. `install` is
+**absolute**: it makes the item's installed harness set *exactly* the target set, adding
+newly-needed materializations and removing now-unneeded ones. Adding or dropping a harness is
+therefore just a re-install with the new set — re-running with a different `-H` set **reshapes**
+the install (reported as `Reshaped` rather than `Installed`).
+
+- Materializations are written as one atomic transaction: if any destination is occupied by a
+  pre-existing **foreign** file (one akit doesn't own and whose bytes don't already match the
+  source), the whole install is refused and nothing is written. A destination that already
+  exists with byte-identical content is safely **adopted** (no rewrite).
+- After a real install, `install` prints per-harness **reload/restart guidance**. For agents it
+  is precise per harness (Claude picks agents up live; Copilot needs a restart; Codex/Gemini are
+  treated conservatively as restart). Skills get a single honest, harness-agnostic hint (start a
+  new session or run your harness's skills-reload command).
+- Skipped harnesses (incompatible skill, missing agent variant, probe-gated target) are listed
+  under `skipped:` and simply not served.
+
+```bash
+$ akit install -H copilot -H claude deploy-to-vercel
+Installed skill 'deploy-to-vercel' for copilot, claude
+  .claude/skills/deploy-to-vercel  (copilot, claude)
+reload:
+  skills: start a new session (or run your harness's skills-reload command) if it does not appear
+
+$ akit install -H claude deploy-to-vercel
+Reshaped skill 'deploy-to-vercel' for claude
+  .claude/skills/deploy-to-vercel  (claude)
+reload:
+  skills: start a new session (or run your harness's skills-reload command) if it does not appear
+```
+
+#### `--dry-run` — preview the plan
+
+`--dry-run` computes the plan, diffs it against the current `.akit/kit.lock.json`, and prints
+what *would* happen **without changing anything**: materializations to `create`, ones already
+present and `unchanged`, paths a reshape would `remove`, and selected harnesses that would be
+`skipped`.
+
+```bash
+$ akit install --dry-run -H claude deploy-to-vercel
+Plan: skill 'deploy-to-vercel' for claude  (reshapes an existing install)
+  create:
+    .claude/skills/deploy-to-vercel  (claude)  [copy]
+  remove (reshape):
+    .agents/skills/deploy-to-vercel
+(dry run — nothing changed; re-run without --dry-run to apply)
+```
+
+With `--json`, `--dry-run` emits the `InstallPreview` object:
+
+```json
+{
+  "id": "deploy-to-vercel",
+  "item_type": "skill",
+  "harnesses": ["claude"],
+  "create": [
+    {
+      "path": ".claude/skills/deploy-to-vercel",
+      "mode": "copy",
+      "covers": ["claude"],
+      "kind": "skill_dir",
+      "source_file": null
+    }
+  ],
+  "unchanged": [],
+  "remove": [".agents/skills/deploy-to-vercel"],
+  "issues": [],
+  "replaces": true
+}
+```
+
+`item_type` is `"skill"` or `"agent"`; `mode` is `"copy"` or `"symlink"`; `kind` is `"skill_dir"`
+or `"agent_file"`; `source_file` is the package-relative variant file for agents and `null` for
+skills. `replaces` is `true` when an existing install would be reshaped. Each `issues` entry is
+`{ "harness", "reason" }` where `reason` is `"skill_incompatible"`, `"no_agent_variant"`, or
+`"needs_probe"`.
+
+A **real** `install` (no `--dry-run`) with `--json` emits the `InstallReport` object — the served
+`harnesses`, the `materializations` now backing the install (each
+`{ "path", "mode", "covers" }`, plus `"hash"` for copies), any `issues`, `replaced` (an existing
+install was reshaped), and `not_a_git_repo`.
+
+### `uninstall` — remove a harness-aware install
+
+```bash
+akit uninstall [--agent] [-H <id>]... <id>
+```
+
+- With **no** `-H`, fully uninstalls `<id>`: removes every materialization and drops the
+  installation from `.akit/kit.lock.json`.
+- With `-H`, removes only those harnesses and **reshapes** the rest — a shared path is kept as
+  long as any remaining harness still needs it, and dropped once none do.
+- Removing something that isn't installed exits successfully (`not_installed`).
+
+```bash
+$ akit uninstall deploy-to-vercel
+Uninstalled skill 'deploy-to-vercel' (1 file(s) removed)
+
+$ akit uninstall -H claude deploy-to-vercel
+Removed skill 'deploy-to-vercel' from selected harness(es); still installed for copilot, codex
+```
+
+With `--json`, `uninstall` emits the `RemoveReport` object: `id`, `item_type`, `removed_paths`,
+`remaining_harnesses` (empty on a full uninstall), and `not_installed`.
+
+### `installed` — list harness-aware installs and their health
+
+```bash
+akit installed
+```
+
+Lists every install recorded in `.akit/kit.lock.json`, one row per item with its type, the
+harnesses it serves, and a per-item **HEALTH** value:
+
+- `ok` — every selected harness is covered by a clean materialization.
+- `degraded (uncovered: …)` — a materialization is missing or modified, leaving the listed
+  harnesses without a clean covering copy.
+- `missing-source` — the catalog no longer provides this item's source.
+
+Below the table it lists any **stale exclude lines** (managed `.git/info/exclude` entries no
+longer owned by any install) and an overall `Health:` line. `installed` needs a locatable
+catalog (it reads sources to tell whether each install's source still exists).
+
+```bash
+$ akit installed
+ID                           TYPE    HARNESSES                HEALTH
+deploy-to-vercel             skill   copilot, claude          ok
+reviewer                     agent   codex                    degraded (uncovered: codex)
+Health: 1 degraded
+```
+
+With `--json`, `installed` emits the `HealthReport` object:
+
+```json
+{
+  "items": [
+    {
+      "id": "deploy-to-vercel",
+      "type": "skill",
+      "source": "local",
+      "harnesses": ["copilot", "claude"],
+      "materializations": [
+        {
+          "path": ".claude/skills/deploy-to-vercel",
+          "mode": "copy",
+          "covers": ["copilot", "claude"],
+          "drift": "clean"
+        }
+      ],
+      "source_present": true,
+      "degraded": false
+    }
+  ],
+  "stale_excludes": [],
+  "lockfile_present": true,
+  "healthy": true
+}
+```
+
+Each item's `type` is `"skill"`/`"agent"`; each materialization's `drift` is `"clean"`,
+`"missing"`, or `"modified"`. `degraded` is `true` when a selected harness lacks a clean covering
+materialization; `source_present` is `false` for the `missing-source` case. `healthy` is `true`
+only when every item is clean and there are no stale excludes.
+
+### `reset` — remove every harness-aware install
+
+```bash
+akit reset [--yes]
+```
+
+Removes **every akit-owned file** recorded in `.akit/kit.lock.json` and clears the lockfile
+(which also removes the managed `.git/info/exclude` block). Only files akit recorded are touched —
+unrelated files are never removed. It first lists the owned files it would delete, then requires
+confirmation:
+
+```bash
+$ akit reset
+Reset would remove these akit-owned files:
+  .agents/skills/deploy-to-vercel
+  .github/agents/reviewer.agent.md
+Remove 2 akit-owned file(s) across 2 install(s)? [y/N] y
+Reset complete — removed 2 file(s) across 2 install(s).
+```
+
+- `--yes` skips the prompt (for scripts).
+- Without `--yes`, `reset` **refuses to run non-interactively** (no terminal) rather than
+  destroying files unprompted — re-run with `--yes` to confirm.
+- When nothing is recorded, it reports `Nothing to reset` and exits successfully.
+
+With `--json`, `reset` emits the `ResetReport` object (`removed_paths`, `cleared_items`) and skips
+the interactive preview/prompt.
+
+### `verify` — check harness support on this host
+
+```bash
+akit verify
+```
+
+Probes each supported harness binary on the local host and combines the result with akit's static
+capability registry to decide whether the harness is actually usable here. **No model/LLM is
+involved:** "verified" means the binary is present, any known version gate is satisfied, and akit
+statically supports at least one primitive (skill or agent) for it.
+
+```bash
+$ akit verify
+✓ GitHub Copilot CLI verified on local (skills + agents)
+✓ Claude Code verified on local (skills + agents)
+✗ OpenAI Codex CLI: `codex` not found on local
+```
+
+With `--json`, `verify` emits an array of `HostVerification` objects (`harness`, `hostKey`,
+`binary`, `present`, `version`, `minVersion`, `versionOk`, `skillSupported`, `agentSupported`,
+`verified`, `detail` — camelCase keys). The same routine is what an embedding host runs against a
+remote host over SSH before enabling kit support there.
+
 ## How it stays out of your repo
 
-Pulls live under `.github/skills/`, `.github/agents/`, and `.copilot/kit.lock.json`, all added to
-`.git/info/exclude` (a local, untracked ignore list). Your tracked `.gitignore` is never touched,
-and `git status` stays clean.
+The legacy family keeps pulls under `.github/skills/`, `.github/agents/`, and
+`.copilot/kit.lock.json`; the harness-aware engine keeps materializations under each harness's
+discovery paths (`.agents/skills`, `.claude/skills`, `.github/agents`, …) plus
+`.akit/kit.lock.json`. Both add every path they write to `.git/info/exclude` (a local, untracked
+ignore list). Your tracked `.gitignore` is never touched, and `git status` stays clean.
