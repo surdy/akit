@@ -17,6 +17,44 @@ fn make_agent(catalog_root: &Path, file_name: &str, body: &str) {
     fs::write(dir.join(format!("{file_name}.agent.md")), body).unwrap();
 }
 
+fn make_agent_pkg(catalog_root: &Path, id: &str, description: &str, variants: &[(&str, &str)]) {
+    let dir = catalog_root.join("agents").join(id);
+    fs::create_dir_all(&dir).unwrap();
+    let mut yml = format!("id: {id}\ndescription: {description}\nvariants:\n");
+    for (harness, file) in variants {
+        yml.push_str(&format!("  {harness}: {file}\n"));
+        fs::write(dir.join(file), "---\nname: a\n---\nprompt\n").unwrap();
+    }
+    fs::write(dir.join("agent.yml"), yml).unwrap();
+}
+
+#[test]
+fn search_surfaces_agent_packages_with_harnesses() {
+    let tmp = tempfile::tempdir().unwrap();
+    let catalog_root = tmp.path().join("catalog");
+    make_agent_pkg(
+        &catalog_root,
+        "code-reviewer",
+        "Reviews pull requests",
+        &[("copilot", "c.md"), ("claude", "cl.md")],
+    );
+
+    let catalog = Catalog::with_root(&catalog_root);
+    let hits = search::search(&catalog, "review").unwrap();
+
+    let hit = hits.iter().find(|h| h.id == "code-reviewer").unwrap();
+    assert_eq!(hit.item_type, ItemType::Agent);
+    assert_eq!(hit.description, "Reviews pull requests");
+    assert_eq!(
+        hit.harnesses,
+        vec![
+            akit::harness::HarnessId::Copilot,
+            akit::harness::HarnessId::Claude
+        ]
+    );
+    assert!(hit.score > 0);
+}
+
 #[test]
 fn partial_query_ranks_matching_item_first() {
     let tmp = tempfile::tempdir().unwrap();

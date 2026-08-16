@@ -1603,24 +1603,39 @@ fn print_catalog_table(items: &[CatalogItem]) {
     let mut type_width = "TYPE".len();
     let mut id_width = "ID".len();
     let mut origin_width = "ORIGIN".len();
+    let mut harness_width = "HARNESSES".len();
     for item in items {
         type_width = type_width.max(type_name(item.item_type).len());
         id_width = id_width.max(item.id.len());
         origin_width = origin_width.max(catalog_origin(item).len());
+        harness_width = harness_width.max(catalog_harnesses(item).len());
     }
 
     println!(
-        "{:<type_width$}  {:<id_width$}  {:<origin_width$}  DESCRIPTION",
-        "TYPE", "ID", "ORIGIN"
+        "{:<type_width$}  {:<id_width$}  {:<origin_width$}  {:<harness_width$}  DESCRIPTION",
+        "TYPE", "ID", "ORIGIN", "HARNESSES"
     );
     for item in items {
         println!(
-            "{:<type_width$}  {:<id_width$}  {:<origin_width$}  {}",
+            "{:<type_width$}  {:<id_width$}  {:<origin_width$}  {:<harness_width$}  {}",
             type_name(item.item_type),
             item.id,
             catalog_origin(item),
+            catalog_harnesses(item),
             item.description
         );
+    }
+}
+
+/// The HARNESSES cell for a catalog row: an agent package's supported set, an
+/// invalid package as `disabled`, or `-` for skills and legacy flat agents.
+fn catalog_harnesses(item: &CatalogItem) -> String {
+    if item.disabled {
+        "disabled".to_string()
+    } else if item.harnesses.is_empty() {
+        "-".to_string()
+    } else {
+        covers_str(&item.harnesses)
     }
 }
 
@@ -1638,6 +1653,14 @@ fn print_search_hits(hits: &[SearchHit]) {
             details.push('(');
             details.push_str(&hit.category);
             details.push(')');
+        }
+        if !hit.harnesses.is_empty() {
+            if !details.is_empty() {
+                details.push(' ');
+            }
+            details.push('[');
+            details.push_str(&covers_str(&hit.harnesses));
+            details.push(']');
         }
 
         if details.is_empty() {
@@ -1657,6 +1680,9 @@ fn print_item_preview(preview: &show::ItemPreview) {
     println!("{header}");
     if !preview.description.is_empty() {
         println!("{}", preview.description);
+    }
+    if !preview.harnesses.is_empty() {
+        println!("harnesses: {}", covers_str(&preview.harnesses));
     }
     println!("{}", preview.path.display());
     println!();

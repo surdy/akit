@@ -8,9 +8,10 @@ use std::io::ErrorKind;
 use std::path::PathBuf;
 
 use crate::bundle;
-use crate::catalog::Catalog;
+use crate::catalog::{AgentShape, Catalog};
 use crate::fsops;
 use crate::gitexclude;
+use crate::harness::HarnessId;
 use crate::lockfile::{ItemType, LockItem, Lockfile, Mode};
 use crate::manifest;
 use crate::project::Project;
@@ -233,6 +234,14 @@ pub struct CatalogItem {
     /// recorded in the manifest; `None` for hand-authored (local) items.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub source: Option<String>,
+    /// Harnesses an agent *package* supports. Empty for skills and for legacy
+    /// flat `.agent.md` agents (which have no per-harness contract).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub harnesses: Vec<HarnessId>,
+    /// True when this agent is an invalid package (surfaced but not installable);
+    /// `description` then carries the diagnostic. Never set for valid items.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub disabled: bool,
 }
 
 /// Pull an item from the catalog into the project (symlink, gitignore, record).
@@ -1362,31 +1371,44 @@ fn scan_catalog_agents(
     sources: &HashMap<(ItemType, String), String>,
     items: &mut Vec<CatalogItem>,
 ) -> Result<()> {
-    let dir = catalog.root.join("agents");
-    let entries = match std::fs::read_dir(&dir) {
-        Ok(entries) => entries,
-        Err(e) if e.kind() == ErrorKind::NotFound => return Ok(()),
-        Err(e) => return Err(e).with_context(|| format!("reading {}", dir.display())),
-    };
-    for entry in entries {
-        let entry = entry.with_context(|| format!("reading {}", dir.display()))?;
-        let path = entry.path();
-        if !path.is_file() {
-            continue;
+    for agent in catalog.discover_agents()? {
+        match agent.shape {
+            AgentShape::Flat(path) => {
+                items.push(catalog_item(ItemType::Agent, agent.id, &path, sources));
+            }
+            AgentShape::Package => items.push(catalog_package_item(catalog, agent.id, sources)),
         }
-        let file_name = entry.file_name();
-        let file_name = file_name.to_string_lossy();
-        let Some(id) = file_name.strip_suffix(".agent.md") else {
-            continue;
-        };
-        items.push(catalog_item(
-            ItemType::Agent,
-            id.to_string(),
-            &path,
-            sources,
-        ));
     }
     Ok(())
+}
+
+/// Build a catalog row for an agent *package*, surfacing its supported harnesses.
+/// An invalid package stays visible but `disabled`, carrying the load error as its
+/// description — never silently dropped.
+fn catalog_package_item(
+    catalog: &Catalog,
+    id: String,
+    sources: &HashMap<(ItemType, String), String>,
+) -> CatalogItem {
+    let source = sources.get(&(ItemType::Agent, id.clone())).cloned();
+    match catalog.resolve_agent_package(&id) {
+        Ok(pkg) => CatalogItem {
+            id,
+            item_type: ItemType::Agent,
+            harnesses: pkg.supported_harnesses().collect(),
+            description: pkg.description,
+            source,
+            disabled: false,
+        },
+        Err(e) => CatalogItem {
+            id,
+            item_type: ItemType::Agent,
+            description: format!("invalid package: {e}"),
+            source,
+            harnesses: Vec::new(),
+            disabled: true,
+        },
+    }
 }
 
 fn catalog_item(
@@ -1405,6 +1427,8 @@ fn catalog_item(
         item_type,
         description,
         source,
+        harnesses: Vec::new(),
+        disabled: false,
     }
 }
 

@@ -38,14 +38,20 @@ cargo build --release
   <catalog>/
     akit.yml                 # manifest of remotely-pulled items (for `akit restore`)
     skills/<name>/SKILL.md
-    agents/<name>.agent.md
+    agents/<name>.agent.md    # legacy flat agent (Copilot-shaped)
+    agents/<name>/agent.yml   # harness-aware agent package (+ one native file per harness)
     bundles/<name>.yml
   ```
 
 Move your personal skills/agents here (out of `~/.copilot/`, which is auto-loaded in *every*
-project). Skills are directories containing `SKILL.md`; agents are single
-`agents/<name>.agent.md` files. `akit` then materializes only the ones you select into a given
-project.
+project). Skills are directories containing `SKILL.md`. Agents come in two shapes: a legacy
+single `agents/<name>.agent.md` file (used by [`add`](#add--pull-a-skill-or-agent-into-the-project),
+Copilot-shaped), and a harness-aware **agent package** `agents/<name>/` (an `agent.yml` plus one
+native variant file per harness, used by [`install --agent`](#install--install-a-skill-or-agent-for-one-or-more-harnesses)).
+The read/browse commands ([`ls`](#ls--list-everything-in-the-catalog) /
+[`search`](#search--search-the-catalog) / [`show`](#show--preview-a-catalog-item)) surface both,
+preferring the package when an id exists in both shapes. `akit` then materializes only the ones
+you select into a given project.
 
 You can populate the catalog by hand (move/copy files into the layout above) or fetch a
 remote source straight into it with [`akit pull`](#pull--fetch-a-remote-source-into-the-catalog).
@@ -701,9 +707,13 @@ With `--json`, `sync` emits:
 akit search [<query>]
 ```
 
-- Scans `<catalog>/skills/<name>/SKILL.md` and `<catalog>/agents/<name>.agent.md`.
-- Reads leading YAML-style frontmatter fields: `name`, `description`, and `category`.
+- Scans `<catalog>/skills/<name>/SKILL.md`, legacy flat agents `<catalog>/agents/<name>.agent.md`,
+  and harness-aware **agent packages** `<catalog>/agents/<name>/agent.yml`. When both an agent
+  package and a flat file share an id, the package wins (it is the target contract).
+- Reads leading YAML-style frontmatter fields: `name`, `description`, and `category` (an agent
+  package reads these from its `agent.yml`).
 - If `name` is missing, uses the skill directory or agent file name.
+- For an agent package, surfaces the **harnesses** it supports (from its variants).
 - Fuzzy-matches `<query>` against `name` first and `description` second; best scores print first.
 - An omitted or empty query lists every catalog item.
 - Missing or malformed frontmatter emits a warning to stderr and falls back to available fields.
@@ -713,16 +723,18 @@ akit search [<query>]
 Human output is one hit per line:
 
 ```text
-type  name  — description (category)
+type  name  — description (category) [harnesses]
 ```
 
-If `description` or `category` is empty, that part is omitted.
+If `description` or `category` is empty, that part is omitted; `[harnesses]` appears only for
+agent packages.
 
 Example:
 
 ```bash
 $ akit search deploy
 skill  Deploy Helper  — Ship apps safely (ops)
+agent  Code Reviewer  — Reviews PRs [copilot, claude]
 ```
 
 Use `--json` with any command to emit machine-readable JSON.
@@ -742,7 +754,8 @@ For `search`, `--json` emits a stable array of objects:
 ```
 
 `type` is `"skill"` or `"agent"`. Missing `description` and `category` serialize as empty
-strings. Empty-query results use score `0`.
+strings. Empty-query results use score `0`. Agent packages add a `"harnesses"` array (their
+supported harness ids); it is omitted for skills and legacy flat agents.
 
 ### `show` — preview a catalog item
 
@@ -752,8 +765,10 @@ akit show [--agent] <id>
 
 - Reads a single item from the catalog and prints its frontmatter and raw content,
   without touching the project.
-- Defaults to a skill (`<catalog>/skills/<id>/SKILL.md`); pass `--agent` to read an
-  agent (`<catalog>/agents/<id>.agent.md`).
+- Defaults to a skill (`<catalog>/skills/<id>/SKILL.md`); pass `--agent` to read an agent.
+  For agents, a harness-aware **package** (`<catalog>/agents/<id>/agent.yml`) is preferred when
+  present — it previews the `agent.yml` descriptor and lists the harnesses it supports — falling
+  back to a legacy flat `<catalog>/agents/<id>.agent.md` otherwise.
 - Reuses the same frontmatter parsing as `search` (`name`, `description`, `category`); a
   missing `name` falls back to the `<id>`, and malformed frontmatter warns to stderr and
   falls back to available fields.
@@ -794,8 +809,9 @@ For `show`, `--json` emits a stable object:
 ```
 
 `type` is `"skill"` or `"agent"`. `name` falls back to `id`; missing `description` and
-`category` serialize as empty strings. `path` is the absolute source path and `content` is
-the full file (frontmatter included).
+`category` serialize as empty strings. `path` is the absolute source path (an agent package's
+`agent.yml`) and `content` is the full file (frontmatter included). An agent package adds a
+`"harnesses"` array; it is omitted for skills and legacy flat agents.
 
 > Remote-source and bundle-member preview are not yet supported — `show` reads local
 > catalog items only.
@@ -818,6 +834,9 @@ records each item's provenance:
   current project**.
 - The `ORIGIN` column shows `owner/repo/path[#ref]` for items recorded as pulled in the
   manifest (`akit.yml`), or `local` for hand-authored items.
+- The `HARNESSES` column shows the harnesses an **agent package** supports, `-` for skills and
+  legacy flat agents, or `disabled` for an invalid package (its `DESCRIPTION` then carries the
+  diagnostic — invalid packages stay visible rather than silently dropped).
 - Sorted skills-first, then by id.
 - Supports the global `--json` flag. The global `--project` flag is accepted but `ls`
   reads only the catalog.
@@ -826,10 +845,11 @@ Example:
 
 ```bash
 $ akit ls
-TYPE   ID             ORIGIN                              DESCRIPTION
-skill  deploy-helper  local                               Ship apps safely
-skill  grill-me       mattpocock/skills/.../grill-me      Stress-test a plan
-agent  reviewer       local                               Review code
+TYPE   ID             ORIGIN                          HARNESSES        DESCRIPTION
+skill  deploy-helper  local                           -                Ship apps safely
+skill  grill-me       mattpocock/skills/.../grill-me  -                Stress-test a plan
+agent  legacy         local                           -                Review code (flat)
+agent  reviewer       local                           copilot, claude  Reviews PRs
 ```
 
 For `ls`, `--json` emits a stable array of objects:
@@ -837,16 +857,18 @@ For `ls`, `--json` emits a stable array of objects:
 ```json
 [
   {
-    "type": "skill",
-    "id": "grill-me",
-    "description": "Stress-test a plan",
-    "source": "mattpocock/skills/skills/productivity/grill-me#main"
+    "type": "agent",
+    "id": "reviewer",
+    "description": "Reviews PRs",
+    "harnesses": ["copilot", "claude"]
   }
 ]
 ```
 
-`type` is `"skill"` or `"agent"`. `description` is the frontmatter description (empty when
-absent). `source` is present only for pulled items; hand-authored (local) items omit it.
+`type` is `"skill"` or `"agent"`. `description` is the frontmatter description, or the load
+diagnostic for an invalid package (empty when absent otherwise). `source` is present only for
+pulled items; hand-authored (local) items omit it. `harnesses` (an agent package's supported
+set) and `disabled` (`true` for an invalid package) are present only when they apply.
 
 ## Harness-aware commands (the `.akit` engine)
 

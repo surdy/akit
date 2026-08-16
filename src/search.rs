@@ -8,7 +8,8 @@ use std::cmp::Ordering;
 use std::io::ErrorKind;
 use std::path::Path;
 
-use crate::catalog::Catalog;
+use crate::catalog::{AgentShape, Catalog};
+use crate::harness::HarnessId;
 use crate::lockfile::ItemType;
 
 /// One ranked catalog search result.
@@ -22,6 +23,9 @@ pub struct SearchHit {
     pub name: String,
     pub description: String,
     pub category: String,
+    /// Harnesses an agent *package* supports; empty for skills and legacy flat agents.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub harnesses: Vec<HarnessId>,
     pub score: i64,
 }
 
@@ -84,28 +88,38 @@ fn scan_skills(catalog: &Catalog, items: &mut Vec<SearchHit>) -> Result<()> {
 }
 
 fn scan_agents(catalog: &Catalog, items: &mut Vec<SearchHit>) -> Result<()> {
-    let agents_dir = catalog.root.join("agents");
-    let entries = match std::fs::read_dir(&agents_dir) {
-        Ok(entries) => entries,
-        Err(e) if e.kind() == ErrorKind::NotFound => return Ok(()),
-        Err(e) => return Err(e).with_context(|| format!("reading {}", agents_dir.display())),
-    };
-
-    for entry in entries {
-        let entry = entry.with_context(|| format!("reading {}", agents_dir.display()))?;
-        let path = entry.path();
-        if !path.is_file() {
-            continue;
+    for agent in catalog.discover_agents()? {
+        match agent.shape {
+            AgentShape::Flat(path) => items.push(hit_from_file(ItemType::Agent, &agent.id, &path)),
+            AgentShape::Package => items.push(hit_from_package(catalog, agent.id)),
         }
-
-        let file_name = entry.file_name();
-        let file_name = file_name.to_string_lossy();
-        let Some(fallback_name) = file_name.strip_suffix(".agent.md") else {
-            continue;
-        };
-        items.push(hit_from_file(ItemType::Agent, fallback_name, &path));
     }
     Ok(())
+}
+
+/// A search hit for an agent *package*, ranked on its `agent.yml` metadata and
+/// carrying its supported harnesses. An invalid package is still searchable by id.
+fn hit_from_package(catalog: &Catalog, id: String) -> SearchHit {
+    match catalog.resolve_agent_package(&id) {
+        Ok(pkg) => SearchHit {
+            id,
+            item_type: ItemType::Agent,
+            harnesses: pkg.supported_harnesses().collect(),
+            name: pkg.name,
+            description: pkg.description,
+            category: pkg.category,
+            score: 0,
+        },
+        Err(_) => SearchHit {
+            name: id.clone(),
+            id,
+            item_type: ItemType::Agent,
+            description: String::new(),
+            category: String::new(),
+            harnesses: Vec::new(),
+            score: 0,
+        },
+    }
 }
 
 fn hit_from_file(item_type: ItemType, fallback_name: &str, path: &Path) -> SearchHit {
@@ -118,6 +132,7 @@ fn hit_from_file(item_type: ItemType, fallback_name: &str, path: &Path) -> Searc
             .unwrap_or_else(|| fallback_name.to_string()),
         description: frontmatter.description.unwrap_or_default(),
         category: frontmatter.category.unwrap_or_default(),
+        harnesses: Vec::new(),
         score: 0,
     }
 }

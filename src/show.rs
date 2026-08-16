@@ -9,6 +9,7 @@ use serde::Serialize;
 use std::path::PathBuf;
 
 use crate::catalog::Catalog;
+use crate::harness::HarnessId;
 use crate::lockfile::ItemType;
 use crate::search::parse_frontmatter;
 
@@ -26,10 +27,14 @@ pub struct ItemPreview {
     pub description: String,
     /// Frontmatter `category`, or empty.
     pub category: String,
-    /// Absolute path to the source markdown file.
+    /// Absolute path to the previewed source file (skill/flat agent markdown, or
+    /// an agent package's `agent.yml`).
     pub path: PathBuf,
     /// Raw file content (frontmatter included).
     pub content: String,
+    /// Harnesses an agent *package* supports; empty for skills and legacy flat agents.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub harnesses: Vec<HarnessId>,
 }
 
 /// Resolve and read a catalog item for preview.
@@ -39,6 +44,12 @@ pub struct ItemPreview {
 /// empty strings for the rest, matching [`crate::search`]'s behavior (a warning
 /// is printed to stderr by the shared parser).
 pub fn show(catalog: &Catalog, id: &str, kind: ItemType) -> Result<ItemPreview> {
+    // An agent is a *package* (`agents/<id>/agent.yml`) when one exists — the
+    // target contract — and only otherwise a legacy flat `agents/<id>.agent.md`.
+    if kind == ItemType::Agent && catalog.agent_package_dir(id).is_dir() {
+        return show_agent_package(catalog, id);
+    }
+
     let path = match kind {
         ItemType::Skill => catalog.resolve_skill(id)?.join("SKILL.md"),
         ItemType::Agent => catalog.resolve_agent(id)?,
@@ -56,6 +67,28 @@ pub fn show(catalog: &Catalog, id: &str, kind: ItemType) -> Result<ItemPreview> 
         category: frontmatter.category.unwrap_or_default(),
         path,
         content,
+        harnesses: Vec::new(),
+    })
+}
+
+/// Preview a harness-aware agent package: metadata + supported harnesses from
+/// `agent.yml`, previewing the descriptor itself (the package has no single
+/// canonical markdown file — each harness gets its own native variant).
+fn show_agent_package(catalog: &Catalog, id: &str) -> Result<ItemPreview> {
+    let pkg = catalog.resolve_agent_package(id)?;
+    let descriptor = pkg.dir.join(crate::agentpkg::AGENT_DESCRIPTOR);
+    let content = std::fs::read_to_string(&descriptor)
+        .with_context(|| format!("reading {}", descriptor.display()))?;
+    let harnesses = pkg.supported_harnesses().collect();
+    Ok(ItemPreview {
+        item_type: ItemType::Agent,
+        id: id.to_string(),
+        name: pkg.name,
+        description: pkg.description,
+        category: pkg.category,
+        path: descriptor,
+        content,
+        harnesses,
     })
 }
 
@@ -85,7 +118,9 @@ mod tests {
     #[test]
     fn previews_a_skill_with_frontmatter() {
         let (_tmp, catalog) = catalog_with(
-            Some("---\nname: Deploy Helper\ndescription: Ship safely\ncategory: ops\n---\nbody text\n"),
+            Some(
+                "---\nname: Deploy Helper\ndescription: Ship safely\ncategory: ops\n---\nbody text\n",
+            ),
             None,
         );
 
@@ -101,13 +136,73 @@ mod tests {
 
     #[test]
     fn previews_an_agent() {
-        let (_tmp, catalog) =
-            catalog_with(None, Some("---\nname: Reviewer\n---\nreview prompt\n"));
+        let (_tmp, catalog) = catalog_with(None, Some("---\nname: Reviewer\n---\nreview prompt\n"));
 
         let preview = show(&catalog, "reviewer", ItemType::Agent).unwrap();
         assert_eq!(preview.item_type, ItemType::Agent);
         assert_eq!(preview.name, "Reviewer");
         assert!(preview.content.contains("review prompt"));
+        // A legacy flat agent has no per-harness contract.
+        assert!(preview.harnesses.is_empty());
+    }
+
+    /// Write a harness-aware agent package at `agents/<id>/`.
+    fn make_agent_pkg(root: &std::path::Path, id: &str, yml: &str, variants: &[&str]) {
+        let dir = root.join("agents").join(id);
+        fs::create_dir_all(&dir).unwrap();
+        for v in variants {
+            fs::write(dir.join(v), "---\nname: a\n---\nprompt\n").unwrap();
+        }
+        fs::write(dir.join("agent.yml"), yml).unwrap();
+    }
+
+    #[test]
+    fn previews_an_agent_package_with_harnesses() {
+        let tmp = tempdir().unwrap();
+        let root = tmp.path().join("catalog");
+        make_agent_pkg(
+            &root,
+            "reviewer",
+            "name: Reviewer\ndescription: Reviews PRs\nvariants:\n  copilot: c.md\n  claude: cl.md\n",
+            &["c.md", "cl.md"],
+        );
+        let catalog = Catalog::with_root(&root);
+
+        let preview = show(&catalog, "reviewer", ItemType::Agent).unwrap();
+        assert_eq!(preview.item_type, ItemType::Agent);
+        assert_eq!(preview.name, "Reviewer");
+        assert_eq!(preview.description, "Reviews PRs");
+        assert_eq!(
+            preview.harnesses,
+            vec![HarnessId::Copilot, HarnessId::Claude]
+        );
+        // The previewed file is the descriptor; content is the agent.yml.
+        assert!(preview.path.ends_with("agent.yml"));
+        assert!(preview.content.contains("variants:"));
+    }
+
+    #[test]
+    fn agent_package_preview_wins_over_flat_of_same_id() {
+        let tmp = tempdir().unwrap();
+        let root = tmp.path().join("catalog");
+        // Both shapes for id "dup": the package must be previewed.
+        fs::create_dir_all(root.join("agents")).unwrap();
+        fs::write(
+            root.join("agents/dup.agent.md"),
+            "---\nname: Flat\n---\nflat body\n",
+        )
+        .unwrap();
+        make_agent_pkg(
+            &root,
+            "dup",
+            "name: Package\nvariants:\n  codex: x.toml\n",
+            &["x.toml"],
+        );
+        let catalog = Catalog::with_root(&root);
+
+        let preview = show(&catalog, "dup", ItemType::Agent).unwrap();
+        assert_eq!(preview.name, "Package", "package should win over flat");
+        assert_eq!(preview.harnesses, vec![HarnessId::Codex]);
     }
 
     #[test]
