@@ -370,6 +370,8 @@ fn cli_add_and_rm_bundle_apply_copy_mode() {
 
 #[test]
 fn cli_status_labels_and_groups_bundle_items() {
+    // Harness-aware `status` reads `.akit`: install two bundles + a standalone
+    // via the CLI, then assert the bundle-grouped table and completeness lines.
     let tmp = tempfile::tempdir().unwrap();
     let base = tmp.path();
     let catalog_root = base.join("catalog");
@@ -378,23 +380,24 @@ fn cli_status_labels_and_groups_bundle_items() {
     make_skill(&catalog_root, "standalone");
     make_bundle(&catalog_root, "zeta", "skills: [zeta-skill]\n");
     make_bundle(&catalog_root, "alpha", "skills: [alpha-skill]\n");
-    let catalog = Catalog::with_root(&catalog_root);
-    let (proj, project) = init_project(base);
+    let (proj, _project) = init_project(base);
 
-    ops::add_bundle(&project, &catalog, "zeta", Mode::Symlink).unwrap();
-    ops::add_item(
-        &project,
-        &catalog,
-        ItemType::Skill,
-        "standalone",
-        Mode::Symlink,
-        None,
-    )
-    .unwrap();
-    ops::add_bundle(&project, &catalog, "alpha", Mode::Symlink).unwrap();
+    for args in [
+        ["install", "--bundle", "zeta"].as_slice(),
+        ["install", "standalone"].as_slice(),
+        ["install", "--bundle", "alpha"].as_slice(),
+    ] {
+        assert!(
+            akit_install(&proj, &catalog_root, "claude", args)
+                .status
+                .success(),
+            "install {args:?} failed"
+        );
+    }
 
     let output = Command::new(env!("CARGO_BIN_EXE_akit"))
         .args(["--project", proj.to_str().unwrap(), "status"])
+        .env("KIT_CATALOG_DIR", &catalog_root)
         .output()
         .expect("akit binary should run");
 
@@ -405,13 +408,29 @@ fn cli_status_labels_and_groups_bundle_items() {
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
     let lines = stdout.lines().collect::<Vec<_>>();
-    assert!(lines[0].contains("BUNDLE"), "{stdout}");
-    assert!(lines[1].starts_with("alpha"), "{stdout}");
-    assert!(lines[1].contains("alpha-skill"), "{stdout}");
-    assert!(lines[2].starts_with("zeta"), "{stdout}");
-    assert!(lines[2].contains("zeta-skill"), "{stdout}");
-    assert!(lines[3].starts_with('-'), "{stdout}");
-    assert!(lines[3].contains("standalone"), "{stdout}");
+    // Header, then bundle-tagged rows (alpha before zeta), then the standalone `-`.
+    assert!(
+        lines[0].contains("BUNDLE") && lines[0].contains("HEALTH"),
+        "{stdout}"
+    );
+    assert!(
+        lines[1].starts_with("alpha") && lines[1].contains("alpha-skill"),
+        "{stdout}"
+    );
+    assert!(
+        lines[2].starts_with("zeta") && lines[2].contains("zeta-skill"),
+        "{stdout}"
+    );
+    assert!(
+        lines[3].starts_with('-') && lines[3].contains("standalone"),
+        "{stdout}"
+    );
+    // Both single-member bundles are complete.
+    assert!(
+        stdout.contains("Bundle 'alpha': complete (1/1)"),
+        "{stdout}"
+    );
+    assert!(stdout.contains("Bundle 'zeta': complete (1/1)"), "{stdout}");
 }
 
 #[test]

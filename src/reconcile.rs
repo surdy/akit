@@ -24,6 +24,7 @@ use crate::harness::HarnessId;
 use crate::install::{self, HarnessContext};
 use crate::lockfile::{ItemType, Mode};
 use crate::materialize::{self, Drift, MaterializeItem, content_hash, materialize_one};
+use crate::ops::{BundleHealth, BundleState};
 use crate::ownership::{AkitLockfile, Installation, MaterializationRecord};
 use crate::project::Project;
 use crate::transport::{FsTransport, LocalFs};
@@ -47,6 +48,9 @@ pub struct ItemHealth {
     pub source: String,
     pub harnesses: Vec<HarnessId>,
     pub materializations: Vec<MaterializationHealth>,
+    /// The bundle this install is tagged with, if any (`.akit` `Installation.bundle`).
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub bundle: Option<String>,
     /// Whether the catalog still provides this item's source.
     pub source_present: bool,
     /// True when a selected harness lacks a clean covering materialization.
@@ -111,6 +115,7 @@ pub fn health_with(
             source: inst.source.clone(),
             harnesses: inst.harnesses.clone(),
             materializations: mats,
+            bundle: inst.bundle.clone(),
             source_present,
             degraded,
         });
@@ -127,6 +132,84 @@ pub fn health_with(
         lockfile_present,
         healthy,
     })
+}
+
+/// Per-bundle completeness for the harness-aware `.akit` lockfile: the `.akit`
+/// counterpart of legacy `ops::bundle_health`, driven by each install's
+/// `Installation.bundle` tag compared to the catalog `bundles/<name>.yml` manifest.
+///
+/// A bundle whose manifest is unreadable degrades to [`BundleState::Unknown`] with
+/// a stderr warning rather than failing the whole report. Never mutates anything.
+pub fn akit_bundle_health(project: &Project, catalog: &Catalog) -> Result<Vec<BundleHealth>> {
+    akit_bundle_health_with(&LocalFs, project, catalog)
+}
+
+/// [`akit_bundle_health`] against an explicit transport.
+pub fn akit_bundle_health_with(
+    fs: &dyn FsTransport,
+    project: &Project,
+    catalog: &Catalog,
+) -> Result<Vec<BundleHealth>> {
+    use std::collections::HashSet;
+    let lock = AkitLockfile::load_with(fs, &project.akit_lockfile_path())?;
+
+    let mut names: Vec<&str> = lock
+        .items
+        .iter()
+        .filter_map(|i| i.bundle.as_deref())
+        .collect::<HashSet<_>>()
+        .into_iter()
+        .collect();
+    names.sort_unstable();
+
+    Ok(names
+        .into_iter()
+        .map(|name| {
+            let installed_members: HashSet<(ItemType, &str)> = lock
+                .items
+                .iter()
+                .filter(|i| i.bundle.as_deref() == Some(name))
+                .map(|i| (i.item_type, i.id.as_str()))
+                .collect();
+            match crate::bundle::load(catalog, name) {
+                Ok(manifest) => {
+                    let mut missing: Vec<String> = manifest
+                        .items
+                        .iter()
+                        .filter(|m| !installed_members.contains(&(m.item_type, m.id.as_str())))
+                        .map(|m| m.id.clone())
+                        .collect();
+                    missing.sort_unstable();
+                    let expected = manifest.items.len();
+                    let installed = expected - missing.len();
+                    let state = if missing.is_empty() {
+                        BundleState::Complete
+                    } else {
+                        BundleState::Partial
+                    };
+                    BundleHealth {
+                        name: name.to_string(),
+                        expected: Some(expected),
+                        installed,
+                        missing,
+                        state,
+                    }
+                }
+                Err(err) => {
+                    eprintln!(
+                        "warning: bundle '{name}': manifest unreadable ({err}); reporting state 'unknown'"
+                    );
+                    BundleHealth {
+                        name: name.to_string(),
+                        expected: None,
+                        installed: installed_members.len(),
+                        missing: Vec::new(),
+                        state: BundleState::Unknown,
+                    }
+                }
+            }
+        })
+        .collect())
 }
 
 /// Outcome of a [`repair`].
@@ -509,6 +592,37 @@ mod tests {
 
     fn excludes(project: &Project) -> Vec<String> {
         gitexclude::managed_lines(&LocalFs, &project.git_info_exclude_path().unwrap()).unwrap()
+    }
+
+    #[test]
+    fn akit_bundle_health_reports_complete_then_partial() {
+        let f = setup();
+        write_skill(&f.catalog, "a");
+        write_skill(&f.catalog, "b");
+        write(&f.catalog.root.join("bundles/web.yml"), "skills: [a, b]\n");
+        crate::install::install_bundle(&f.project, &f.catalog, "web", &ctx(&[HarnessId::Claude]))
+            .unwrap();
+
+        let health = akit_bundle_health(&f.project, &f.catalog).unwrap();
+        assert_eq!(health.len(), 1);
+        assert_eq!(health[0].name, "web");
+        assert_eq!(health[0].state, BundleState::Complete);
+        assert_eq!(health[0].expected, Some(2));
+        assert_eq!(health[0].installed, 2);
+
+        // Reinstalling `a` standalone clears its bundle tag → web is now partial.
+        install(
+            &f.project,
+            &f.catalog,
+            ItemType::Skill,
+            "a",
+            &ctx(&[HarnessId::Claude]),
+        )
+        .unwrap();
+        let health = akit_bundle_health(&f.project, &f.catalog).unwrap();
+        assert_eq!(health[0].state, BundleState::Partial);
+        assert_eq!(health[0].installed, 1);
+        assert_eq!(health[0].missing, vec!["a".to_string()]);
     }
 
     #[test]

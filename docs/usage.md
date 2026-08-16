@@ -492,43 +492,45 @@ Removed bundle 'web' (3 items)
   Removed agent 'code-reviewer' -> .github/agents/code-reviewer.agent.md (removed)
 ```
 
-### `status` — list installed items
+### `status` — harness-aware project overview
 
 ```bash
 akit status
 ```
 
-Lists lockfile entries grouped by bundle and labeled in the `BUNDLE` column. Standalone entries
-show `-`. Health values:
+A bundle-grouped overview of everything installed in this project, read from the **harness-aware**
+`.akit/kit.lock.json` (the same store as [`install`](#install--install-a-skill-or-agent-for-one-or-more-harnesses)
+/ [`installed`](#installed--list-harness-aware-installs-and-their-health)). Rows are grouped by
+bundle (`BUNDLE` column, standalone items last as `-`) and show the harnesses each item serves and
+a per-item **HEALTH** value:
 
-- `ok`: target exists and, for symlinks, resolves to an existing source.
-- `orphaned`: target is a symlink whose source no longer exists.
-- `missing`: lockfile entry exists but the target is gone.
-- `drifted`: copy-mode target exists, but its content differs from the current catalog source.
+- `ok`: every serving harness has a clean covering materialization.
+- `degraded (uncovered: …)`: some serving harness's materialization is missing or modified.
+- `missing-source`: the catalog no longer provides this item's source.
 
 Below the table, `status` prints one line per installed bundle summarizing its **completeness**
-against the catalog `bundles/<name>.yml` manifest:
+against the catalog `bundles/<name>.yml` manifest — using each install's `.akit` bundle tag:
 
-- `complete`: every member the manifest declares is installed.
-- `partial`: some declared members are not installed (the missing ids are listed). This also
-  surfaces a bundle whose manifest *grew* upstream after you installed it — reporting never
-  mutates the lockfile.
-- `unknown`: the manifest could not be read (absent, unparseable, or no catalog is available); a
-  warning is written to stderr and the installed count is still reported.
+- `complete`: every member the manifest declares is installed under that tag.
+- `partial`: some declared members aren't installed (missing ids listed). This also surfaces a
+  member re-installed standalone (which clears its bundle tag) or a manifest that *grew* upstream.
+- `unknown`: the manifest could not be read; a stderr warning is written and the count is still shown.
 
 Example:
 
 ```bash
 $ akit status
-BUNDLE  TYPE   ID                MODE     TARGET                                      STATUS
-web     skill  deploy-to-vercel  symlink  .github/skills/deploy-to-vercel             ok
-web     agent  code-reviewer     symlink  .github/agents/code-reviewer.agent.md       ok
--       skill  deploy-helper     symlink  .github/skills/deploy-helper                ok
+BUNDLE  ID                TYPE   HARNESSES       HEALTH
+web     deploy-to-vercel  skill  claude, codex   ok
+web     code-reviewer     agent  claude          ok
+-       deploy-helper     skill  claude          ok
 
 Bundle 'web': partial (2/3) — missing: lint-fix
 ```
 
-With `--json`, `status` emits an object with `items` and `bundles`:
+With `--json`, `status` emits `{ "items", "bundles" }`, where `items` are `reconcile::ItemHealth`
+objects (the same shape [`installed`](#installed--list-harness-aware-installs-and-their-health)
+emits, each with an optional `bundle` tag) and `bundles` are the completeness objects:
 
 ```json
 {
@@ -536,31 +538,32 @@ With `--json`, `status` emits an object with `items` and `bundles`:
     {
       "id": "deploy-to-vercel",
       "type": "skill",
-      "mode": "symlink",
-      "target": ".github/skills/deploy-to-vercel",
+      "source": "local",
+      "harnesses": ["claude", "codex"],
+      "materializations": [
+        { "path": ".agents/skills/deploy-to-vercel", "mode": "copy", "covers": ["codex"], "drift": "clean" },
+        { "path": ".claude/skills/deploy-to-vercel", "mode": "copy", "covers": ["claude"], "drift": "clean" }
+      ],
       "bundle": "web",
-      "status": "ok"
+      "source_present": true,
+      "degraded": false
     }
   ],
   "bundles": [
-    {
-      "name": "web",
-      "expected": 3,
-      "installed": 2,
-      "missing": ["lint-fix"],
-      "state": "partial"
-    }
+    { "name": "web", "expected": 3, "installed": 2, "missing": ["lint-fix"], "state": "partial" }
   ]
 }
 ```
 
-Each item's `status` is lowercase (`"ok"`, `"orphaned"`, `"missing"`, or `"drifted"`), `mode`
-is `"symlink"` or `"copy"`, and `bundle` is `null` for standalone items. Each bundle's `state`
-is `"complete"`, `"partial"`, or `"unknown"`; `missing` is empty except for `partial`; and
-`expected` is omitted for `unknown` (the manifest count is unknown).
+`bundle` is omitted for standalone items. Each materialization's `drift` is `"clean"`, `"missing"`,
+or `"modified"`; `mode` is `"copy"` or `"symlink"`. Each bundle's `state` is `"complete"`,
+`"partial"`, or `"unknown"`; `expected` is omitted for `unknown`.
 
-> **Note:** prior to this the `status --json` output was a bare array of items. It is now the
-> `{ "items", "bundles" }` object shown above.
+> **Breaking change:** `status` now reads the harness-aware `.akit/kit.lock.json` (previously the
+> legacy `.copilot/kit.lock.json` written by `add`/`rm`). The `--json` `items[]` are now
+> `ItemHealth` (harness/materialization/drift) rather than the old
+> `{ mode, target, status }` rows. Use [`add`](#add--pull-an-item-into-a-project)/`rm` with the
+> legacy tooling if you need the old lockfile view.
 
 > `status` lists what's **installed into the current project**. To list everything **available
 > in your catalog**, use [`akit ls`](#ls--list-everything-in-the-catalog).

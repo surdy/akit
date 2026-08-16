@@ -12,7 +12,7 @@ use akit::harness::HarnessId;
 use akit::install::{self, HarnessContext, RemoveScope};
 use akit::lockfile::{ItemType, Mode};
 use akit::ops;
-use akit::ops::{BundleHealth, BundleState, CatalogItem, HealthStatus, ListItem};
+use akit::ops::{BundleHealth, BundleState, CatalogItem, HealthStatus};
 use akit::project::Project;
 use akit::remote::{self, SourceSpec};
 use akit::search::{self, SearchHit};
@@ -363,21 +363,21 @@ fn run() -> Result<()> {
         }
         Commands::Status => {
             let project = Project::locate(cli.project.clone())?;
-            let items = ops::list_items(&project)?;
-            // The catalog is only needed to read bundle manifests; a missing
-            // catalog degrades bundles to `unknown` rather than failing status.
-            let catalog = Catalog::locate().ok();
-            let bundles = ops::bundle_health(&project, catalog.as_ref())?;
+            let catalog = Catalog::locate()?;
+            // Harness-aware project overview over `.akit/kit.lock.json`: per-item
+            // health (via reconcile) plus per-bundle completeness.
+            let health = akit::reconcile::health(&project, &catalog)?;
+            let bundles = akit::reconcile::akit_bundle_health(&project, &catalog)?;
             if cli.json {
                 println!(
                     "{}",
                     serde_json::to_string(&StatusReport {
-                        items: &items,
+                        items: &health.items,
                         bundles: &bundles,
                     })?
                 );
             } else {
-                print_table(&items);
+                print_status_table(&health.items);
                 print_bundle_health(&bundles);
             }
         }
@@ -1679,10 +1679,11 @@ fn remove_report_line(report: &ops::RemoveReport) -> String {
     )
 }
 
-/// JSON shape for `status`: installed items plus per-bundle completeness.
+/// JSON shape for `status`: harness-aware installed items (`.akit`) plus
+/// per-bundle completeness. `items` are `reconcile::ItemHealth`.
 #[derive(serde::Serialize)]
 struct StatusReport<'a> {
-    items: &'a [ListItem],
+    items: &'a [akit::reconcile::ItemHealth],
     bundles: &'a [BundleHealth],
 }
 
@@ -1721,41 +1722,51 @@ fn print_bundle_health(bundles: &[BundleHealth]) {
     }
 }
 
-fn print_table(items: &[ListItem]) {
-    let mut bundle_width = "BUNDLE".len();
-    let mut type_width = "TYPE".len();
-    let mut id_width = "ID".len();
-    let mut mode_width = "MODE".len();
-    let mut target_width = "TARGET".len();
+/// Bundle-grouped project overview over the harness-aware `.akit` lockfile:
+/// `BUNDLE  ID  TYPE  HARNESSES  HEALTH`, standalone (untagged) rows last.
+fn print_status_table(items: &[akit::reconcile::ItemHealth]) {
+    if items.is_empty() {
+        println!("No items installed.");
+        return;
+    }
+    let harnesses_of = |item: &akit::reconcile::ItemHealth| {
+        item.harnesses
+            .iter()
+            .map(|h| h.as_str())
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
 
+    let mut bundle_width = "BUNDLE".len();
+    let mut id_width = "ID".len();
+    let mut type_width = "TYPE".len();
+    let mut harness_width = "HARNESSES".len();
     for item in items {
         bundle_width = bundle_width.max(item.bundle.as_deref().unwrap_or("-").len());
-        type_width = type_width.max(type_name(item.item_type).len());
         id_width = id_width.max(item.id.len());
-        mode_width = mode_width.max(mode_name(item.mode).len());
-        target_width = target_width.max(item.target.len());
+        type_width = type_width.max(type_name(item.item_type).len());
+        harness_width = harness_width.max(harnesses_of(item).len());
     }
 
     println!(
-        "{:<bundle_width$}  {:<type_width$}  {:<id_width$}  {:<mode_width$}  {:<target_width$}  STATUS",
-        "BUNDLE", "TYPE", "ID", "MODE", "TARGET"
+        "{:<bundle_width$}  {:<id_width$}  {:<type_width$}  {:<harness_width$}  HEALTH",
+        "BUNDLE", "ID", "TYPE", "HARNESSES"
     );
-    let mut ordered: Vec<&ListItem> = items.iter().collect();
+    let mut ordered: Vec<&akit::reconcile::ItemHealth> = items.iter().collect();
     ordered.sort_by(|a, b| match (a.bundle.as_deref(), b.bundle.as_deref()) {
-        (Some(a_bundle), Some(b_bundle)) => a_bundle.cmp(b_bundle),
+        (Some(x), Some(y)) => x.cmp(y).then_with(|| a.id.cmp(&b.id)),
         (Some(_), None) => std::cmp::Ordering::Less,
         (None, Some(_)) => std::cmp::Ordering::Greater,
-        (None, None) => std::cmp::Ordering::Equal,
+        (None, None) => a.id.cmp(&b.id),
     });
     for item in ordered {
         println!(
-            "{:<bundle_width$}  {:<type_width$}  {:<id_width$}  {:<mode_width$}  {:<target_width$}  {}",
+            "{:<bundle_width$}  {:<id_width$}  {:<type_width$}  {:<harness_width$}  {}",
             item.bundle.as_deref().unwrap_or("-"),
-            type_name(item.item_type),
             item.id,
-            mode_name(item.mode),
-            item.target,
-            status_name(item.status)
+            type_name(item.item_type),
+            harnesses_of(item),
+            item_health_label(item)
         );
     }
 }
