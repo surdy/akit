@@ -2,7 +2,6 @@
 
 use anyhow::{Result, bail};
 use clap::{Parser, Subcommand};
-use serde::Serialize;
 use std::path::PathBuf;
 
 use akit::catalog::Catalog;
@@ -285,25 +284,21 @@ fn run() -> Result<()> {
             let project = Project::locate(cli.project.clone())?;
             let catalog = Catalog::locate()?;
             // Read-only diagnosis over the harness-aware `.akit` lockfile.
-            let report = akit::reconcile::diagnose(&project, &catalog)?;
+            let mut report = akit::reconcile::diagnose(&project, &catalog)?;
             // `--all` widens the same read-only pass to the global install index,
-            // which is the only place cross-project divergence is visible.
-            let divergences = if *all {
-                Some(akit::index::divergences()?)
-            } else {
-                None
-            };
+            // which is the only place cross-project divergence is visible. The
+            // diagnosis we just computed is handed over so this project's clean
+            // copies are not hashed a second time.
+            if *all {
+                let divergences =
+                    akit::index::divergences_with(Some((&project.root, &report.items)))?;
+                report.divergences = Some(divergences);
+            }
             if cli.json {
-                println!(
-                    "{}",
-                    serde_json::to_string(&DoctorJson {
-                        diagnosis: &report,
-                        divergences: divergences.as_deref(),
-                    })?
-                );
+                println!("{}", serde_json::to_string(&report)?);
             } else {
                 print_diagnosis(&report);
-                if let Some(divergences) = &divergences {
+                if let Some(divergences) = &report.divergences {
                     print_divergences(divergences);
                 }
             }
@@ -1298,12 +1293,15 @@ fn print_where_report(report: &akit::index::WhereReport) {
         }
     }
     if report.diverged {
-        println!();
-        println!(
-            "Diverged: {} distinct contents across copy installs.",
-            report.variants.len()
-        );
-        print_variants(&report.variants, "  ");
+        for group in report.variants.iter().filter(|g| g.diverged) {
+            println!();
+            println!(
+                "Diverged{}: {} distinct contents across copy installs.",
+                variant_note(group.harness),
+                group.contents.len()
+            );
+            print_variants(&group.contents, "  ");
+        }
         println!(
             "  `akit update --propagate` re-syncs clean copies; edited copies are left as yours."
         );
@@ -1805,17 +1803,6 @@ fn print_status_table(items: &[akit::reconcile::ItemHealth]) {
     }
 }
 
-/// `doctor --json`. The diagnosis is flattened so the existing object shape is
-/// byte-for-byte what it always was; `divergences` appears only with `--all`,
-/// mirroring how `update --json` gains `propagation` only with `--propagate`.
-#[derive(Serialize)]
-struct DoctorJson<'a> {
-    #[serde(flatten)]
-    diagnosis: &'a akit::reconcile::Diagnosis,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    divergences: Option<&'a [akit::index::Divergence]>,
-}
-
 /// Print a read-only `doctor` diagnosis over the harness-aware `.akit` state:
 /// the item table, per-bundle completeness, foreign occupants, exclude drift,
 /// then a verdict.
@@ -1904,23 +1891,38 @@ fn print_foreign(foreign: &[akit::reconcile::ForeignPath]) {
     println!("  Remove them, or run `akit adopt` to claim ones that already match your catalog.");
 }
 
-/// Print cross-project divergence: one block per catalog id whose copy installs
-/// hold different bytes in different projects.
-fn print_divergences(divergences: &[akit::index::Divergence]) {
-    if divergences.is_empty() {
+/// Print cross-project divergence: one block per comparable family of copy
+/// installs holding different bytes in different projects.
+fn print_divergences(report: &akit::index::DivergenceReport) {
+    if report.items.is_empty() {
         println!("\nDiverged: none — every copy install of a shared id matches across projects.");
-        return;
+    } else {
+        println!("\nDiverged across projects:");
+        for d in &report.items {
+            println!(
+                "  {} '{}'{} — {} distinct contents:",
+                title_case(type_name(d.item_type)),
+                d.id,
+                variant_note(d.harness),
+                d.contents.len()
+            );
+            print_variants(d.contents.as_slice(), "    ");
+        }
     }
-    println!("\nDiverged across projects:");
-    for d in divergences {
-        println!(
-            "  {} '{}' — {} distinct contents:",
-            title_case(type_name(d.item_type)),
-            d.id,
-            d.variants.len()
-        );
-        print_variants(d.variants.as_slice(), "    ");
+    if !report.skipped.is_empty() {
+        println!("\nSkipped {} unreadable project(s):", report.skipped.len());
+        for s in &report.skipped {
+            println!("  {}: {}", s.project, s.error);
+        }
     }
+}
+
+/// Which per-harness agent variant a divergence is about; empty for skills,
+/// whose copies all come from the one skill directory.
+fn variant_note(harness: Option<akit::harness::HarnessId>) -> String {
+    harness
+        .map(|h| format!(" ({h} variant)"))
+        .unwrap_or_default()
 }
 
 /// Print one content-variant group per distinct content, shortest hash prefix

@@ -941,19 +941,8 @@ pub fn list_catalog(catalog: &Catalog) -> Result<Vec<CatalogItem>> {
     let mut items = Vec::new();
     scan_catalog_skills(catalog, &sources, &mut items)?;
     scan_catalog_agents(catalog, &sources, &mut items)?;
-    items.sort_by(|a, b| {
-        type_rank(a.item_type)
-            .cmp(&type_rank(b.item_type))
-            .then_with(|| a.id.cmp(&b.id))
-    });
+    items.sort_by(|a, b| a.item_type.cmp(&b.item_type).then_with(|| a.id.cmp(&b.id)));
     Ok(items)
-}
-
-fn type_rank(item_type: ItemType) -> u8 {
-    match item_type {
-        ItemType::Skill => 0,
-        ItemType::Agent => 1,
-    }
 }
 
 /// Map each recorded `(type, id)` to its remote source string (`owner/repo/path[#ref]`).

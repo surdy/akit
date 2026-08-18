@@ -761,9 +761,13 @@ Doctor: ok (2 foreign)
 - Every **registered** harness discovery directory is scanned, not just the ones the planner writes
   to — a `.github/skills/<name>` is exactly the case worth reporting even though akit itself installs
   Copilot skills into `.agents/skills`.
-- Shape rules keep the report honest: a skill target is a directory, an agent target is a file ending
-  in that harness's extension. Dot-prefixed entries (`.DS_Store`, akit's own `.<name>.akit-stage`
-  temps) are ignored.
+- What counts is **occupancy of an install destination**, decided by the same rule the install guard
+  uses: anything at all sitting at a path akit would materialize onto is reported, whatever its file
+  kind. A plain file at `.agents/skills/demo` blocks the install exactly as a directory does, so
+  `doctor` names it. Any entry in a skill directory qualifies; in an agent directory only names
+  carrying that harness's extension do, matched case-insensitively (on macOS/Windows `Reviewer.MD`
+  occupies the same destination as `reviewer.md`). Dot-prefixed entries (`.DS_Store`, akit's own
+  `.<name>.akit-stage` temps) are ignored.
 - `type` says which kind of *location* is occupied, not what the file actually contains.
 - The remedies are yours: delete it, leave it, or — if its bytes already match a catalog item —
   [`akit adopt`](#repair--detach--forget--adopt--maintain-akit-ownership) it. `doctor` never
@@ -804,9 +808,24 @@ Diverged across projects:
   installed into — but only those. It still needs a local project for the rest of the diagnosis.
 - **Copy installs only.** A `--symlink` install resolves to the catalog and therefore always holds
   whatever the catalog holds; it cannot diverge and is never listed.
+- **Across projects only.** Two copies of one item *inside* one project (the per-harness skill
+  directories) that no longer agree are ordinary local drift — already reported as `modified`, and
+  something `update --propagate` deliberately will not touch. Divergence is a claim about two
+  different projects.
+- **Only comparable copies are compared.** A skill materializes the whole skill directory, so all its
+  copies are copies of the same source whatever destination each project picked. An agent
+  materializes one *native per-harness variant file* (`claude.md` vs `codex.toml` vs
+  `github.agent.md`), so agent copies are grouped per covering harness and the report names it
+  (`Agent 'reviewer' (claude variant)`). A clean multi-harness agent install is never diverged.
 - Content is compared with the same sha256 `drift` uses; the printed 12-character prefix just
-  distinguishes the groups.
-- Read-only, like everything else in `doctor`. To resolve a divergence, refresh the clean copies with
+  distinguishes the groups. A copy that a drift pass just proved clean is not re-hashed, and nothing
+  is hashed at all for an id installed in only one project.
+- A project whose lockfile or on-disk content cannot be read is listed under
+  `Skipped … unreadable project(s)` and contributes nothing — unknown content is never evidence of
+  agreement or of a conflict.
+- Read-only, like everything else in `doctor` — including the index itself, which is never rewritten
+  by a read (a project on a temporarily unmounted volume is not forgotten). To resolve a divergence,
+  refresh the clean copies with
   [`update --propagate`](#--propagate--re-sync-copy-installs-in-your-projects) — edited copies are
   conflicts and stay yours.
 
@@ -842,9 +861,9 @@ With `--json`, `doctor` emits a `reconcile::Diagnosis`:
 `bundles` is its completeness array; `healthy` is true when nothing drifts and the exclude block
 matches the lockfile (partial bundles and foreign paths don't affect it).
 
-`--all` adds a sibling `divergences` array — and only then, so the object is unchanged without the
-flag, exactly like [`update --json`](#--propagate--re-sync-copy-installs-in-your-projects) and its
-`propagation`:
+`--all` fills in the diagnosis's optional `divergences` object — and only then, so the object is
+unchanged without the flag, exactly like
+[`update --json`](#--propagate--re-sync-copy-installs-in-your-projects) and its `propagation`:
 
 ```json
 {
@@ -855,18 +874,26 @@ flag, exactly like [`update --json`](#--propagate--re-sync-copy-installs-in-your
   "foreign": [],
   "lockfile_present": true,
   "healthy": true,
-  "divergences": [
-    {
-      "id": "deploy-helper",
-      "type": "skill",
-      "variants": [
-        { "hash": "9f2c1ab07e41…", "paths": ["/Users/me/work/api/.agents/skills/deploy-helper"] },
-        { "hash": "c40d55e9a1b2…", "paths": ["/Users/me/work/site/.agents/skills/deploy-helper"] }
-      ]
-    }
-  ]
+  "divergences": {
+    "items": [
+      {
+        "id": "deploy-helper",
+        "type": "skill",
+        "contents": [
+          { "hash": "9f2c1ab07e41…", "paths": ["/Users/me/work/api/.agents/skills/deploy-helper"] },
+          { "hash": "c40d55e9a1b2…", "paths": ["/Users/me/work/site/.agents/skills/deploy-helper"] }
+        ]
+      }
+    ],
+    "skipped": []
+  }
 }
 ```
+
+`divergences.items` holds one entry per diverged family of comparable copies: `contents` is one
+`{ "hash", "paths" }` group per distinct content, and `harness` names the agent variant the family
+belongs to (absent for skills). `divergences.skipped` holds `{ "project", "error" }` for the known
+projects that could not be read. The whole `divergences` key is absent without `--all`.
 
 > **Breaking change:** `doctor` now diagnoses the harness-aware `.akit/kit.lock.json` (previously the
 > legacy `.copilot` lockfile). The `--json` shape changed from the old
@@ -1517,15 +1544,18 @@ Diverged: 2 distinct contents across copy installs.
 
 Both projects read `clean` — each matches its *own* recorded hash — and they still hold different
 bytes. That is the conflict per-project drift cannot see. `--symlink` installs resolve to the catalog
-and are never part of a divergence. Use [`doctor --all`](#--all--cross-project-divergence) to ask the
+and are never part of a divergence, two copies inside a single project are drift rather than
+divergence, and an agent's per-harness variants are compared only against the same variant elsewhere
+(`Diverged (claude variant): …`). Use [`doctor --all`](#--all--cross-project-divergence) to ask the
 same question for every id at once.
 
 With `--json`, `where` emits `{ "id", "type", "projects", "skipped", "variants", "diverged" }`, where
 each project is `{ "project": "<abs path>", "health": { … } }` and `health` is the same per-item
 object `installed` emits (`harnesses`, `materializations` with `mode`/`covers`/`drift`,
-`source_present`, `degraded`). `skipped` entries are `{ "project", "error" }`. `variants` is one
-`{ "hash", "paths" }` group per distinct copy content, and `diverged` is true when there is more than
-one.
+`source_present`, `degraded`). `skipped` entries are `{ "project", "error" }` — a project listed
+there contributes nothing else to the report. `variants` is one group per comparable family of copies,
+`{ "harness"?, "contents": [ { "hash", "paths" } ], "diverged" }`, and the top-level `diverged` is
+true when any group is.
 
 #### The global install index
 
@@ -1545,9 +1575,11 @@ by one small file:
   alone: a project whose lockfile no longer holds the item just stops matching.
 - **Local-only:** it lives beside your catalog under `~/.akit`, is never written inside a project,
   and is never committed. It is not synced anywhere.
-- **Tolerant reads:** an entry whose directory has been deleted, or that no longer has an
-  `.akit/kit.lock.json`, is pruned on the next read; an index file that is unreadable or of an
-  unknown schema is treated as empty. None of that is an error.
+- **Tolerant, non-destructive reads:** an entry whose directory has been deleted, or that no longer
+  has an `.akit/kit.lock.json`, is filtered out of every read — *in memory*. Reads (`where`,
+  `doctor --all`) never rewrite the file, so a project sitting on an unmounted volume is still there
+  when the volume comes back; the file itself is compacted by the next `install`. An index file that
+  is unreadable or of an unknown schema is treated as empty. None of that is an error.
 - **Deleting it is safe.** It is a rebuildable cache: `where` and `--propagate` simply see fewer
   projects until your next install records them again.
 

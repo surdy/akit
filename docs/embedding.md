@@ -172,28 +172,48 @@ let report = index::propagate(&catalog, &[(ItemType::Skill, "deploy-to-vercel".t
 ```
 
 ```rust
-// `akit doctor --all`: catalog ids whose *copy* installs hold different bytes in
+// `akit doctor --all`: comparable *copy* installs holding different bytes in
 // different projects. Symlink installs track the catalog live and never diverge.
-for d in index::divergences()? {
-    for variant in &d.variants {
-        println!("{} {}: {:?}", d.id, variant.hash, variant.paths);
+let report = index::divergences()?;
+for d in &report.items {
+    // `d.harness` names the agent variant this family belongs to (None for skills).
+    for content in &d.contents {
+        println!("{} {}: {:?}", d.id, content.hash, content.paths);
     }
+}
+for s in &report.skipped {
+    eprintln!("could not inspect {}: {}", s.project, s.error);
 }
 ```
 
 Key types (all `Serialize`/`Deserialize`): `index::{InstallIndex, ProjectEntry, WhereReport,
-WhereProject, SkippedProject, ContentVariant, Divergence, PropagationReport, ProjectPropagation,
-PropagatedItem, PropagatedPath, PropagateStatus, PropagateSummary}`. `ops::UpdateReport` gained an
-optional `propagation: Option<PropagationReport>` field, skipped in JSON when absent — additive to
-the existing `update` shape. `WhereReport` likewise gained `variants: Vec<ContentVariant>` and
-`diverged: bool` (issue #41), and `reconcile::Diagnosis` gained `foreign: Vec<ForeignPath>` — the
-unmanaged occupants of harness target paths, also available on its own via
-`reconcile::foreign_paths_with`. Divergence and foreign detection are strictly read-only.
+WhereProject, SkippedProject, ContentVariant, VariantGroup, Divergence, DivergenceReport,
+PropagationReport, ProjectPropagation, PropagatedItem, PropagatedPath, PropagateStatus,
+PropagateSummary}`. `ops::UpdateReport` gained an optional `propagation: Option<PropagationReport>`
+field, skipped in JSON when absent — additive to the existing `update` shape. `reconcile::Diagnosis`
+gained the same shape for issue #41: `foreign: Vec<ForeignPath>` (the unmanaged occupants of harness
+target paths, also available on its own via `reconcile::foreign_paths_with`) plus
+`divergences: Option<DivergenceReport>`, absent from JSON unless a caller fills it in — which is how
+`doctor --all` round-trips through a library type rather than a CLI-private struct:
+
+```rust
+let mut diagnosis = reconcile::diagnose(&project, &catalog)?;
+// Hand the just-computed drift over so this project's clean copies are not re-hashed.
+diagnosis.divergences = Some(index::divergences_with(Some((&project.root, &diagnosis.items)))?);
+```
+
+`WhereReport` likewise gained `variants: Vec<VariantGroup>` and `diverged: bool`. A `VariantGroup` is
+one family of *comparable* copies — all copies of a skill (one skill directory), but agent copies
+grouped by the harness whose native variant file they came from, since those are different bytes by
+construction. `diverged` requires two different **projects** to hold different content; two copies
+inside one project are drift, which `health` already reports as `modified`. Divergence and foreign
+detection are strictly read-only, including of the index file itself: reads filter stale entries in
+memory and never rewrite it (only `record_install` compacts it).
 
 Every entry point has an `_at(index_path, …)` variant (`locate_at`, `propagate_at`,
-`divergences_at`, `known_projects_at`, `record_install_at`) so a host can keep its own state file. Index I/O is
-always local `std::fs`, never the `FsTransport` seam — the index is host state about *this*
-machine, while the seam exists to reach a remote project root.
+`divergences_at`, `divergences_at_with`, `known_projects_at`, `record_install_at`) so a host can keep
+its own state file. Index I/O is always local `std::fs`, never the `FsTransport` seam — the index is
+host state about *this* machine, while the seam exists to reach a remote project root.
 
 Index writes are **not** part of the engine's install path: the CLI calls
 `index::record_install(&project.root)` after a successful install. A host should do the same for

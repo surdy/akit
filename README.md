@@ -75,8 +75,9 @@ See [`docs/design.md`](docs/design.md) for the full design, decisions, and Phase
   catalog id or a remote `owner/repo/path[#ref]` to pull-then-install), `uninstall`
   (`[--agent] [-H <id>]... [--bundle <name>]`), `installed` (list installs + health), `status`
   (project overview, bundle completeness), `doctor` (`[--all]`: read-only diagnosis, including
-  `foreign` unmanaged files in harness target paths and — with `--all` — catalog ids `diverged`
-  across projects), `sync` (= `repair`),
+  `foreign` unmanaged files occupying harness target paths and — with `--all` — copy installs
+  `diverged` across projects, compared per catalog id and, for agents, per native harness
+  variant), `sync` (= `repair`),
   `repair`/`detach`/`forget`/`adopt` (ownership maintenance), `reset [--yes]`, `where`
   (`[--agent] <id>`: every known project holding an item, with health and divergence), `verify` (probe
   harness support on this host), `ls` (list the whole catalog; alias `catalog`), `search`,
