@@ -61,6 +61,8 @@ fn akit_install(
         .args(["--project", proj.to_str().unwrap()])
         .args(args)
         .env("KIT_CATALOG_DIR", catalog_root)
+        // Keep the global install index (#40) inside the fixture.
+        .env("AKIT_STATE_DIR", catalog_root.with_file_name("akit-state"))
         .env("AKIT_HARNESSES", harnesses)
         .output()
         .expect("akit binary should run")

@@ -65,6 +65,9 @@ See [`docs/design.md`](docs/design.md) for the full design, decisions, and Phase
 - **Lockfile:** `<project>/.akit/kit.lock.json` (excluded via `.git/info/exclude`):
   `{ "version": 2, "items": [ { "id", "type", "source", "ref"?, "bundle"?, "harnesses",
   "materializations": [ { "path", "mode", "covers", "hash"? } ] } ] }`.
+- **Global install index:** `~/.akit/state/installs.json` (override with `$AKIT_STATE_DIR`) —
+  local-only, records just the project paths akit has installed into, powering `where` and
+  `update --propagate`. Never written inside a project; deleting it is safe.
 - **fs helpers:** `materialize_one`/`materialize_all` + `check_drift`, and
   `add_line`/`remove_line`/`set_managed_lines` on `.git/info/exclude`.
 - **CLI scaffold:** `akit <cmd> [--project <dir>] [--json]`; commands are `install`
@@ -72,11 +75,13 @@ See [`docs/design.md`](docs/design.md) for the full design, decisions, and Phase
   catalog id or a remote `owner/repo/path[#ref]` to pull-then-install), `uninstall`
   (`[--agent] [-H <id>]... [--bundle <name>]`), `installed` (list installs + health), `status`
   (project overview, bundle completeness), `doctor` (read-only diagnosis), `sync` (= `repair`),
-  `repair`/`detach`/`forget`/`adopt` (ownership maintenance), `reset [--yes]`, `verify` (probe
+  `repair`/`detach`/`forget`/`adopt` (ownership maintenance), `reset [--yes]`, `where`
+  (`[--agent] <id>`: every known project holding an item, with health), `verify` (probe
   harness support on this host), `ls` (list the whole catalog; alias `catalog`), `search`,
   `show`, `pull` (fetch a remote source into the catalog), `drop` (remove an item from the
   catalog + prune its manifest entry if it was pulled), `update` (refresh pulled items to the
-  latest upstream commit; `--check` to preview, or `<id> --to <sha>` to roll back / forward-pin
+  latest upstream commit; `--check` to preview, `--propagate` to re-sync copy installs of the
+  refreshed items across known projects, or `<id> --to <sha>` to roll back / forward-pin
   to an exact commit), `log` (show a pulled item's upstream commit history, marking the
   installed commit), and `restore` (rebootstrap the catalog from `akit.yml`, pinning each item
   to its recorded commit; `--latest` to move to the head of its ref).

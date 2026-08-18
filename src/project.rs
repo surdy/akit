@@ -43,6 +43,16 @@ impl Project {
         })
     }
 
+    /// A handle to an **explicit** project root, without walking up to an
+    /// enclosing repo. Used by the global install index (#40), whose recorded
+    /// paths are already roots: a recorded project that is not itself a git repo
+    /// must never be silently re-rooted onto a parent repo.
+    pub fn at(root: impl Into<PathBuf>) -> Self {
+        let root = root.into();
+        let git_dir = resolve_git_dir(&root.join(".git"));
+        Self { root, git_dir }
+    }
+
     /// `<root>/.github/skills`
     pub fn github_skills_dir(&self) -> PathBuf {
         self.root.join(".github").join("skills")

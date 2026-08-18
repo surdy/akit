@@ -91,6 +91,10 @@ enum Commands {
         /// Report what would change without writing anything.
         #[arg(long)]
         check: bool,
+        /// After refreshing the catalog, re-sync copy-mode installs of the updated
+        /// items in every project in the global install index.
+        #[arg(long)]
+        propagate: bool,
         /// Roll back (or forward-pin) `<id>` to this exact commit of its recorded ref.
         #[arg(long, value_name = "SHA")]
         to: Option<String>,
@@ -163,6 +167,18 @@ enum Commands {
     },
     /// List harness-aware installs recorded in `.akit/kit.lock.json`.
     Installed,
+    /// Show every known project where a catalog item is installed (global index).
+    ///
+    /// Driven by the global install index, so it works from any directory. Only
+    /// projects akit has installed into are known; a project it never touched (or
+    /// one whose index entry was deleted) simply does not appear.
+    Where {
+        /// Look for an agent instead of a skill.
+        #[arg(long)]
+        agent: bool,
+        /// Catalog id to look for.
+        id: String,
+    },
     /// Remove every akit-owned file and clear the harness-aware lockfile.
     Reset {
         /// Skip the confirmation prompt.
@@ -326,11 +342,15 @@ fn run() -> Result<()> {
         Commands::Update {
             agent,
             check,
+            propagate,
             to,
             id,
         } => {
             let catalog = Catalog::locate()?;
-            let report = if let Some(to) = to.as_deref() {
+            if *check && *propagate {
+                bail!("update --propagate cannot be combined with --check (nothing was refreshed)");
+            }
+            let mut report = if let Some(to) = to.as_deref() {
                 if *check {
                     bail!("update --to <sha> cannot be combined with --check");
                 }
@@ -342,10 +362,26 @@ fn run() -> Result<()> {
                 let only = id.as_deref().map(|id| (item_type(*agent), id));
                 ops::update_catalog(&catalog, only, &remote_base_url(), *check)?
             };
+            if *propagate {
+                // Every item the refresh actually resolved is a candidate; the
+                // per-materialization content check decides what really needs
+                // re-materializing, so an install left stale by an earlier update
+                // is caught too. Items that errored are excluded.
+                let targets: Vec<(ItemType, String)> = report
+                    .items
+                    .iter()
+                    .filter(|i| !matches!(i.status, ops::UpdateStatus::Error))
+                    .map(|i| (i.item_type, i.id.clone()))
+                    .collect();
+                report.propagation = Some(akit::index::propagate(&catalog, &targets)?);
+            }
             if cli.json {
                 println!("{}", serde_json::to_string(&report)?);
             } else {
                 print_update_report(&report, *check);
+                if let Some(propagation) = &report.propagation {
+                    print_propagation_report(propagation);
+                }
             }
             if report.summary.errors > 0 {
                 std::process::exit(1);
@@ -418,6 +454,7 @@ fn run() -> Result<()> {
                     }
                     let report =
                         install::install_bundle_opts(&project, &catalog, bundle, &ctx, opts)?;
+                    record_in_index(&project);
                     if cli.json {
                         println!("{}", serde_json::to_string(&report)?);
                     } else {
@@ -456,6 +493,7 @@ fn run() -> Result<()> {
                             &ctx,
                             opts,
                         )?;
+                        record_in_index(&project);
                         if cli.json {
                             // Monomorphic with a local install: emit the InstallReport.
                             // Pull provenance is recorded in the catalog manifest.
@@ -492,6 +530,7 @@ fn run() -> Result<()> {
                             &ctx,
                             opts,
                         )?;
+                        record_in_index(&project);
                         if cli.json {
                             println!("{}", serde_json::to_string(&report)?);
                         } else {
@@ -553,6 +592,16 @@ fn run() -> Result<()> {
                 println!("{}", serde_json::to_string(&report)?);
             } else {
                 print_installed_health(&report);
+            }
+        }
+        Commands::Where { agent, id } => {
+            // Index-driven: no project is located, so this works from any cwd.
+            let catalog = Catalog::locate()?;
+            let report = akit::index::locate(&catalog, item_type(*agent), id)?;
+            if cli.json {
+                println!("{}", serde_json::to_string(&report)?);
+            } else {
+                print_where_report(&report);
             }
         }
         Commands::Reset { yes } => {
@@ -758,6 +807,18 @@ fn confirm_reset(installs: usize, files: usize) -> Result<bool> {
     let mut line = String::new();
     std::io::stdin().read_line(&mut line)?;
     Ok(matches!(line.trim(), "y" | "Y" | "yes" | "Yes"))
+}
+
+/// Record the project in the global install index (#40) after a successful
+/// install, so `where` and `update --propagate` can find it from anywhere.
+///
+/// Host-level bookkeeping, not ownership state — it lives under `~/.akit` (or
+/// `$AKIT_STATE_DIR`), never inside the project — so a failure here warns and is
+/// never allowed to fail an install that already succeeded.
+fn record_in_index(project: &Project) {
+    if let Err(e) = akit::index::record_install(&project.root) {
+        eprintln!("warning: could not update the global install index: {e:#}");
+    }
 }
 
 fn print_install_report(project: &Project, report: &install::InstallReport) {
@@ -1177,6 +1238,59 @@ fn print_installed_health(report: &akit::reconcile::HealthReport) {
     }
 }
 
+/// Print `where`: one block per known project holding the item, listing its
+/// harness coverage, health, and every materialization with mode + drift.
+fn print_where_report(report: &akit::index::WhereReport) {
+    let kind = type_name(report.item_type);
+    if report.projects.is_empty() {
+        println!(
+            "{} '{}' is not installed in any known project.",
+            title_case(kind),
+            report.id
+        );
+    } else {
+        println!(
+            "{} '{}' — installed in {} project(s):",
+            title_case(kind),
+            report.id,
+            report.projects.len()
+        );
+        for p in &report.projects {
+            println!();
+            println!("{}", p.project);
+            println!(
+                "  harnesses: {}   health: {}",
+                covers_str(&p.health.harnesses),
+                item_health_label(&p.health)
+            );
+            for m in &p.health.materializations {
+                println!(
+                    "  {}  [{}]  ({})  {}",
+                    m.path,
+                    mode_name(m.mode),
+                    covers_str(&m.covers),
+                    drift_name(m.drift)
+                );
+            }
+        }
+    }
+    if !report.skipped.is_empty() {
+        println!();
+        println!("Skipped {} unreadable project(s):", report.skipped.len());
+        for s in &report.skipped {
+            println!("  {}: {}", s.project, s.error);
+        }
+    }
+}
+
+fn drift_name(drift: akit::materialize::Drift) -> &'static str {
+    match drift {
+        akit::materialize::Drift::Clean => "clean",
+        akit::materialize::Drift::Missing => "missing",
+        akit::materialize::Drift::Modified => "modified",
+    }
+}
+
 fn print_stale_excludes(stale: &[String]) {
     println!("Stale exclude lines (not owned by any install):");
     for line in stale {
@@ -1480,6 +1594,73 @@ fn print_update_report(report: &ops::UpdateReport, check: bool) {
             s.errors
         );
     }
+}
+
+fn propagate_status_label(status: akit::index::PropagateStatus) -> &'static str {
+    use akit::index::PropagateStatus as S;
+    match status {
+        S::Updated => "updated",
+        S::UpToDate => "up to date",
+        S::Drifted => "drifted",
+        S::Symlink => "symlink",
+        S::Missing => "missing",
+        S::Error => "error",
+    }
+}
+
+/// Why a materialization was left alone, appended to its line so the symlink vs
+/// copy distinction (and the no-clobber policy) is visible without the docs.
+fn propagate_status_note(status: akit::index::PropagateStatus) -> &'static str {
+    use akit::index::PropagateStatus as S;
+    match status {
+        S::Drifted => "  (locally modified — not overwritten)",
+        S::Symlink => "  (symlink — already tracks the catalog)",
+        S::Missing => "  (gone — run `akit repair` in that project)",
+        _ => "",
+    }
+}
+
+/// Print the `--propagate` section below the update report: per project, per
+/// item, per materialization, then an aggregate line.
+fn print_propagation_report(report: &akit::index::PropagationReport) {
+    let s = &report.summary;
+    println!();
+    if report.projects.is_empty() {
+        println!(
+            "Propagate: nothing to re-sync ({} known project(s) checked).",
+            s.projects
+        );
+        return;
+    }
+    println!("Propagate:");
+    for p in &report.projects {
+        println!("  {}", p.project);
+        if let Some(error) = &p.error {
+            println!("    skipped: {error}");
+        }
+        for item in &p.items {
+            println!("    {} '{}'", type_name(item.item_type), item.id);
+            if let Some(error) = &item.error {
+                println!("      skipped: {error}");
+            }
+            for m in &item.materializations {
+                let label = propagate_status_label(m.status);
+                match &m.error {
+                    Some(error) => println!("      {label:<10}  {}: {error}", m.path),
+                    None => println!(
+                        "      {label:<10}  {}{}",
+                        m.path,
+                        propagate_status_note(m.status)
+                    ),
+                }
+            }
+        }
+    }
+    println!(
+        "Propagated across {} project(s): {} updated, {} up to date, {} drifted (skipped), \
+         {} symlink (already live), {} missing, {} error(s).",
+        s.projects, s.updated, s.up_to_date, s.drifted, s.symlink, s.missing, s.errors
+    );
 }
 
 fn print_log(entries: &[ops::LogEntry]) {

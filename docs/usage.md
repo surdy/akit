@@ -467,6 +467,80 @@ reports the item as `pinned`; run `akit update <id>` against the branch again �
 `ref` — to resume tracking. `--to` cannot be combined with `--check`, and requires an `<id>`. The
 `--json` output reuses the `update` object shape (`status`, `previous_commit`, `commit`).
 
+#### `--propagate` — re-sync copy installs in your projects
+
+`update` refreshes your **catalog**. Copies already materialized into projects do not change by
+themselves, so a refreshed skill only reaches them on the next `install`. `--propagate` closes that
+gap: after the refresh it walks the [global install index](#the-global-install-index) and re-syncs
+the refreshed items in every project akit has installed into.
+
+```bash
+$ akit update --propagate
+  updated skill 'deploy-to-vercel' from vercel-labs/agent-skills/deploy-to-vercel#main (9f3c1a2 → 4b7e0d1)
+Updated 1 item(s): 1 updated, 0 up to date, 0 pinned, 0 error(s).
+
+Propagate:
+  /Users/me/work/api
+    skill 'deploy-to-vercel'
+      updated     .agents/skills/deploy-to-vercel
+  /Users/me/work/site
+    skill 'deploy-to-vercel'
+      drifted     .agents/skills/deploy-to-vercel  (locally modified — not overwritten)
+Propagated across 2 project(s): 1 updated, 0 up to date, 1 drifted (skipped), 0 symlink (already live), 0 missing, 0 error(s).
+```
+
+Each materialization gets one of:
+
+| Status | Meaning |
+|---|---|
+| `updated` | A copy that still matched its recorded hash but lagged the refreshed catalog. Re-materialized through the same atomic stage-and-rename used by `install`, and its recorded hash updated. |
+| `up to date` | The copy already matches the catalog source; nothing to do. |
+| `drifted` | On-disk bytes ≠ the recorded hash, i.e. someone edited it. Reported as a conflict and **never overwritten** — the same no-clobber policy as [`sync`/`repair`](#sync--repair-safe-lockfilefilesystemexclude-drift). |
+| `symlink` | A [`--symlink`](#--symlink--symlink-skills-to-the-catalog-instead-of-copying) install already resolves to the catalog, so it went live the moment the catalog changed. Nothing to propagate. |
+| `missing` | The materialization is gone. Restoring it is [`repair`](#repair--detach--forget--adopt--maintain-akit-ownership)'s job, in that project. |
+
+- Only projects in the index are visited, and only items the run actually refreshed are considered.
+  A project that never held the item simply does not appear.
+- A project whose lockfile cannot be read, or an item whose catalog source has disappeared, is
+  reported and skipped — never fatal.
+- Nothing else about a project changes: no new files are created, no harness set is reshaped, and
+  the managed `.git/info/exclude` block is untouched (the owned paths do not change).
+- `--propagate` cannot be combined with `--check` — a check writes nothing, so there is nothing to
+  propagate. It *can* be combined with `--to <sha>`, which propagates the rolled-back content.
+
+With `--json`, `--propagate` **adds** a `propagation` object to the `update` report. It is absent
+without the flag, so existing consumers keep seeing the unchanged shape:
+
+```json
+{
+  "items": [ … ],
+  "summary": { … },
+  "propagation": {
+    "projects": [
+      {
+        "project": "/Users/me/work/api",
+        "items": [
+          {
+            "id": "deploy-to-vercel",
+            "type": "skill",
+            "materializations": [
+              { "path": ".agents/skills/deploy-to-vercel", "mode": "copy", "status": "updated" }
+            ]
+          }
+        ]
+      }
+    ],
+    "summary": {
+      "projects": 2, "updated": 1, "up_to_date": 0,
+      "drifted": 1, "symlink": 0, "missing": 0, "errors": 0
+    }
+  }
+}
+```
+
+A materialization `status` is one of `updated`, `up-to-date`, `drifted`, `symlink`, `missing`, or
+`error`; a skipped project or item carries an `error` string instead.
+
 ### `log` — show a pulled item's commit history
 
 ```text
@@ -1276,6 +1350,72 @@ Each item's `type` is `"skill"`/`"agent"`; each materialization's `drift` is `"c
 materialization; `source_present` is `false` for the `missing-source` case. `healthy` is `true`
 only when every item is clean and there are no stale excludes.
 
+### `where` — find every project an item is installed in
+
+```bash
+akit where [--agent] <id>
+```
+
+Answers "where did I install this?" across **every project akit has installed into**. It reads the
+[global install index](#the-global-install-index) rather than the current project, so it works from
+any directory and ignores `--project`. Each project is listed with the item's harness coverage, its
+health, and every materialization (path, mode, covered harnesses, drift):
+
+```bash
+$ akit where deploy-to-vercel
+Skill 'deploy-to-vercel' — installed in 2 project(s):
+
+/Users/me/work/api
+  harnesses: copilot, codex   health: ok
+  .agents/skills/deploy-to-vercel  [copy]  (copilot, codex)  clean
+
+/Users/me/work/site
+  harnesses: claude   health: degraded (uncovered: claude)
+  .claude/skills/deploy-to-vercel  [symlink]  (claude)  missing
+```
+
+- `--agent` looks for an agent package instead of a skill.
+- A known project that does not have the item simply does not appear; an item nobody installed
+  prints `is not installed in any known project.` and still exits 0.
+- Health values are the same ones [`installed`](#installed--list-harness-aware-installs-and-their-health)
+  reports (`ok`, `degraded (uncovered: …)`, `missing-source`), computed per project.
+- A project whose lockfile cannot be read is listed under `Skipped … unreadable project(s)` instead
+  of failing the command.
+
+With `--json`, `where` emits `{ "id", "type", "projects", "skipped" }`, where each project is
+`{ "project": "<abs path>", "health": { … } }` and `health` is the same per-item object `installed`
+emits (`harnesses`, `materializations` with `mode`/`covers`/`drift`, `source_present`, `degraded`).
+`skipped` entries are `{ "project", "error" }`.
+
+#### The global install index
+
+`where` and [`update --propagate`](#--propagate--re-sync-copy-installs-in-your-projects) are driven
+by one small file:
+
+```text
+~/.akit/state/installs.json        (override the directory with $AKIT_STATE_DIR)
+```
+
+- **What it records:** the absolute path of each project directory akit has installed into, plus
+  the timestamp of the last install there. Nothing else — no item ids, no descriptions, no file
+  contents. Each project's `.akit/kit.lock.json` remains the only source of truth for *what* is
+  installed in it.
+- **When it is written:** after a successful `install` of any shape — a local catalog id, a remote
+  `owner/repo/path[#ref]`, or `--bundle`. `uninstall` and `reset` deliberately leave the entry
+  alone: a project whose lockfile no longer holds the item just stops matching.
+- **Local-only:** it lives beside your catalog under `~/.akit`, is never written inside a project,
+  and is never committed. It is not synced anywhere.
+- **Tolerant reads:** an entry whose directory has been deleted, or that no longer has an
+  `.akit/kit.lock.json`, is pruned on the next read; an index file that is unreadable or of an
+  unknown schema is treated as empty. None of that is an error.
+- **Deleting it is safe.** It is a rebuildable cache: `where` and `--propagate` simply see fewer
+  projects until your next install records them again.
+
+Symlink installs need no propagation at all — a `--symlink` materialization points straight at the
+catalog, so it tracks every catalog change live. The index matters most for **copy** installs
+(the default, and the only mode used for agents and for skill paths shared with a harness whose
+symlink-following is unconfirmed).
+
 ### `reset` — remove every harness-aware install
 
 ```bash
@@ -1397,3 +1537,7 @@ The harness-aware engine keeps materializations under each harness's discovery p
 (`.agents/skills`, `.claude/skills`, `.github/agents`, …) plus its `.akit/kit.lock.json` lockfile.
 It adds every path it writes to `.git/info/exclude` (a local, untracked ignore list). Your tracked
 `.gitignore` is never touched, and `git status` stays clean.
+
+The one piece of state that lives *outside* a project is the
+[global install index](#the-global-install-index) under `~/.akit` — a list of the project paths
+akit has installed into, never written into a repo and never committed.

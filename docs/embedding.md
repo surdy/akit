@@ -154,6 +154,39 @@ MaterializationRecord}`, and `materialize::Drift`. `HarnessContext` and `RemoveS
 > orphaned record), `remove_stale_excludes_with`, and `adopt_with` (claim existing exact-content
 > files as owned) — each with a `HealthReport`/report type.
 
+### Cross-project awareness (the global install index)
+
+`index` keeps a local-only list of the project directories akit has installed into
+(`~/.akit/state/installs.json`, or `$AKIT_STATE_DIR`) — project paths plus a timestamp, never
+anything about the items themselves. It powers two cross-project reads:
+
+```rust
+use akit::index;
+
+// `akit where <id>`: every known project holding an item, with its health there.
+let hits = index::locate(&catalog, ItemType::Skill, "deploy-to-vercel")?;
+
+// `akit update --propagate`: re-materialize copy installs of refreshed items, skipping
+// drifted copies (conflicts) and symlinks (already live).
+let report = index::propagate(&catalog, &[(ItemType::Skill, "deploy-to-vercel".to_string())])?;
+```
+
+Key types (all `Serialize`/`Deserialize`): `index::{InstallIndex, ProjectEntry, WhereReport,
+WhereProject, SkippedProject, PropagationReport, ProjectPropagation, PropagatedItem,
+PropagatedPath, PropagateStatus, PropagateSummary}`. `ops::UpdateReport` gained an optional
+`propagation: Option<PropagationReport>` field, skipped in JSON when absent — additive to the
+existing `update` shape.
+
+Every entry point has an `_at(index_path, …)` variant (`locate_at`, `propagate_at`,
+`known_projects_at`, `record_install_at`) so a host can keep its own state file. Index I/O is
+always local `std::fs`, never the `FsTransport` seam — the index is host state about *this*
+machine, while the seam exists to reach a remote project root.
+
+Index writes are **not** part of the engine's install path: the CLI calls
+`index::record_install(&project.root)` after a successful install. A host should do the same for
+local project roots it wants `where`/`propagate` to see, and should *not* record roots it installed
+into over a remote transport.
+
 ### Per-host capability verification
 
 `verify::verify_all` / `verify::verify_harness` decide whether a harness is actually supported on a

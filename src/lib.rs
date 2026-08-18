@@ -15,6 +15,7 @@ pub mod exec;
 pub mod fsops;
 pub mod gitexclude;
 pub mod harness;
+pub mod index;
 pub mod install;
 pub mod lockfile;
 pub mod manifest;

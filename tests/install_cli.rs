@@ -24,6 +24,9 @@ fn akit(project: &Path, catalog: &Path, args: &[&str]) -> (String, bool) {
         .args(["--project", project.to_str().unwrap()])
         .args(args)
         .env("KIT_CATALOG_DIR", catalog)
+        // Keep the global install index (#40) inside the fixture, never the
+        // developer's real `~/.akit/state`.
+        .env("AKIT_STATE_DIR", catalog.with_file_name("akit-state"))
         // Never inherit a developer's ambient default harnesses.
         .env_remove("AKIT_HARNESSES")
         // Non-interactive: prompts must not hang the test.
@@ -137,6 +140,7 @@ fn env_var_supplies_default_harnesses() {
     let out = Command::new(env!("CARGO_BIN_EXE_akit"))
         .args(["--project", project.to_str().unwrap(), "install", "demo"])
         .env("KIT_CATALOG_DIR", &catalog)
+        .env("AKIT_STATE_DIR", catalog.with_file_name("akit-state"))
         .env("AKIT_HARNESSES", "copilot codex")
         .stdin(std::process::Stdio::null())
         .output()

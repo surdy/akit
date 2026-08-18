@@ -416,6 +416,11 @@ pub struct UpdateSummary {
 pub struct UpdateReport {
     pub items: Vec<UpdateItem>,
     pub summary: UpdateSummary,
+    /// What `--propagate` did to installs of these items across the known
+    /// projects in the global index (#40). `None` (and absent from JSON) unless
+    /// propagation ran, so the existing report shape is unchanged.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub propagation: Option<crate::index::PropagationReport>,
 }
 
 /// Whether a ref is an immutable full commit SHA (40 hex for SHA-1, 64 for SHA-256).
@@ -624,7 +629,11 @@ pub fn update_catalog(
         anyhow::bail!("nothing to update: no catalog item with id '{id}' was pulled from a source");
     }
 
-    Ok(UpdateReport { items, summary })
+    Ok(UpdateReport {
+        items,
+        summary,
+        propagation: None,
+    })
 }
 
 /// One row returned by `log`: an upstream commit of a pulled item's recorded ref.
@@ -751,6 +760,7 @@ pub fn rollback_catalog(
             error: None,
         }],
         summary,
+        propagation: None,
     })
 }
 

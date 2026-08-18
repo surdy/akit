@@ -218,6 +218,8 @@ fn run_akit(
         .args(["--project", project.to_str().unwrap(), "--json"])
         .args(args)
         .env(remote::ENV_CACHE_DIR, cache)
+        // Keep the global install index (#40) inside the fixture.
+        .env("AKIT_STATE_DIR", cache.with_file_name("akit-state"))
         .env_remove("KIT_CATALOG_DIR")
         .env_remove(remote::ENV_REMOTE_BASE_URL);
     if let Some(base_url) = base_url {
@@ -284,6 +286,9 @@ fn run_akit_pull(
         .args(args)
         .env(remote::ENV_CACHE_DIR, cache)
         .env("KIT_CATALOG_DIR", catalog)
+        // Keep the global install index (#40) inside the fixture, and on the same
+        // path `run_akit_install` records into.
+        .env("AKIT_STATE_DIR", catalog.with_file_name("akit-state"))
         .env(remote::ENV_REMOTE_BASE_URL, base_url)
         .output()
         .expect("akit binary should run")
@@ -915,6 +920,94 @@ fn update_advances_and_records_commit() {
     assert!(manifest.contains(&format!("commit: {c2}")), "{manifest}");
 }
 
+/// End-to-end `update --propagate` (issue #40): a refreshed catalog item is
+/// re-materialized into the known projects that copied it, while a project whose
+/// copy was hand-edited is reported as a conflict and left alone.
+#[test]
+fn update_propagate_resyncs_copy_installs_in_known_projects() {
+    let tmp = test_tempdir();
+    let base = tmp.path();
+    let git_base = make_local_bare_remote(base);
+    let cache = base.join("cache");
+    let catalog = base.join("catalog");
+    let base_url = format!("file://{}", git_base.display());
+
+    // Install the (remote-backed) skill into two projects, so both land in the
+    // global install index.
+    let clean = base.join("clean-project");
+    let edited = base.join("edited-project");
+    for project in [&clean, &edited] {
+        fs::create_dir_all(project).unwrap();
+        assert_git(&["init", "-q"], project);
+        let output = run_akit_install(
+            &["install", "acme/kit-skills/deploy-to-vercel#main"],
+            project,
+            &catalog,
+            &cache,
+            &base_url,
+            "copilot",
+        );
+        assert!(
+            output.status.success(),
+            "install failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    let installed = |project: &Path| project.join(".agents/skills/deploy-to-vercel/SKILL.md");
+    fs::write(installed(&edited), "hand-edited").unwrap();
+
+    push_remote_change(base, &git_base, "updated body");
+
+    let output = run_akit_pull(&["update", "--propagate"], &catalog, &cache, &base_url);
+    assert!(
+        output.status.success(),
+        "update --propagate failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    // The pre-existing update shape is untouched; propagation is additive.
+    assert_eq!(json["items"][0]["status"], "updated");
+    let summary = &json["propagation"]["summary"];
+    assert_eq!(summary["projects"], 2, "{json}");
+    assert_eq!(summary["updated"], 1);
+    assert_eq!(summary["drifted"], 1);
+    assert_eq!(summary["errors"], 0);
+
+    // The clean copy now carries the refreshed content; the edited one does not.
+    assert!(
+        fs::read_to_string(installed(&clean))
+            .unwrap()
+            .contains("updated body")
+    );
+    assert_eq!(
+        fs::read_to_string(installed(&edited)).unwrap(),
+        "hand-edited"
+    );
+
+    // Re-running has nothing to update, and the human report names both outcomes.
+    let output = Command::new(env!("CARGO_BIN_EXE_akit"))
+        .args(["update", "--propagate"])
+        .env("KIT_CATALOG_DIR", &catalog)
+        .env("AKIT_STATE_DIR", catalog.with_file_name("akit-state"))
+        .env(remote::ENV_CACHE_DIR, &cache)
+        .env(remote::ENV_REMOTE_BASE_URL, &base_url)
+        .output()
+        .expect("akit binary should run");
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("Propagate:"), "{stdout}");
+    assert!(stdout.contains("up to date"), "{stdout}");
+    assert!(
+        stdout.contains("drifted") && stdout.contains("not overwritten"),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains("1 updated") || stdout.contains("0 updated"),
+        "{stdout}"
+    );
+}
+
 #[test]
 fn pull_of_a_flat_remote_agent_is_rejected_with_a_migration_message() {
     let tmp = test_tempdir();
@@ -1120,6 +1213,8 @@ fn run_akit_install(
         .args(["--project", project.to_str().unwrap()])
         .args(args)
         .env("KIT_CATALOG_DIR", catalog)
+        // Keep the global install index (#40) inside the fixture.
+        .env("AKIT_STATE_DIR", catalog.with_file_name("akit-state"))
         .env(remote::ENV_CACHE_DIR, cache)
         .env(remote::ENV_REMOTE_BASE_URL, base_url)
         .env("AKIT_HARNESSES", harnesses)
