@@ -76,9 +76,12 @@ See [`docs/design.md`](docs/design.md) for the full design, decisions, and Phase
   (`[--agent] [-H <id>]... [--dry-run] [--bundle <name>] [--yes]`; confirms before discarding a
   locally modified copy — deleted, or reverted by a scoped reshape), `installed`
   (list installs + health), `status`
-  (project overview, bundle completeness), `doctor` (read-only diagnosis), `sync` (= `repair`),
+  (project overview, bundle completeness), `doctor` (`[--all]`: read-only diagnosis, including
+  `foreign` unmanaged files occupying harness target paths and — with `--all` — copy installs
+  `diverged` across projects, compared per catalog id and, for agents, per native harness
+  variant), `sync` (= `repair`),
   `repair`/`detach`/`forget`/`adopt` (ownership maintenance), `reset [--yes]`, `where`
-  (`[--agent] <id>`: every known project holding an item, with health), `verify` (probe
+  (`[--agent] <id>`: every known project holding an item, with health and divergence), `verify` (probe
   harness support on this host), `ls` (list the whole catalog; alias `catalog`), `search`,
   `show`, `pull` (fetch a remote source into the catalog), `drop` (remove an item from the
   catalog + prune its manifest entry if it was pulled), `update` (refresh pulled items to the

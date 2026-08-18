@@ -44,8 +44,14 @@ enum Commands {
     Status,
     /// Re-materialize missing akit-owned files and resync git-excludes (.akit; same as `repair`).
     Sync,
-    /// Read-only harness-aware diagnosis: item drift, bundle completeness, exclude drift (.akit).
-    Doctor,
+    /// Read-only harness-aware diagnosis: item drift, bundle completeness, exclude drift,
+    /// foreign files (.akit).
+    Doctor {
+        /// Also check the global install index for the same catalog id installed
+        /// with different content in different projects.
+        #[arg(long)]
+        all: bool,
+    },
     /// Search your catalog by skill/agent frontmatter.
     Search {
         /// Query to fuzzy-match against name and description (empty lists everything).
@@ -284,15 +290,27 @@ fn run() -> Result<()> {
                 print_repair_report(&report);
             }
         }
-        Commands::Doctor => {
+        Commands::Doctor { all } => {
             let project = Project::locate(cli.project.clone())?;
             let catalog = Catalog::locate()?;
             // Read-only diagnosis over the harness-aware `.akit` lockfile.
-            let report = akit::reconcile::diagnose(&project, &catalog)?;
+            let mut report = akit::reconcile::diagnose(&project, &catalog)?;
+            // `--all` widens the same read-only pass to the global install index,
+            // which is the only place cross-project divergence is visible. The
+            // diagnosis we just computed is handed over so this project's clean
+            // copies are not hashed a second time.
+            if *all {
+                let divergences =
+                    akit::index::divergences_with(Some((&project.root, &report.items)))?;
+                report.divergences = Some(divergences);
+            }
             if cli.json {
                 println!("{}", serde_json::to_string(&report)?);
             } else {
                 print_diagnosis(&report);
+                if let Some(divergences) = &report.divergences {
+                    print_divergences(divergences);
+                }
             }
         }
         Commands::Search { query } => {
@@ -1540,6 +1558,20 @@ fn print_where_report(report: &akit::index::WhereReport) {
             }
         }
     }
+    if report.diverged {
+        for group in report.variants.iter().filter(|g| g.diverged) {
+            println!();
+            println!(
+                "Diverged{}: {} distinct contents across copy installs.",
+                variant_note(group.harness),
+                group.contents.len()
+            );
+            print_variants(&group.contents, "  ");
+        }
+        println!(
+            "  `akit update --propagate` re-syncs clean copies; edited copies are left as yours."
+        );
+    }
     if !report.skipped.is_empty() {
         println!();
         println!("Skipped {} unreadable project(s):", report.skipped.len());
@@ -2038,10 +2070,12 @@ fn print_status_table(items: &[akit::reconcile::ItemHealth]) {
 }
 
 /// Print a read-only `doctor` diagnosis over the harness-aware `.akit` state:
-/// the item table, per-bundle completeness, exclude drift, then a verdict.
+/// the item table, per-bundle completeness, foreign occupants, exclude drift,
+/// then a verdict.
 fn print_diagnosis(d: &akit::reconcile::Diagnosis) {
     print_status_table(&d.items);
     print_bundle_health(&d.bundles);
+    print_foreign(&d.foreign);
 
     if d.missing_excludes.is_empty() && d.stale_excludes.is_empty() {
         // No exclude drift — say so only when there is a lockfile to compare.
@@ -2058,8 +2092,19 @@ fn print_diagnosis(d: &akit::reconcile::Diagnosis) {
         }
     }
 
+    // A foreign file is somebody else's, so it never makes `healthy` false —
+    // but the verdict still names it, because the next install onto that path
+    // will be refused.
+    let foreign_note = match d.foreign.len() {
+        0 => String::new(),
+        n => format!("{n} foreign"),
+    };
     if d.healthy {
-        println!("\nDoctor: ok");
+        if foreign_note.is_empty() {
+            println!("\nDoctor: ok");
+        } else {
+            println!("\nDoctor: ok ({foreign_note})");
+        }
         return;
     }
     let degraded = d.items.iter().filter(|i| i.degraded).count();
@@ -2088,7 +2133,79 @@ fn print_diagnosis(d: &akit::reconcile::Diagnosis) {
     if partial > 0 {
         parts.push(format!("{partial} partial bundle(s)"));
     }
+    if !foreign_note.is_empty() {
+        parts.push(foreign_note);
+    }
     println!("\nDoctor: {}", parts.join(", "));
+}
+
+/// Print the unmanaged occupants of managed target paths. Purely informational:
+/// akit will not touch these, but it will also refuse to install over them.
+fn print_foreign(foreign: &[akit::reconcile::ForeignPath]) {
+    if foreign.is_empty() {
+        return;
+    }
+    println!("\nforeign (not akit-managed, left untouched):");
+    for f in foreign {
+        println!(
+            "  {}  [{}]  ({})",
+            f.path,
+            type_name(f.item_type),
+            covers_str(&f.harnesses)
+        );
+    }
+    println!("  Remove them, or run `akit adopt` to claim ones that already match your catalog.");
+}
+
+/// Print cross-project divergence: one block per comparable family of copy
+/// installs holding different bytes in different projects.
+fn print_divergences(report: &akit::index::DivergenceReport) {
+    if report.items.is_empty() {
+        println!("\nDiverged: none — every copy install of a shared id matches across projects.");
+    } else {
+        println!("\nDiverged across projects:");
+        for d in &report.items {
+            println!(
+                "  {} '{}'{} — {} distinct contents:",
+                title_case(type_name(d.item_type)),
+                d.id,
+                variant_note(d.harness),
+                d.contents.len()
+            );
+            print_variants(d.contents.as_slice(), "    ");
+        }
+    }
+    if !report.skipped.is_empty() {
+        println!("\nSkipped {} unreadable project(s):", report.skipped.len());
+        for s in &report.skipped {
+            println!("  {}: {}", s.project, s.error);
+        }
+    }
+}
+
+/// Which per-harness agent variant a divergence is about; empty for skills,
+/// whose copies all come from the one skill directory.
+fn variant_note(harness: Option<akit::harness::HarnessId>) -> String {
+    harness
+        .map(|h| format!(" ({h} variant)"))
+        .unwrap_or_default()
+}
+
+/// Print one content-variant group per distinct content, shortest hash prefix
+/// that still identifies it being unnecessary — the paths are the useful part.
+fn print_variants(variants: &[akit::index::ContentVariant], indent: &str) {
+    for v in variants {
+        println!("{indent}{}:", short_hash(&v.hash));
+        for path in &v.paths {
+            println!("{indent}  {path}");
+        }
+    }
+}
+
+/// The first 12 hex characters of a content hash — enough to tell variants apart
+/// in a terminal without wrapping the line.
+fn short_hash(hash: &str) -> &str {
+    hash.get(..12).unwrap_or(hash)
 }
 
 fn print_catalog_table(items: &[CatalogItem]) {

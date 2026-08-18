@@ -180,9 +180,22 @@ pub fn materialize_all(
     Ok(records)
 }
 
+/// Whether an install destination is **occupied**: anything at all exists at
+/// `path`, of any file kind.
+///
+/// This is the single occupancy notion akit reasons with. The install guard
+/// ([`destination_is_writable`]) refuses to clobber an occupied destination it
+/// does not own, and `doctor`'s foreign scan
+/// ([`crate::reconcile::foreign_paths`]) reports the same occupants — a plain
+/// file sitting at `.agents/skills/demo` blocks the install just as surely as a
+/// directory does, so both must see it (issue #41).
+pub fn is_occupied(fs: &dyn FsTransport, path: &Path) -> Result<bool> {
+    Ok(fs.symlink_kind(path)?.is_some())
+}
+
 /// Whether materialization may create/clear/overwrite the destination of `staged`.
 ///
-/// Safe iff at least one holds: (1) the destination does not currently exist,
+/// Safe iff at least one holds: (1) the destination is not occupied,
 /// (2) its path is already akit-owned (recorded in the current lockfile), or
 /// (3) its on-disk content byte-matches the source being materialized. Any other
 /// pre-existing destination is a foreign/unmanaged file and must not be clobbered.
@@ -192,7 +205,7 @@ fn destination_is_writable(
     owned: &HashSet<String>,
 ) -> Result<bool> {
     // (1) Nothing there — free to create.
-    if fs.symlink_kind(&staged.final_abs)?.is_none() {
+    if !is_occupied(fs, &staged.final_abs)? {
         return Ok(true);
     }
     // (2) Already akit-owned — reinstall/reshape may replace its own materialization.

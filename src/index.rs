@@ -17,15 +17,19 @@
 //! fewer projects until then.
 //!
 //! Reads are self-healing. A recorded path that has disappeared, or that no
-//! longer has an `.akit` lockfile, is pruned on the next read; an index file that
-//! is unreadable or of an unknown schema is treated as empty. None of these is
-//! ever an error — the index is a rebuildable cache, not ownership state.
+//! longer has an `.akit` lockfile, is filtered out of every read (in memory —
+//! reads never rewrite the file, so a project on a temporarily unmounted volume
+//! survives a `doctor --all`); the file itself is compacted on the next install.
+//! An index file that is unreadable or of an unknown schema is treated as empty.
+//! None of these is ever an error — the index is a rebuildable cache, not
+//! ownership state.
 //!
 //! Transport: index I/O uses `std::fs` directly rather than the
 //! [`crate::transport`] seam. That seam exists so an embedding host can drive a
 //! *remote project root*; the index is host-local state about the machine akit
 //! runs on (like the catalog itself and the remote cache), so it is always local.
 
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -33,12 +37,15 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
 use crate::catalog::Catalog;
+use crate::harness::HarnessId;
 use crate::install::{self, InstallOptions};
 use crate::lockfile::{ItemType, Mode};
-use crate::materialize::{Drift, MaterializeItem, check_drift, content_hash, materialize_one};
-use crate::ownership::AkitLockfile;
+use crate::materialize::{
+    self, Drift, MaterializeItem, check_drift, content_hash, materialize_one,
+};
+use crate::ownership::{AkitLockfile, Installation, MaterializationRecord};
 use crate::project::Project;
-use crate::reconcile::{self, ItemHealth};
+use crate::reconcile::{self, ItemHealth, MaterializationHealth};
 use crate::transport::LocalFs;
 
 /// Environment variable that overrides the host state directory.
@@ -157,38 +164,49 @@ pub fn record_install(root: &Path) -> Result<()> {
 
 /// [`record_install`] against an explicit index file (tests / embedding hosts
 /// that keep their own state directory).
+///
+/// This is the one place the index is compacted: entries that no longer look
+/// like akit projects are dropped as part of the rewrite an install performs
+/// anyway. Reads never prune on disk (see [`known_projects_at`]).
 pub fn record_install_at(index: &Path, root: &Path) -> Result<()> {
     let mut doc = InstallIndex::load(index);
+    doc.projects
+        .retain(|e| looks_like_akit_project(Path::new(&e.path)));
     doc.upsert(&canonical_key(root), now_secs());
     doc.save(index)
 }
 
-/// Every recorded project that still looks like an akit project, pruning the
-/// rest from the index in place.
+/// Every recorded project that still looks like an akit project.
 ///
-/// A recorded path is dropped when it no longer exists or has no
-/// `.akit/kit.lock.json` — both durable facts (the project was deleted, or akit
-/// was fully removed from it). A path that exists but cannot be read is *kept*:
-/// that may be a transient permission problem, and the consumer reports it as a
-/// skipped project instead. Pruning is best-effort: if the rewrite fails, the
-/// pruned view is still returned.
+/// A recorded path is filtered out when it no longer exists or has no
+/// `.akit/kit.lock.json`. A path that exists but cannot be read is *kept*: that
+/// may be a transient permission problem, and the consumer reports it as a
+/// skipped project instead.
+///
+/// The filter is **in memory only**. `doctor --all` and `where` are documented
+/// as strictly read-only, and "the root is not a directory right now" is not the
+/// durable fact it looks like — a project on an unmounted volume or a detached
+/// network share would be permanently forgotten by a command that promised to
+/// only look. The index is compacted on the next [`record_install`] instead,
+/// which is already writing it.
 pub fn known_projects() -> Result<Vec<PathBuf>> {
     Ok(known_projects_at(&index_path()?))
 }
 
 /// [`known_projects`] against an explicit index file.
+///
+/// One project is returned once even if the index spells its path two ways (a
+/// hand-written entry, or a symlinked root recorded before canonicalization) —
+/// walking it twice would let a single project's own copies look like a
+/// cross-project disagreement.
 pub fn known_projects_at(index: &Path) -> Vec<PathBuf> {
-    let mut doc = InstallIndex::load(index);
-    let before = doc.projects.len();
-    doc.projects
-        .retain(|e| looks_like_akit_project(Path::new(&e.path)));
-    if doc.projects.len() != before {
-        // Best-effort: a failed prune must never fail the read.
-        let _ = doc.save(index);
-    }
-    doc.projects
+    let mut seen: HashSet<String> = HashSet::new();
+    InstallIndex::load(index)
+        .projects
         .iter()
         .map(|e| PathBuf::from(&e.path))
+        .filter(|p| looks_like_akit_project(p))
+        .filter(|p| seen.insert(canonical_key(p)))
         .collect()
 }
 
@@ -241,8 +259,16 @@ pub struct WhereReport {
     /// Projects holding the item, sorted by path. A known project without it
     /// simply does not appear.
     pub projects: Vec<WhereProject>,
-    /// Projects whose lockfile could not be read.
+    /// Projects whose lockfile, health pass, or on-disk content could not be
+    /// read. A skipped project contributes nothing else to this report.
     pub skipped: Vec<SkippedProject>,
+    /// This item's **copy** installs across the projects above, one
+    /// [`VariantGroup`] per comparable family of copies (issue #41).
+    #[serde(default)]
+    pub variants: Vec<VariantGroup>,
+    /// True when any group holds different content in different projects.
+    #[serde(default)]
+    pub diverged: bool,
 }
 
 /// Find every known project whose `.akit` lockfile records `(item_type, id)`,
@@ -263,53 +289,416 @@ pub fn locate_at(
 ) -> Result<WhereReport> {
     let mut projects = Vec::new();
     let mut skipped = Vec::new();
+    let mut groups: BTreeMap<GroupKey, Vec<HashedCopy>> = BTreeMap::new();
 
     for root in known_projects_at(index) {
         let project = Project::at(&root);
         // Cheap filter first: only projects that actually record the item pay
         // for a health pass (which hashes every materialization).
-        match AkitLockfile::load(&project.akit_lockfile_path()) {
-            Ok(lock) => {
-                if lock.get(item_type, id).is_none() {
-                    continue;
-                }
-            }
+        let lock = match AkitLockfile::load(&project.akit_lockfile_path()) {
+            Ok(lock) => lock,
             Err(e) => {
-                skipped.push(SkippedProject {
-                    project: root.display().to_string(),
-                    error: format!("{e:#}"),
-                });
+                skipped.push(skip(&root, e));
                 continue;
             }
-        }
-        match reconcile::health(&project, catalog) {
-            Ok(report) => {
-                if let Some(health) = report
-                    .items
-                    .into_iter()
-                    .find(|i| i.item_type == item_type && i.id == id)
-                {
-                    projects.push(WhereProject {
-                        project: root.display().to_string(),
-                        health,
-                    });
-                }
+        };
+        let Some(inst) = lock.get(item_type, id).cloned() else {
+            continue;
+        };
+        // The health pass first, and only a project that survives it contributes
+        // anything: a project reported as skipped must not also be able to flip
+        // `diverged` from content nobody could vouch for.
+        let health = match reconcile::health(&project, catalog) {
+            Ok(report) => report
+                .items
+                .into_iter()
+                .find(|i| i.item_type == item_type && i.id == id),
+            Err(e) => {
+                skipped.push(skip(&root, e));
+                continue;
             }
-            Err(e) => skipped.push(SkippedProject {
-                project: root.display().to_string(),
-                error: format!("{e:#}"),
-            }),
+        };
+        let Some(health) = health else { continue };
+
+        // Health just determined drift for every materialization, so a clean
+        // copy's recorded hash *is* its on-disk hash — no second walk of the tree.
+        let candidates = candidates_of(&root, &inst, Some(&health.materializations));
+        let (hashed, errors) = hash_candidates(&candidates);
+        if let Some(error) = errors.into_iter().next() {
+            skipped.push(error);
+            continue;
         }
+        for (key, copy) in hashed {
+            groups.entry(key).or_default().push(copy);
+        }
+        projects.push(WhereProject {
+            project: root.display().to_string(),
+            health,
+        });
     }
 
     projects.sort_by(|a, b| a.project.cmp(&b.project));
     skipped.sort_by(|a, b| a.project.cmp(&b.project));
+    let variants: Vec<VariantGroup> = groups
+        .into_iter()
+        .map(|((_, _, harness), copies)| build_group(harness, &copies))
+        .collect();
     Ok(WhereReport {
         id: id.to_string(),
         item_type,
         projects,
         skipped,
+        diverged: variants.iter().any(|g| g.diverged),
+        variants,
     })
+}
+
+// ── cross-project divergence ─────────────────────────────────────────────────
+
+/// One distinct on-disk content of a copy install, and every path holding it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ContentVariant {
+    /// The content hash — the same sha256 `drift` compares a copy against.
+    pub hash: String,
+    /// Absolute paths whose content hashes to `hash`, sorted.
+    pub paths: Vec<String>,
+}
+
+/// One family of **comparable** copy installs of a single catalog id, with the
+/// distinct contents found across them.
+///
+/// Comparability is what makes divergence meaningful, and it is not "same id":
+///
+///   - A **skill** materializes the whole skill directory, so every copy of it
+///     is a copy of the same source no matter which destination a project's set
+///     cover picked (`.agents/skills/x` here, `.claude/skills/x` there). One
+///     group per skill, [`harness`](Self::harness) `None`.
+///   - An **agent** materializes one *native per-harness variant file*
+///     (`claude.md` vs `codex.toml` vs `github.agent.md`), so only copies
+///     covering the same harness are copies of the same bytes. Pooling them by
+///     id would report a perfectly clean multi-harness install as diverged
+///     forever, and `update --propagate` could never resolve it (issue #41).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VariantGroup {
+    /// The harness whose native variant these copies came from, for agents.
+    /// `None` for skills, whose copies all come from the one skill directory.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub harness: Option<HarnessId>,
+    /// The distinct contents in this family, one entry per content hash.
+    pub contents: Vec<ContentVariant>,
+    /// True when two *different projects* hold different content here. Two
+    /// copies inside a single project differing is ordinary local drift, which
+    /// `status`/`doctor` already report as `modified` — and which
+    /// `update --propagate` deliberately will not touch, so calling it a
+    /// cross-project divergence would be an unactionable false positive.
+    pub diverged: bool,
+}
+
+/// One comparable family of copy installs that **has** diverged across projects
+/// (issue #41).
+///
+/// Divergence is a *conflict report*, not drift: each project may be perfectly
+/// clean against its own recorded hash and still hold different bytes from the
+/// next one (a copy installed before a catalog update, or edited in place). akit
+/// never resolves this for you — `update --propagate` refreshes clean copies,
+/// and an edited copy stays the user's.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Divergence {
+    pub id: String,
+    #[serde(rename = "type")]
+    pub item_type: ItemType,
+    /// The agent variant's harness; absent for skills (see [`VariantGroup`]).
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub harness: Option<HarnessId>,
+    /// The distinct contents, always two or more.
+    pub contents: Vec<ContentVariant>,
+}
+
+/// Outcome of the index-wide divergence sweep.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DivergenceReport {
+    /// Diverged families, sorted by type, then id, then harness.
+    pub items: Vec<Divergence>,
+    /// Projects that could not be read (unreadable lockfile, or a present but
+    /// unhashable materialization). Such a project contributes nothing to
+    /// `items` — its content is unknown, not proof of agreement.
+    #[serde(default)]
+    pub skipped: Vec<SkippedProject>,
+}
+
+/// Every comparable family of **copy** installs holding different content in
+/// different known projects.
+pub fn divergences() -> Result<DivergenceReport> {
+    divergences_with(None)
+}
+
+/// [`divergences`], reusing drift a caller already computed for one project.
+///
+/// `doctor --all` has just diagnosed the local project, so passing
+/// `(root, &diagnosis.items)` lets the sweep take the recorded hash of every
+/// copy that pass proved clean instead of walking those trees a second time.
+pub fn divergences_with(diagnosed: Option<(&Path, &[ItemHealth])>) -> Result<DivergenceReport> {
+    Ok(divergences_at_with(&index_path()?, diagnosed))
+}
+
+/// [`divergences`] against an explicit index file.
+pub fn divergences_at(index: &Path) -> DivergenceReport {
+    divergences_at_with(index, None)
+}
+
+/// [`divergences_with`] against an explicit index file.
+///
+/// Read-only and lockfile-driven: a project that cannot be read is reported in
+/// [`DivergenceReport::skipped`] rather than failing the scan, exactly as it is
+/// skipped by `where`.
+///
+/// Cost: the lockfile pass is pure bookkeeping — nothing is hashed until a
+/// family is known to hold copies in two or more projects, which is the only
+/// shape that can be diverged. A single-project id (the common case) costs no
+/// I/O beyond reading its lockfile.
+pub fn divergences_at_with(
+    index: &Path,
+    diagnosed: Option<(&Path, &[ItemHealth])>,
+) -> DivergenceReport {
+    let mut groups: BTreeMap<GroupKey, Vec<Candidate>> = BTreeMap::new();
+    let mut skipped: Vec<SkippedProject> = Vec::new();
+
+    for root in known_projects_at(index) {
+        let project = Project::at(&root);
+        let lock = match AkitLockfile::load(&project.akit_lockfile_path()) {
+            Ok(lock) => lock,
+            Err(e) => {
+                skipped.push(skip(&root, e));
+                continue;
+            }
+        };
+        let known = diagnosed
+            .filter(|(diagnosed_root, _)| same_root(diagnosed_root, &root))
+            .map(|(_, items)| items);
+        for inst in &lock.items {
+            let drift = known.and_then(|items| {
+                items
+                    .iter()
+                    .find(|i| i.item_type == inst.item_type && i.id == inst.id)
+                    .map(|i| i.materializations.as_slice())
+            });
+            for candidate in candidates_of(&root, inst, drift) {
+                groups
+                    .entry(candidate.key.clone())
+                    .or_default()
+                    .push(candidate);
+            }
+        }
+    }
+
+    let mut items = Vec::new();
+    for ((item_type, id, harness), candidates) in groups {
+        // Only a family spread over two or more projects can be diverged, so
+        // everything else is dropped before any tree is hashed.
+        if distinct_projects(&candidates) < 2 {
+            continue;
+        }
+        let (hashed, errors) = hash_candidates(&candidates);
+        skipped.extend(errors);
+        let copies: Vec<HashedCopy> = hashed.into_iter().map(|(_, copy)| copy).collect();
+        let group = build_group(harness, &copies);
+        if group.diverged {
+            items.push(Divergence {
+                id,
+                item_type,
+                harness,
+                contents: group.contents,
+            });
+        }
+    }
+
+    skipped.sort_by(|a, b| a.project.cmp(&b.project));
+    skipped.dedup_by(|a, b| a.project == b.project);
+    DivergenceReport { items, skipped }
+}
+
+/// What makes two copies comparable: the item they belong to plus which source
+/// variant they were materialized from (see [`VariantGroup`]).
+type GroupKey = (ItemType, String, Option<HarnessId>);
+
+/// One **copy** materialization that could take part in a divergence.
+#[derive(Debug, Clone)]
+struct Candidate {
+    key: GroupKey,
+    /// The known project root it belongs to, as recorded in the index.
+    project: PathBuf,
+    /// Absolute path of the materialization.
+    abs: PathBuf,
+    /// The hash akit recorded at materialization time — the on-disk content
+    /// only when a drift pass has vouched for it (`clean`).
+    recorded: Option<String>,
+    /// Whether a drift pass already proved the bytes match `recorded`.
+    clean: bool,
+}
+
+/// One hashed copy: which project holds it, where, and what it contains.
+#[derive(Debug, Clone)]
+struct HashedCopy {
+    project: String,
+    path: String,
+    hash: String,
+}
+
+/// Every **copy** materialization of `inst` as a divergence candidate, with the
+/// drift a health pass already computed (when the caller has one).
+///
+/// Symlink installs are deliberately excluded: they resolve to the catalog, so
+/// they always hold whatever the catalog holds and cannot diverge from it or
+/// from each other.
+fn candidates_of(
+    root: &Path,
+    inst: &Installation,
+    drift: Option<&[MaterializationHealth]>,
+) -> Vec<Candidate> {
+    inst.materializations
+        .iter()
+        .filter(|m| m.mode == Mode::Copy)
+        .map(|m| Candidate {
+            key: (
+                inst.item_type,
+                inst.id.clone(),
+                variant_key(inst.item_type, m),
+            ),
+            project: root.to_path_buf(),
+            abs: root.join(&m.path),
+            recorded: m.hash.clone(),
+            clean: drift.is_some_and(|ms| {
+                ms.iter()
+                    .any(|h| h.path == m.path && h.drift == Drift::Clean)
+            }),
+        })
+        .collect()
+}
+
+/// Which source variant a materialization is a copy of (see [`VariantGroup`]).
+fn variant_key(item_type: ItemType, m: &MaterializationRecord) -> Option<HarnessId> {
+    match item_type {
+        ItemType::Skill => None,
+        // An agent materialization is one harness's native variant file, and the
+        // planner gives it exactly that harness as its coverage.
+        ItemType::Agent => m.covers.first().copied(),
+    }
+}
+
+/// How many distinct projects hold `candidates`.
+fn distinct_projects(candidates: &[Candidate]) -> usize {
+    candidates
+        .iter()
+        .map(|c| c.project.as_path())
+        .collect::<HashSet<_>>()
+        .len()
+}
+
+/// Hash every candidate, plus the projects that could not be read.
+///
+/// A project whose copy is present but unhashable (a dangling symlink inside the
+/// tree, a permission wall) is reported *and* has all of its candidates dropped:
+/// unknown content is not evidence of agreement, and must never be able to flip
+/// a verdict either way. A candidate that is simply *gone* is not an error —
+/// that is `repair`'s concern, already reported as `missing` drift.
+fn hash_candidates(candidates: &[Candidate]) -> (Vec<(GroupKey, HashedCopy)>, Vec<SkippedProject>) {
+    let mut hashed = Vec::new();
+    let mut errors = Vec::new();
+    let mut unreadable: Vec<&Path> = Vec::new();
+
+    for c in candidates {
+        match candidate_hash(c) {
+            Ok(Some(hash)) => hashed.push((
+                c.key.clone(),
+                HashedCopy {
+                    project: c.project.display().to_string(),
+                    path: c.abs.display().to_string(),
+                    hash,
+                },
+            )),
+            Ok(None) => {}
+            Err(e) => {
+                if !unreadable.contains(&c.project.as_path()) {
+                    unreadable.push(c.project.as_path());
+                    errors.push(skip(&c.project, e));
+                }
+            }
+        }
+    }
+
+    if !unreadable.is_empty() {
+        let dropped: Vec<String> = unreadable.iter().map(|p| p.display().to_string()).collect();
+        hashed.retain(|(_, copy)| !dropped.contains(&copy.project));
+    }
+    (hashed, errors)
+}
+
+/// The on-disk content hash of a candidate: the recorded hash when a drift pass
+/// already proved the copy clean (no second walk of the tree), otherwise a fresh
+/// hash. `None` when nothing is there any more.
+fn candidate_hash(c: &Candidate) -> Result<Option<String>> {
+    if c.clean
+        && let Some(hash) = &c.recorded
+    {
+        return Ok(Some(hash.clone()));
+    }
+    if !materialize::is_occupied(&LocalFs, &c.abs)? {
+        return Ok(None);
+    }
+    content_hash(&LocalFs, &c.abs).map(Some)
+}
+
+/// Fold hashed copies into deterministic content groups and decide whether they
+/// disagree *across projects*.
+fn build_group(harness: Option<HarnessId>, copies: &[HashedCopy]) -> VariantGroup {
+    let mut contents: BTreeMap<&str, Vec<String>> = BTreeMap::new();
+    let mut by_project: BTreeMap<&str, BTreeSet<&str>> = BTreeMap::new();
+    for copy in copies {
+        contents
+            .entry(copy.hash.as_str())
+            .or_default()
+            .push(copy.path.clone());
+        by_project
+            .entry(copy.project.as_str())
+            .or_default()
+            .insert(copy.hash.as_str());
+    }
+    // Two projects disagree exactly when they hold different sets of content;
+    // several copies of one item inside a single project are local drift.
+    let distinct: BTreeSet<&BTreeSet<&str>> = by_project.values().collect();
+    VariantGroup {
+        harness,
+        contents: contents
+            .into_iter()
+            .map(|(hash, mut paths)| {
+                paths.sort();
+                paths.dedup();
+                ContentVariant {
+                    hash: hash.to_string(),
+                    paths,
+                }
+            })
+            .collect(),
+        diverged: distinct.len() > 1,
+    }
+}
+
+/// Whether two recorded roots name the same project, tolerating symlinked and
+/// non-canonical index entries.
+fn same_root(a: &Path, b: &Path) -> bool {
+    a == b
+        || matches!(
+            (a.canonicalize(), b.canonicalize()),
+            (Ok(x), Ok(y)) if x == y
+        )
+}
+
+/// A project the caller could not inspect.
+fn skip(root: &Path, error: anyhow::Error) -> SkippedProject {
+    SkippedProject {
+        project: root.display().to_string(),
+        error: format!("{error:#}"),
+    }
 }
 
 // ── propagate ────────────────────────────────────────────────────────────────

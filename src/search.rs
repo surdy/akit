@@ -265,13 +265,6 @@ fn match_score(matcher: &SkimMatcherV2, query: &str, item: &SearchHit) -> Option
 fn compare_hits(a: &SearchHit, b: &SearchHit) -> Ordering {
     b.score
         .cmp(&a.score)
-        .then_with(|| type_rank(a.item_type).cmp(&type_rank(b.item_type)))
+        .then_with(|| a.item_type.cmp(&b.item_type))
         .then_with(|| a.name.cmp(&b.name))
-}
-
-fn type_rank(item_type: ItemType) -> u8 {
-    match item_type {
-        ItemType::Skill => 0,
-        ItemType::Agent => 1,
-    }
 }

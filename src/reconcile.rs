@@ -14,13 +14,16 @@
 //!   - [`forget`]              — drop an orphaned/missing ownership record only.
 //!   - [`remove_stale_excludes`] — prune managed exclude lines with no owner.
 //!   - [`adopt`]               — claim existing *exact-content* files as owned.
+//!   - [`foreign_paths`]       — report unmanaged occupants of managed target paths.
+
+use std::collections::HashSet;
 
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 
 use crate::catalog::Catalog;
 use crate::gitexclude;
-use crate::harness::HarnessId;
+use crate::harness::{self, HarnessId};
 use crate::install::{self, HarnessContext};
 use crate::lockfile::{ItemType, Mode};
 use crate::materialize::{self, Drift, MaterializeItem, content_hash, materialize_one};
@@ -150,7 +153,6 @@ pub fn akit_bundle_health_with(
     project: &Project,
     catalog: &Catalog,
 ) -> Result<Vec<BundleHealth>> {
-    use std::collections::HashSet;
     let lock = AkitLockfile::load_with(fs, &project.akit_lockfile_path())?;
 
     let mut names: Vec<&str> = lock
@@ -212,9 +214,29 @@ pub fn akit_bundle_health_with(
         .collect())
 }
 
+/// An unmanaged file sitting where akit materializes (issue #41).
+///
+/// Nothing about a foreign path is akit's: it is reported so the user can decide
+/// (remove it, `akit adopt` it if it already matches the catalog, or leave it),
+/// and never touched. Its practical importance is that an install targeting the
+/// same path will be *refused* — see `materialize::materialize_all`'s guard.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ForeignPath {
+    /// Project-relative path of the unmanaged occupant.
+    pub path: String,
+    /// Which kind of target location it occupies (a skill directory or a native
+    /// agent file), not a claim about the file's actual contents.
+    #[serde(rename = "type")]
+    pub item_type: ItemType,
+    /// Harnesses that read this location, per the harness registry.
+    pub harnesses: Vec<HarnessId>,
+}
+
 /// A read-only diagnosis of the harness-aware project state — the `.akit`
 /// counterpart of legacy `doctor::diagnose`. Extends [`health`] with per-bundle
-/// completeness and **both** exclude-drift directions (stale *and* missing).
+/// completeness, **both** exclude-drift directions (stale *and* missing), and
+/// unmanaged occupants of managed target paths — plus an optional slot for the
+/// index-wide divergence answer a caller may fill in (`doctor --all`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Diagnosis {
     /// Per-item health (drift, harness coverage, source presence, bundle tag).
@@ -225,15 +247,29 @@ pub struct Diagnosis {
     pub stale_excludes: Vec<String>,
     /// Owned paths missing their managed exclude line (restore via `sync`).
     pub missing_excludes: Vec<String>,
+    /// Unmanaged files occupying a harness target path (issue #41). Reported
+    /// only; `doctor` never modifies or deletes them.
+    #[serde(default)]
+    pub foreign: Vec<ForeignPath>,
+    /// Cross-project divergence from the global install index (issue #41):
+    /// catalog ids whose *copy* installs hold different bytes in different
+    /// projects. `None` (and absent from JSON) unless the caller asked the
+    /// index-wide question (`doctor --all`), so the per-project diagnosis shape
+    /// is unchanged — exactly like [`crate::ops::UpdateReport::propagation`].
+    /// [`diagnose`] itself never fills this in; the caller assigns
+    /// [`crate::index::divergences_with`] into it.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub divergences: Option<crate::index::DivergenceReport>,
     /// Whether an `.akit/kit.lock.json` exists.
     pub lockfile_present: bool,
     /// True when nothing drifts and the exclude block matches the lockfile.
-    /// Partial bundles are informational and do **not** make this false.
+    /// Partial bundles and foreign paths are informational and do **not** make
+    /// this false — neither is akit-owned drift.
     pub healthy: bool,
 }
 
 /// Read-only diagnosis over `.akit`: item drift + bundle completeness + exclude
-/// drift (stale and missing). Never mutates anything.
+/// drift (stale and missing) + foreign occupants. Never mutates anything.
 pub fn diagnose(project: &Project, catalog: &Catalog) -> Result<Diagnosis> {
     diagnose_with(&LocalFs, project, catalog)
 }
@@ -248,15 +284,33 @@ pub fn diagnose_with(
     let bundles = akit_bundle_health_with(fs, project, catalog)?;
     let lock = AkitLockfile::load_with(fs, &project.akit_lockfile_path())?;
     let missing_excludes = missing_exclude_lines(fs, project, &lock);
+    let foreign = scan_foreign(fs, project, &lock);
     let healthy = health.healthy && missing_excludes.is_empty();
     Ok(Diagnosis {
         items: health.items,
         bundles,
         stale_excludes: health.stale_excludes,
         missing_excludes,
+        foreign,
+        divergences: None,
         lockfile_present: health.lockfile_present,
         healthy,
     })
+}
+
+/// Every unmanaged occupant of a harness target path in this project.
+///
+/// Read-only: it stats and lists directories, never opens, moves, or removes
+/// anything. Use it to answer "what is already sitting where akit would install?"
+/// without attempting an install.
+pub fn foreign_paths(project: &Project) -> Result<Vec<ForeignPath>> {
+    foreign_paths_with(&LocalFs, project)
+}
+
+/// [`foreign_paths`] against an explicit transport.
+pub fn foreign_paths_with(fs: &dyn FsTransport, project: &Project) -> Result<Vec<ForeignPath>> {
+    let lock = AkitLockfile::load_with(fs, &project.akit_lockfile_path())?;
+    Ok(scan_foreign(fs, project, &lock))
 }
 
 /// Outcome of a [`repair`].
@@ -586,6 +640,107 @@ fn missing_exclude_lines(
         .collect()
 }
 
+/// Walk every registered harness target directory and collect the entries no
+/// installation owns.
+///
+/// The scan is over the **whole** registry, not just the directories the planner
+/// would choose: a hand-written `.github/skills/<name>` is exactly the case this
+/// reports, and it is a coverage-redundant alias the planner never writes to.
+///
+/// What counts is **occupancy of an install destination**, decided by the same
+/// predicate the install guard uses ([`materialize::is_occupied`]): anything at
+/// all sitting at a path akit would materialize onto is reported, whatever its
+/// file kind. A narrower shape rule here would hide occupants the guard still
+/// refuses — a plain file at `.agents/skills/demo` blocks the install and must
+/// therefore be visible to `doctor` (issue #41).
+///
+/// A skill destination is `<skill dir>/<any name>`, so every entry qualifies; an
+/// agent destination is `<agent dir>/<basename>.<ext>`, so only names carrying
+/// that harness's extension do (matched case-insensitively — on macOS/Windows
+/// `Reviewer.MD` occupies the same destination as `reviewer.md`). Dot-prefixed
+/// entries are skipped: they are `.DS_Store`-class noise and akit's own
+/// `.<name>.akit-stage` temps, never a discoverable skill or agent. A directory
+/// that cannot be listed is skipped rather than failing the diagnosis.
+fn scan_foreign(fs: &dyn FsTransport, project: &Project, lock: &AkitLockfile) -> Vec<ForeignPath> {
+    let owned: HashSet<&str> = lock.owned_paths().into_iter().collect();
+    let mut out: Vec<ForeignPath> = Vec::new();
+
+    for path in harness::skill_paths() {
+        let dir = project.root.join(path.dir);
+        let Ok(names) = fs.read_dir(&dir) else {
+            continue;
+        };
+        for name in names {
+            let Some(rel) = unowned_entry(&owned, path.dir, &name) else {
+                continue;
+            };
+            if !occupies(fs, &dir.join(&name)) {
+                continue;
+            }
+            record_foreign(&mut out, rel, ItemType::Skill, path.covers);
+        }
+    }
+
+    for target in harness::agent_targets() {
+        let dir = project.root.join(target.dir);
+        let Ok(names) = fs.read_dir(&dir) else {
+            continue;
+        };
+        let suffix = format!(".{}", target.ext).to_ascii_lowercase();
+        for name in names {
+            if !name.to_ascii_lowercase().ends_with(&suffix) {
+                continue;
+            }
+            let Some(rel) = unowned_entry(&owned, target.dir, &name) else {
+                continue;
+            };
+            if !occupies(fs, &dir.join(&name)) {
+                continue;
+            }
+            record_foreign(&mut out, rel, ItemType::Agent, &[target.harness]);
+        }
+    }
+
+    out.sort_by(|a, b| a.path.cmp(&b.path));
+    out
+}
+
+/// Whether something occupies `abs`, with an unreadable path treated as empty
+/// (a read-only scan never fails a diagnosis over one unstattable entry).
+fn occupies(fs: &dyn FsTransport, abs: &std::path::Path) -> bool {
+    materialize::is_occupied(fs, abs).unwrap_or(false)
+}
+
+/// The project-relative path of `dir/name`, or `None` when it is akit-owned or
+/// is dot-prefixed noise.
+fn unowned_entry(owned: &HashSet<&str>, dir: &str, name: &str) -> Option<String> {
+    if name.starts_with('.') {
+        return None;
+    }
+    let rel = format!("{dir}/{name}");
+    (!owned.contains(rel.as_str())).then_some(rel)
+}
+
+/// Add a foreign path, merging harnesses when two registry rows point at the
+/// same destination (several harnesses can share one agent directory + extension).
+fn record_foreign(
+    out: &mut Vec<ForeignPath>,
+    path: String,
+    item_type: ItemType,
+    harnesses: &[HarnessId],
+) {
+    if let Some(existing) = out.iter_mut().find(|f| f.path == path) {
+        existing.harnesses.extend_from_slice(harnesses);
+        existing.harnesses = sorted(std::mem::take(&mut existing.harnesses));
+        return;
+    }
+    out.push(ForeignPath {
+        path,
+        item_type,
+        harnesses: sorted(harnesses.to_vec()),
+    });
+}
+
 fn sorted(mut v: Vec<HarnessId>) -> Vec<HarnessId> {
     v.sort();
     v.dedup();
@@ -681,6 +836,109 @@ mod tests {
             !d.missing_excludes.is_empty(),
             "expected missing exclude lines: {d:?}"
         );
+    }
+
+    #[test]
+    fn diagnose_reports_foreign_occupants_without_touching_them() {
+        let f = setup();
+        install_skill(&f, "deploy", &[HarnessId::Claude]);
+
+        // Hand-written, never installed by akit: a skill in the Copilot alias
+        // directory and a native Copilot agent file.
+        let skill = f.project.root.join(".github/skills/handmade/SKILL.md");
+        write(&skill, "---\nname: handmade\n---\nmine");
+        let agent = f.project.root.join(".github/agents/legacy.agent.md");
+        write(&agent, "---\nname: legacy\n---\nmine");
+        // A plain file also *occupies* a skill destination — the install guard
+        // refuses it exactly as it refuses a directory — so it is foreign too
+        // (issue #41: the scan and the guard share one occupancy predicate).
+        write(&f.project.root.join(".github/skills/NOTES.txt"), "notes");
+        // An agent file whose extension differs only in case still occupies the
+        // destination on a case-insensitive filesystem.
+        write(
+            &f.project.root.join(".github/agents/Shouty.AGENT.MD"),
+            "mine",
+        );
+        // Noise that must not be reported: a dotfile, akit's own stage temp, and
+        // a file whose extension no agent target claims.
+        write(&f.project.root.join(".github/skills/.DS_Store"), "");
+        write(&f.project.root.join(".github/skills/.x.akit-stage"), "");
+        write(&f.project.root.join(".github/agents/README.rst"), "docs");
+
+        let d = diagnose(&f.project, &f.catalog).unwrap();
+        let paths: Vec<&str> = d.foreign.iter().map(|f| f.path.as_str()).collect();
+        assert_eq!(
+            paths,
+            vec![
+                ".github/agents/Shouty.AGENT.MD",
+                ".github/agents/legacy.agent.md",
+                ".github/skills/NOTES.txt",
+                ".github/skills/handmade",
+            ],
+            "{d:?}"
+        );
+        assert_eq!(d.foreign[1].item_type, ItemType::Agent);
+        assert_eq!(d.foreign[1].harnesses, vec![HarnessId::Copilot]);
+        assert_eq!(d.foreign[3].item_type, ItemType::Skill);
+        assert_eq!(d.foreign[3].harnesses, vec![HarnessId::Copilot]);
+
+        // Foreign files are somebody else's, so they are not akit drift: the
+        // verdict stays healthy and nothing on disk is touched.
+        assert!(d.healthy, "{d:?}");
+        assert_eq!(
+            std::fs::read_to_string(&skill).unwrap(),
+            "---\nname: handmade\n---\nmine"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&agent).unwrap(),
+            "---\nname: legacy\n---\nmine"
+        );
+
+        // The akit-owned materialization is never foreign…
+        assert!(!paths.contains(&".claude/skills/deploy"));
+        // …until ownership is dropped, at which point the same bytes become an
+        // unmanaged occupant of a managed path.
+        detach(&f.project, ItemType::Skill, "deploy").unwrap();
+        let d = diagnose(&f.project, &f.catalog).unwrap();
+        assert!(
+            d.foreign.iter().any(|f| f.path == ".claude/skills/deploy"),
+            "{d:?}"
+        );
+    }
+
+    #[test]
+    fn foreign_paths_is_empty_for_an_untouched_project() {
+        let f = setup();
+        assert!(foreign_paths(&f.project).unwrap().is_empty());
+    }
+
+    /// The scan and the install guard must never disagree about what occupies a
+    /// destination: anything the guard refuses to overwrite has to be visible in
+    /// `doctor` first (issue #41).
+    #[test]
+    fn a_plain_file_occupant_is_reported_and_refuses_the_install() {
+        let f = setup();
+        write_skill(&f.catalog, "deploy");
+        // A plain file — not a skill directory — sits where the skill would go.
+        let dest = f.project.root.join(".claude/skills/deploy");
+        write(&dest, "not a skill dir");
+
+        let foreign = foreign_paths(&f.project).unwrap();
+        assert!(
+            foreign.iter().any(|p| p.path == ".claude/skills/deploy"),
+            "{foreign:?}"
+        );
+
+        let err = install(
+            &f.project,
+            &f.catalog,
+            ItemType::Skill,
+            "deploy",
+            &ctx(&[HarnessId::Claude]),
+        )
+        .unwrap_err();
+        assert!(format!("{err:#}").contains("does not manage"), "{err:#}");
+        assert_eq!(std::fs::read_to_string(&dest).unwrap(), "not a skill dir");
     }
 
     #[test]
