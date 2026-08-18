@@ -807,14 +807,18 @@ operate on this engine. (The old Copilot-only `add`/`rm` commands and their
   | claude | `.claude/agents/<id>.md` | Markdown + YAML |
   | codex | `.codex/agents/<id>.toml` | TOML |
   | gemini | `.gemini/agents/<id>.md` | Markdown + YAML |
-  | opencode | `.opencode/agent/<id>.md` (probe-gated) | Markdown + YAML |
+  | opencode | `.opencode/agent/<id>.md` | Markdown + YAML |
+
+  OpenCode's directory is the **singular** `agent/`. Current OpenCode accepts either spelling, but
+  the plural `agents/` was a hard error before v1.0.219, so the singular is the only form correct
+  on every release that ever shipped markdown agents — see
+  [`harness-registry.md`](harness-registry.md) for the source citations.
 
   Harness-aware agents come from a catalog **agent package** — a directory `agents/<id>/`
   holding an `agent.yml` descriptor plus one native file per harness it supports. akit copies a
   variant's bytes **verbatim**; it never converts one format to another. (This is a distinct
   catalog shape from the legacy `agents/<id>.agent.md` single file.) A selected harness with no
-  matching variant — or OpenCode's probe-gated target, whose
-  exact directory is version-dependent — is reported as a **skipped** issue, not installed.
+  matching variant is reported as a **skipped** issue, not installed.
 
 Everything the engine writes (both materializations and the `.akit/kit.lock.json` itself) is
 added to `.git/info/exclude`, so it never touches your tracked `.gitignore` and `git status`
@@ -868,25 +872,31 @@ the install (reported as `Reshaped` rather than `Installed`).
   pre-existing **foreign** file (one akit doesn't own and whose bytes don't already match the
   source), the whole install is refused and nothing is written. A destination that already
   exists with byte-identical content is safely **adopted** (no rewrite).
-- After a real install, `install` prints per-harness **reload/restart guidance**. For agents it
-  is precise per harness (Claude picks agents up live; Copilot needs a restart; Codex/Gemini are
-  treated conservatively as restart). Skills get a single honest, harness-agnostic hint (start a
-  new session or run your harness's skills-reload command).
-- Skipped harnesses (incompatible skill, missing agent variant, probe-gated target) are listed
-  under `skipped:` and simply not served.
+- After a real install, `install` prints **reload guidance per served harness, per primitive** —
+  one line per harness, drawn from the capability registry rather than a generic hint. Claude Code
+  and Codex watch their directories and pick a new skill up live; Copilot CLI and Gemini need
+  their in-session reload command (`/skills reload`); OpenCode caches its skill list and needs a
+  restart. Agents differ from skills for the same harness (Copilot: skills reload by command,
+  agents need a restart), which is exactly why the two are reported separately. Where no primary
+  source establishes the behavior — Codex custom agents today — the line degrades to an honest
+  "restart the harness if it does not appear". The per-cell evidence is in
+  [`harness-registry.md`](harness-registry.md).
+- Skipped harnesses (incompatible skill, missing agent variant) are listed under `skipped:` and
+  simply not served.
 
 ```bash
 $ akit install -H copilot -H claude deploy-to-vercel
 Installed skill 'deploy-to-vercel' for copilot, claude
   .claude/skills/deploy-to-vercel  (copilot, claude)
 reload:
-  skills: start a new session (or run your harness's skills-reload command) if it does not appear
+  copilot skill: run the harness's reload command to pick it up this session
+  claude skill: picked up automatically; no restart needed
 
 $ akit install -H claude deploy-to-vercel
 Reshaped skill 'deploy-to-vercel' for claude
   .claude/skills/deploy-to-vercel  (claude)
 reload:
-  skills: start a new session (or run your harness's skills-reload command) if it does not appear
+  claude skill: picked up automatically; no restart needed
 ```
 
 #### `<owner/repo/path[#ref]>` — install straight from a remote
@@ -908,7 +918,7 @@ Pulled skill 'deploy-to-vercel' from acme/kit-skills/deploy-to-vercel#main -> �
 Installed skill 'deploy-to-vercel' for claude
   .claude/skills/deploy-to-vercel  (claude)
 reload:
-  skills: start a new session (or run your harness's skills-reload command) if it does not appear
+  claude skill: picked up automatically; no restart needed
 ```
 
 With `--json`, a remote `install` emits the same `InstallReport` as a local one (pull provenance is
@@ -939,7 +949,7 @@ $ akit install --symlink -H claude deploy-to-vercel
 Installed skill 'deploy-to-vercel' for claude
   .claude/skills/deploy-to-vercel  (claude)
 reload:
-  skills: start a new session (or run your harness's skills-reload command) if it does not appear
+  claude skill: picked up automatically; no restart needed
 
 $ akit install --symlink -H copilot -H claude deploy-to-vercel
 Installed skill 'deploy-to-vercel' for copilot, claude
@@ -993,7 +1003,8 @@ With `--json`, `--dry-run` emits the `InstallPreview` object:
 or `"agent_file"`; `source_file` is the package-relative variant file for agents and `null` for
 skills. `replaces` is `true` when an existing install would be reshaped. Each `issues` entry is
 `{ "harness", "reason" }` where `reason` is `"skill_incompatible"`, `"no_agent_variant"`, or
-`"needs_probe"`.
+`"needs_probe"`. `"needs_probe"` remains part of the contract but has no subject in the current
+registry — every agent target's directory is now pinned with primary-source evidence.
 
 A **real** `install` (no `--dry-run`) with `--json` emits the `InstallReport` object — the served
 `harnesses`, the `materializations` now backing the install (each

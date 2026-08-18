@@ -11,23 +11,31 @@
 //! - **Skills** are portable `SKILL.md` directories. Several harnesses read the
 //!   *same* project directory (notably `.agents/skills` and `.claude/skills`),
 //!   so a single materialization can serve multiple harnesses. Each
-//!   [`SkillPath`] records exactly which harnesses cover it.
+//!   [`SkillPath`] records exactly which harnesses cover it. Per-harness reload
+//!   and version facts live on [`SkillSupport`], because those are properties of
+//!   the *harness*, not of the shared directory.
 //! - **Custom agents** have *no* shared path: every harness uses a proprietary
 //!   directory and file format, so an agent must be materialized once per
 //!   selected harness from an explicit native variant. Each [`AgentTarget`]
 //!   records that native destination.
 //! - A capability is only **enabled** when its discovery behavior is backed by
 //!   [`Evidence`] we trust (official docs, official source, or an isolated live
-//!   behavioral test). Ambiguous behavior (e.g. OpenCode's `agent/` vs
-//!   `agents/` directory) is marked [`AgentTarget::needs_probe`] so the caller
-//!   resolves it against the installed version rather than guessing.
+//!   behavioral test). Behavior that is version-sensitive in a way no static
+//!   default can cover is marked [`AgentTarget::needs_probe`] so the caller
+//!   resolves it against the installed version rather than guessing. No target
+//!   currently needs one — OpenCode's `agent/` vs `agents/` ambiguity was
+//!   resolved against the source in #46 (see `AGENT_TARGETS`) — but the flag and
+//!   its planner path stay, because the next ambiguity will need them.
 //! - **Symlink** discovery is only claimed where verified; every other target
 //!   materializes as a copy (see [`SkillPath::symlink_verified`] /
 //!   [`AgentTarget::symlink_verified`]).
+//! - Reload behavior that no primary source establishes is recorded as
+//!   [`Reload::Unknown`] rather than guessed, and the UI degrades to an honest
+//!   "restart if it does not appear" hint for those cells.
 //!
-//! The matrix below is derived from the July-2026 official-source audit; see
-//! `docs/harness-registry.md` for the per-cell citations and verification
-//! evidence.
+//! The matrix below is derived from the August-2026 primary-source audit; see
+//! `docs/harness-registry.md` for the per-cell citation URLs and the quote each
+//! claim rests on.
 
 use std::fmt;
 use std::str::FromStr;
@@ -221,6 +229,16 @@ pub struct SkillPath {
     pub symlink_verified: bool,
     /// Evidence backing this path's coverage claim.
     pub evidence: Evidence,
+    /// Whether the install planner may *choose* this path.
+    ///
+    /// The registry records **every** verified discovery directory so the matrix
+    /// is auditable and queryable (`akit` must be able to answer "does harness X
+    /// read directory Y?" for a path it did not write). Single-harness
+    /// proprietary directories are nevertheless **coverage-redundant**: every
+    /// harness that reads one also reads a shared path, so planning into them
+    /// would only add duplicate materializations. Those are registered with
+    /// `plannable: false` and excluded from [`planner_skill_paths`].
+    pub plannable: bool,
 }
 
 impl SkillPath {
@@ -228,6 +246,29 @@ impl SkillPath {
     pub fn covers(&self, harness: HarnessId) -> bool {
         self.covers.contains(&harness)
     }
+}
+
+/// Per-harness **skill** capability: the reload and version facts that
+/// [`AgentTarget`] already carries for agents (issue #46).
+///
+/// Skill *destinations* are shared across harnesses ([`SkillPath`]), but
+/// reload behavior and version gates are properties of the **harness**, not of
+/// the directory — Claude Code and Copilot CLI both read `.claude/skills`, yet
+/// pick a new skill up differently. So skills get one entry per harness rather
+/// than per path, which is also what post-install guidance needs (it reports per
+/// served harness).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SkillSupport {
+    /// The harness these facts describe.
+    pub harness: HarnessId,
+    /// How this harness picks up a newly materialized skill directory.
+    pub reload: Reload,
+    /// Minimum harness version that supports project-level skills at all, when a
+    /// specific version gate is known.
+    pub min_version: Option<&'static str>,
+    /// Evidence backing the reload/version cells above (the *coverage* claim has
+    /// its own evidence on [`SkillPath`]).
+    pub evidence: Evidence,
 }
 
 /// A single harness's native custom-agent destination. Unlike skills, these are
@@ -290,20 +331,30 @@ pub enum AgentFormat {
 
 // ── The registry data ────────────────────────────────────────────────────────
 //
-// Skill path coverage (July-2026 official-source audit):
-//   .github/skills   → Copilot
-//   .claude/skills   → Copilot, Claude, OpenCode
-//   .agents/skills   → Copilot, Codex, Gemini, OpenCode
-//   .gemini/skills   → Gemini
-//   .opencode/skills → OpenCode
+// Every cell below is backed by a primary source cited in
+// `docs/harness-registry.md` (August-2026 re-audit, issue #46). The doc holds the
+// URLs and the supporting quote; the comments here record only the conclusion and
+// which side of a docs-vs-source disagreement we followed.
 //
-// Symlink-following for skills is officially confirmed only for Claude and
-// Codex. Because `.claude/skills` is also read by Copilot/OpenCode (unverified)
-// and `.agents/skills` by Copilot/Gemini/OpenCode (unverified), no *shared*
-// path can currently be symlink-verified end-to-end — so all shared paths
-// default to copy. `.gemini/skills` (Gemini-only) and `.opencode/skills`
-// (OpenCode-only) are dead-ends no other harness reads and are intentionally
-// omitted: the planner reaches Gemini/OpenCode via `.agents/skills`.
+// Skill path coverage:
+//   .agents/skills   → Copilot, Codex, Gemini, OpenCode   (shared)
+//   .claude/skills   → Copilot, Claude, OpenCode          (shared)
+//   .github/skills   → Copilot                            (redundant alias)
+//   .codex/skills    → Codex                              (redundant alias)
+//   .gemini/skills   → Gemini                             (redundant alias)
+//   .opencode/skills → OpenCode                           (redundant alias)
+//
+// All six are *registered* so the matrix is complete and queryable, but only the
+// two shared paths are `plannable` — every harness that reads a single-harness
+// alias also reads a shared path, so planning into an alias would only duplicate
+// bytes. See `SkillPath::plannable`.
+//
+// Symlink-following for skills is confirmed for Claude and Codex (and, from
+// source, OpenCode — see the doc's symlink note; not yet promoted to
+// `HarnessId::follows_skill_symlink`, which stays the conservative gate). Because
+// `.claude/skills` is also read by Copilot (symlink behavior undetermined) and
+// `.agents/skills` by Copilot/Gemini (likewise), no *shared* path is
+// symlink-verified end-to-end, so all shared paths default to copy.
 
 const SKILL_PATHS: &[SkillPath] = &[
     SkillPath {
@@ -316,20 +367,108 @@ const SKILL_PATHS: &[SkillPath] = &[
         ],
         symlink_verified: false,
         evidence: Evidence::OfficialDocs,
+        plannable: true,
     },
     SkillPath {
         dir: ".claude/skills",
         covers: &[HarnessId::Copilot, HarnessId::Claude, HarnessId::Opencode],
         symlink_verified: false,
         evidence: Evidence::OfficialDocs,
+        plannable: true,
+    },
+    // ── Coverage-redundant single-harness aliases ───────────────────────────
+    // Recorded for auditability (crit 2 of the #33 verification pass); never
+    // planned into, because the harness each one serves is already reachable
+    // through a shared path above.
+    SkillPath {
+        dir: ".github/skills",
+        covers: &[HarnessId::Copilot],
+        symlink_verified: false,
+        evidence: Evidence::OfficialDocs,
+        plannable: false,
+    },
+    // Undocumented in OpenAI's public skills table but live in the Codex source
+    // (and dogfooded by the openai/codex repo itself), hence `OfficialSource`.
+    SkillPath {
+        dir: ".codex/skills",
+        covers: &[HarnessId::Codex],
+        symlink_verified: false,
+        evidence: Evidence::OfficialSource,
+        plannable: false,
+    },
+    SkillPath {
+        dir: ".gemini/skills",
+        covers: &[HarnessId::Gemini],
+        symlink_verified: false,
+        evidence: Evidence::OfficialDocs,
+        plannable: false,
+    },
+    SkillPath {
+        dir: ".opencode/skills",
+        covers: &[HarnessId::Opencode],
+        symlink_verified: false,
+        evidence: Evidence::OfficialDocs,
+        plannable: false,
+    },
+];
+
+// Per-harness skill reload/version facts. `min_version` is the floor at which
+// *every akit-plannable* skill destination for that harness works — for the four
+// harnesses akit reaches through `.agents/skills`, that is the release which
+// added `.agents/skills` support, not the (earlier) release that first shipped
+// skills. Gating on the earlier one would claim support for a version that
+// cannot read the directory akit actually writes.
+const SKILL_SUPPORT: &[SkillSupport] = &[
+    // `/skills reload` is an explicit in-session command; Copilot CLI does not
+    // watch the skill directories. `.agents/skills` landed in 0.0.401.
+    SkillSupport {
+        harness: HarnessId::Copilot,
+        reload: Reload::Command,
+        min_version: Some("0.0.401"),
+        evidence: Evidence::OfficialDocs,
+    },
+    // Claude Code watches the skill directories and hot-reloads within the
+    // session (shipped in 2.1.0; skills themselves in 2.0.20 — the gate is the
+    // feature floor, not the hot-reload floor).
+    SkillSupport {
+        harness: HarnessId::Claude,
+        reload: Reload::Live,
+        min_version: Some("2.0.20"),
+        evidence: Evidence::OfficialDocs,
+    },
+    // Codex watches the skill roots (throttled ~10s) — "Codex detects skill
+    // changes automatically". `.agents/skills` landed in 0.94.0.
+    SkillSupport {
+        harness: HarnessId::Codex,
+        reload: Reload::Live,
+        min_version: Some("0.94.0"),
+        evidence: Evidence::OfficialDocs,
+    },
+    // Gemini CLI has no watcher; `/skills reload` (alias `/skills refresh`) is
+    // the documented refresh. `.agents/skills` alias landed in 0.28.0.
+    SkillSupport {
+        harness: HarnessId::Gemini,
+        reload: Reload::Command,
+        min_version: Some("0.28.0"),
+        evidence: Evidence::OfficialDocs,
+    },
+    // OpenCode's docs say nothing about reload, but the source is unambiguous:
+    // skills are discovered once into a no-TTL instance cache and no filesystem
+    // watcher covers them, so a new skill needs a restart. Skills shipped 1.0.186.
+    SkillSupport {
+        harness: HarnessId::Opencode,
+        reload: Reload::Restart,
+        min_version: Some("1.0.186"),
+        evidence: Evidence::OfficialSource,
     },
 ];
 
 // Custom-agent native destinations. Every harness has a distinct proprietary
-// directory + format; none are shared. Reload/version/symlink cells reflect the
-// audit's "confirmed vs undetermined" columns — undetermined reload is `Unknown`
+// directory + format; none are shared. Undetermined reload stays `Unknown`
 // (treated as restart), and symlink is only claimed where verified.
 const AGENT_TARGETS: &[AgentTarget] = &[
+    // "Restart the CLI to load your new custom agent." Custom agents shipped in
+    // 0.0.353.
     AgentTarget {
         harness: HarnessId::Copilot,
         dir: ".github/agents",
@@ -337,10 +476,12 @@ const AGENT_TARGETS: &[AgentTarget] = &[
         format: AgentFormat::MarkdownYaml,
         symlink_verified: false,
         reload: Reload::Restart,
-        min_version: None,
+        min_version: Some("0.0.353"),
         evidence: Evidence::OfficialDocs,
         needs_probe: false,
     },
+    // Claude Code watches `.claude/agents` and picks a new subagent up within a
+    // few seconds. No documented version floor for project subagents.
     AgentTarget {
         harness: HarnessId::Claude,
         dir: ".claude/agents",
@@ -352,6 +493,10 @@ const AGENT_TARGETS: &[AgentTarget] = &[
         evidence: Evidence::OfficialDocs,
         needs_probe: false,
     },
+    // Codex's subagent docs document the directory and the TOML schema but say
+    // nothing about in-session reload, and the only watcher in the source covers
+    // *skill* roots — so reload stays honestly `Unknown`. Directory
+    // auto-discovery of `.codex/agents/*.toml` landed in 0.115.0.
     AgentTarget {
         harness: HarnessId::Codex,
         dir: ".codex/agents",
@@ -359,46 +504,103 @@ const AGENT_TARGETS: &[AgentTarget] = &[
         format: AgentFormat::Toml,
         symlink_verified: false,
         reload: Reload::Unknown,
-        min_version: None,
+        min_version: Some("0.115.0"),
         evidence: Evidence::OfficialDocs,
         needs_probe: false,
     },
+    // `/agents reload` ("Rescans agent directories … and reloads the registry").
+    // Gemini CLI has no watcher. Markdown+frontmatter agents replaced the older
+    // TOML loader in 0.25.0, which is the floor for the format akit writes.
     AgentTarget {
         harness: HarnessId::Gemini,
         dir: ".gemini/agents",
         ext: "md",
         format: AgentFormat::MarkdownYaml,
         symlink_verified: false,
-        reload: Reload::Unknown,
-        min_version: None,
+        reload: Reload::Command,
+        min_version: Some("0.25.0"),
         evidence: Evidence::OfficialDocs,
         needs_probe: false,
     },
-    // OpenCode's official docs are internally inconsistent about `.opencode/agent`
-    // vs `.opencode/agents`; the exact directory must be resolved against the
-    // installed version, so this target is probe-gated.
+    // The `agent/` vs `agents/` ambiguity is **resolved, not probed** (#46).
+    //
+    // OpenCode's source globs `{agent,agents}/**/*.md`, so both spellings work on
+    // current versions — but the plural was a *hard error* (`ConfigDirectoryTypoError`)
+    // before v1.0.219. The singular `.opencode/agent` is therefore the only form
+    // that is correct on every OpenCode release that ever shipped markdown agents,
+    // which makes a runtime probe strictly unnecessary: there is no installed
+    // version for which probing would pick a different answer than this pin.
+    // Hence `needs_probe: false` with `Evidence::OfficialSource` (the public docs
+    // list only the plural; OpenCode's own bundled `customize-opencode` skill and
+    // the source agree with the singular).
+    //
+    // Reload: no watcher covers agent discovery and the config/agent list is
+    // cached per instance with no TTL, so a new agent file needs a restart.
+    // Markdown agents shipped in 0.3.65.
     AgentTarget {
         harness: HarnessId::Opencode,
         dir: ".opencode/agent",
         ext: "md",
         format: AgentFormat::MarkdownYaml,
         symlink_verified: false,
-        reload: Reload::Unknown,
-        min_version: None,
-        evidence: Evidence::OfficialDocs,
-        needs_probe: true,
+        reload: Reload::Restart,
+        min_version: Some("0.3.65"),
+        evidence: Evidence::OfficialSource,
+        needs_probe: false,
     },
 ];
 
-/// All registered skill paths, in the order the planner should prefer on ties
-/// (neutral `.agents/skills` first, then `.claude/skills`).
+/// **Every** registered skill path — the shared ones the planner uses *and* the
+/// coverage-redundant single-harness aliases — in stable registry order.
+///
+/// Use this to *answer questions* about a directory (does harness X read it?).
+/// Use [`planner_skill_paths`] to *choose* a destination.
 pub fn skill_paths() -> &'static [SkillPath] {
     SKILL_PATHS
+}
+
+/// The subset of [`skill_paths`] the install planner may choose from, in the
+/// order it should prefer on ties (neutral `.agents/skills` first, then
+/// `.claude/skills`). Coverage-redundant aliases are filtered out, so registering
+/// one never changes an install plan.
+pub fn planner_skill_paths() -> impl Iterator<Item = &'static SkillPath> {
+    SKILL_PATHS.iter().filter(|p| p.plannable)
 }
 
 /// The set of harnesses that discover skills at `dir`, if akit manages that path.
 pub fn skill_path(dir: &str) -> Option<&'static SkillPath> {
     SKILL_PATHS.iter().find(|p| p.dir == dir)
+}
+
+/// Per-harness skill reload/version facts, in stable registry order.
+pub fn skill_supports() -> &'static [SkillSupport] {
+    SKILL_SUPPORT
+}
+
+/// The skill capability facts for `harness`.
+pub fn skill_support(harness: HarnessId) -> &'static SkillSupport {
+    SKILL_SUPPORT
+        .iter()
+        .find(|s| s.harness == harness)
+        .expect("every HarnessId has exactly one skill-support entry")
+}
+
+/// How `harness` picks up a newly materialized `primitive` — the single entry
+/// point post-install guidance uses, so skills and agents are answered from the
+/// same registry rather than from a hardcoded hint.
+pub fn reload_for(primitive: Primitive, harness: HarnessId) -> Reload {
+    match primitive {
+        Primitive::Skill => skill_support(harness).reload,
+        Primitive::Agent => agent_target(harness).reload,
+    }
+}
+
+/// The known minimum harness version for `primitive` on `harness`, if any.
+pub fn min_version_for(primitive: Primitive, harness: HarnessId) -> Option<&'static str> {
+    match primitive {
+        Primitive::Skill => skill_support(harness).min_version,
+        Primitive::Agent => agent_target(harness).min_version,
+    }
 }
 
 /// All registered native custom-agent destinations, one per harness.
@@ -549,20 +751,30 @@ mod tests {
     }
 
     #[test]
-    fn opencode_agent_requires_probe_and_is_not_blindly_enabled() {
+    fn opencode_agent_dir_is_pinned_to_the_singular_form() {
+        // #46: resolved against the OpenCode source rather than probed. The
+        // plural `.opencode/agents` was a hard error before v1.0.219, so the
+        // singular is the only spelling correct on every shipped version.
         let t = agent_target(HarnessId::Opencode);
-        assert!(t.needs_probe);
-        assert!(!t.is_enabled());
+        assert_eq!(t.dir, ".opencode/agent");
+        assert!(!t.needs_probe);
+        assert!(t.is_enabled());
+        assert_eq!(t.evidence, Evidence::OfficialSource);
     }
 
     #[test]
-    fn documented_agent_targets_are_enabled() {
-        for h in [
-            HarnessId::Copilot,
-            HarnessId::Claude,
-            HarnessId::Codex,
-            HarnessId::Gemini,
-        ] {
+    fn no_agent_target_currently_needs_a_probe() {
+        // The probe path is still wired (PlanIssueReason::NeedsProbe); it just
+        // has no subject today. Flipping any target back to `needs_probe: true`
+        // must be a deliberate change that trips this test.
+        for t in agent_targets() {
+            assert!(!t.needs_probe, "{} unexpectedly needs a probe", t.harness);
+        }
+    }
+
+    #[test]
+    fn every_agent_target_is_enabled() {
+        for h in HarnessId::ALL {
             assert!(agent_target(h).is_enabled(), "{h} agent should be enabled");
         }
     }
@@ -587,6 +799,116 @@ mod tests {
     fn copilot_agents_need_restart_claude_agents_live() {
         assert_eq!(agent_target(HarnessId::Copilot).reload, Reload::Restart);
         assert_eq!(agent_target(HarnessId::Claude).reload, Reload::Live);
+    }
+
+    // ── Per-primitive skill facts (#46) ──────────────────────────────────────
+
+    #[test]
+    fn every_harness_has_exactly_one_skill_support_entry() {
+        for h in HarnessId::ALL {
+            let matches: Vec<_> = skill_supports().iter().filter(|s| s.harness == h).collect();
+            assert_eq!(matches.len(), 1, "{h} must have exactly one skill support");
+        }
+        assert_eq!(skill_supports().len(), HarnessId::ALL.len());
+    }
+
+    #[test]
+    fn skill_reload_is_recorded_per_harness_not_per_path() {
+        // Copilot and Claude share `.claude/skills` yet reload differently — the
+        // whole reason skill reload hangs off the harness, not the directory.
+        assert!(
+            skill_path(".claude/skills")
+                .unwrap()
+                .covers(HarnessId::Copilot)
+        );
+        assert!(
+            skill_path(".claude/skills")
+                .unwrap()
+                .covers(HarnessId::Claude)
+        );
+        assert_eq!(skill_support(HarnessId::Copilot).reload, Reload::Command);
+        assert_eq!(skill_support(HarnessId::Claude).reload, Reload::Live);
+    }
+
+    #[test]
+    fn opencode_skills_need_a_restart_from_source_evidence() {
+        let s = skill_support(HarnessId::Opencode);
+        assert_eq!(s.reload, Reload::Restart);
+        assert_eq!(s.evidence, Evidence::OfficialSource);
+    }
+
+    #[test]
+    fn reload_for_answers_both_primitives_from_the_registry() {
+        for h in HarnessId::ALL {
+            assert_eq!(reload_for(Primitive::Skill, h), skill_support(h).reload);
+            assert_eq!(reload_for(Primitive::Agent, h), agent_target(h).reload);
+        }
+        // Skills and agents genuinely differ for at least one harness, so the
+        // guidance really is per-primitive and not a relabelled agent hint.
+        assert_ne!(
+            reload_for(Primitive::Skill, HarnessId::Copilot),
+            reload_for(Primitive::Agent, HarnessId::Copilot)
+        );
+    }
+
+    #[test]
+    fn every_harness_has_a_skill_version_gate_and_it_parses() {
+        for h in HarnessId::ALL {
+            let v = min_version_for(Primitive::Skill, h)
+                .unwrap_or_else(|| panic!("{h} skill min_version"));
+            // Must be a dotted-numeric string `verify::version_ge` can compare.
+            assert!(
+                v.split('.').all(|p| p.parse::<u64>().is_ok()),
+                "{h} skill min_version '{v}' is not dotted-numeric"
+            );
+        }
+    }
+
+    #[test]
+    fn agent_version_gates_are_dotted_numeric_where_present() {
+        for h in HarnessId::ALL {
+            if let Some(v) = min_version_for(Primitive::Agent, h) {
+                assert!(
+                    v.split('.').all(|p| p.parse::<u64>().is_ok()),
+                    "{h} agent min_version '{v}' is not dotted-numeric"
+                );
+            }
+        }
+    }
+
+    // ── Registered vs plannable paths (#46 crit 2) ───────────────────────────
+
+    #[test]
+    fn every_verified_alias_path_is_registered() {
+        for dir in [
+            ".github/skills",
+            ".codex/skills",
+            ".gemini/skills",
+            ".opencode/skills",
+        ] {
+            let p = skill_path(dir).unwrap_or_else(|| panic!("{dir} should be registered"));
+            assert!(!p.plannable, "{dir} is coverage-redundant, not plannable");
+        }
+    }
+
+    #[test]
+    fn only_the_two_shared_paths_are_plannable() {
+        let plannable: Vec<&str> = planner_skill_paths().map(|p| p.dir).collect();
+        assert_eq!(plannable, vec![".agents/skills", ".claude/skills"]);
+    }
+
+    #[test]
+    fn redundant_aliases_serve_only_harnesses_a_shared_path_already_reaches() {
+        // This is what makes them safe to omit from planning.
+        for p in skill_paths().iter().filter(|p| !p.plannable) {
+            for &h in p.covers {
+                assert!(
+                    planner_skill_paths().any(|s| s.covers(h)),
+                    "{} covers {h}, which no plannable path reaches",
+                    p.dir
+                );
+            }
+        }
     }
 
     #[test]

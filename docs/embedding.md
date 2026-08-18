@@ -168,6 +168,12 @@ use akit::{verify, exec::LocalRunner};
 let verifications = verify::verify_all(&LocalRunner, "local")?; // Vec<HostVerification>
 ```
 
+Each primitive is gated independently, so an unmet gate for one never suppresses the other.
+`minVersion`/`versionOk` are the **agent** gate; `skillMinVersion`/`skillVersionOk` (added in the
+#46 registry pass) are the **skill** gate. The two skill fields are strictly additive — the
+existing agent fields kept their meaning — and both gates come from
+[`harness-registry.md`](harness-registry.md).
+
 ## Stability
 
 The crate follows 0.x semver: minor versions may make breaking changes, so hosts

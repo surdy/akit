@@ -274,12 +274,39 @@ fn install_dry_run_json_reports_create_remove_and_replaces() {
 }
 
 #[test]
-fn install_prints_reload_guidance_for_skills() {
+fn install_prints_per_harness_reload_guidance_for_skills() {
     let (_tmp, catalog, project) = setup();
     let (out, ok) = akit(&project, &catalog, &["install", "-H", "copilot", "demo"]);
     assert!(ok, "{out}");
     assert!(out.contains("reload:"), "no reload block:\n{out}");
-    assert!(out.contains("skills:"), "no skill reload hint:\n{out}");
+    // Skills carry per-harness reload data now (#46): Copilot's is a reload
+    // *command*, not the old harness-agnostic "start a new session" hint.
+    assert!(
+        out.contains("copilot skill:"),
+        "no copilot skill hint:\n{out}"
+    );
+    assert!(
+        out.contains("reload command"),
+        "not command guidance:\n{out}"
+    );
+}
+
+#[test]
+fn skill_reload_guidance_differs_per_harness() {
+    // Claude watches its skill directory; Copilot needs `/skills reload`. The
+    // two must not print the same line for one install that serves both.
+    let (_tmp, catalog, project) = setup();
+    let (out, ok) = akit(
+        &project,
+        &catalog,
+        &["install", "-H", "copilot", "-H", "claude", "demo"],
+    );
+    assert!(ok, "{out}");
+    assert!(out.contains("copilot skill:"), "{out}");
+    assert!(
+        out.contains("claude skill: picked up automatically"),
+        "claude should be live:\n{out}"
+    );
 }
 
 #[test]

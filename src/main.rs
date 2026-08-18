@@ -6,7 +6,7 @@ use std::path::PathBuf;
 
 use akit::catalog::Catalog;
 use akit::config::LocalConfig;
-use akit::harness::HarnessId;
+use akit::harness::{HarnessId, Primitive};
 use akit::install::{self, HarnessContext, RemoveScope};
 use akit::lockfile::{ItemType, Mode};
 use akit::ops;
@@ -854,25 +854,27 @@ fn print_symlink_notes(report: &install::InstallReport) {
 
 /// Print post-install reload/restart guidance per served harness.
 ///
-/// Agents have per-harness reload data in the registry; skills do not yet, so
-/// they get one honest, harness-agnostic hint.
+/// Both primitives now have per-harness reload data in the registry (#46), so
+/// skills get the same precise per-harness line agents always had — Copilot's
+/// `/skills reload` is a *command*, Claude/Codex watch the directory, OpenCode
+/// needs a restart. Cells no primary source establishes are `Reload::Unknown`
+/// and degrade to the honest "restart if it does not appear" hint.
 fn print_reload_guidance(item_type: ItemType, harnesses: &[HarnessId]) {
     if harnesses.is_empty() {
         return;
     }
+    let primitive = match item_type {
+        ItemType::Skill => Primitive::Skill,
+        ItemType::Agent => Primitive::Agent,
+    };
     println!("reload:");
-    match item_type {
-        ItemType::Agent => {
-            for h in harnesses {
-                let target = akit::harness::agent_target(*h);
-                println!("  {} agent: {}", h.as_str(), target.reload.guidance());
-            }
-        }
-        ItemType::Skill => {
-            println!(
-                "  skills: start a new session (or run your harness's skills-reload command) if it does not appear"
-            );
-        }
+    for &h in harnesses {
+        println!(
+            "  {} {}: {}",
+            h.as_str(),
+            type_name(item_type),
+            akit::harness::reload_for(primitive, h).guidance()
+        );
     }
 }
 

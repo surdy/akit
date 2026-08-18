@@ -33,12 +33,18 @@ pub struct HostVerification {
     pub present: bool,
     /// The raw version string the binary reported, if any.
     pub version: Option<String>,
-    /// The agent-target min-version gate for this harness, if one is known.
+    /// The **agent**-target min-version gate for this harness, if one is known.
     pub min_version: Option<String>,
-    /// Whether the reported version satisfies the gate (always true when there
-    /// is no gate; false when a gate exists but no version could be read).
+    /// Whether the reported version satisfies the *agent* gate (always true when
+    /// there is no gate; false when a gate exists but no version could be read).
     pub version_ok: bool,
-    /// Whether akit statically supports skills for this harness.
+    /// The **skill** min-version gate for this harness, if one is known (#46).
+    /// Additive: `min_version`/`version_ok` keep their agent-only meaning so
+    /// existing consumers of this shape are unaffected.
+    pub skill_min_version: Option<String>,
+    /// Whether the reported version satisfies the *skill* gate.
+    pub skill_version_ok: bool,
+    /// Whether akit supports skills for this harness on this version.
     pub skill_supported: bool,
     /// Whether akit statically supports agents for this harness on this version.
     pub agent_supported: bool,
@@ -57,9 +63,19 @@ pub fn verify_harness(
     let probe = probe_harness(runner, harness)?;
     let extracted = probe.version.as_deref().and_then(extract_version);
 
-    // Skills have no version gate; agents may. Gate each primitive separately so
-    // an unmet agent gate never suppresses otherwise-working skill support.
-    let skill_supported = skill_supported(harness);
+    // Both primitives can carry a version gate (#46 gave skills theirs). Gate
+    // each separately so an unmet agent gate never suppresses otherwise-working
+    // skill support, and vice versa.
+    let skill_base = skill_supported(harness);
+    let skill_min_version = if skill_base {
+        harness::skill_support(harness)
+            .min_version
+            .map(str::to_string)
+    } else {
+        None
+    };
+    let skill_version_ok = satisfies(&skill_min_version, &extracted);
+    let skill_supported = skill_base && skill_version_ok;
 
     let agent_target = harness::agent_target(harness);
     let agent_base = agent_target.is_enabled();
@@ -68,11 +84,7 @@ pub fn verify_harness(
     } else {
         None
     };
-    let version_ok = match (&min_version, &extracted) {
-        (None, _) => true,
-        (Some(_), None) => false,
-        (Some(want), Some(have)) => version_ge(have, want),
-    };
+    let version_ok = satisfies(&min_version, &extracted);
     let agent_supported = agent_base && version_ok;
 
     let verified = probe.present && (skill_supported || agent_supported);
@@ -82,7 +94,7 @@ pub fn verify_harness(
         &probe.binary,
         probe.present,
         &min_version,
-        version_ok,
+        &skill_min_version,
         skill_supported,
         agent_supported,
     );
@@ -95,11 +107,23 @@ pub fn verify_harness(
         version: probe.version,
         min_version,
         version_ok,
+        skill_min_version,
+        skill_version_ok,
         skill_supported,
         agent_supported,
         verified,
         detail,
     })
+}
+
+/// Whether `have` satisfies an optional gate: no gate passes, and a gate with no
+/// readable version fails (we never assume a version we could not read).
+fn satisfies(want: &Option<String>, have: &Option<String>) -> bool {
+    match (want, have) {
+        (None, _) => true,
+        (Some(_), None) => false,
+        (Some(want), Some(have)) => version_ge(have, want),
+    }
 }
 
 /// Verify every registry harness on a host, in registry order.
@@ -124,8 +148,8 @@ fn describe(
     host_key: &str,
     binary: &str,
     present: bool,
-    min_version: &Option<String>,
-    version_ok: bool,
+    agent_min_version: &Option<String>,
+    skill_min_version: &Option<String>,
     skill_supported: bool,
     agent_supported: bool,
 ) -> String {
@@ -133,12 +157,18 @@ fn describe(
     if !present {
         return format!("{label}: `{binary}` not found on {host_key}");
     }
-    if let Some(min) = min_version
-        && !version_ok
-    {
-        return format!("{label} on {host_key} is below the required version {min}");
-    }
     if !skill_supported && !agent_supported {
+        // Distinguish "this build is too old" from "akit supports nothing here".
+        // Report the lowest gate that would unlock *something*.
+        let gate = match (skill_min_version, agent_min_version) {
+            (Some(s), Some(a)) if version_ge(a, s) => Some(s),
+            (Some(s), None) => Some(s),
+            (_, Some(a)) => Some(a),
+            (None, None) => None,
+        };
+        if let Some(min) = gate {
+            return format!("{label} on {host_key} is below the required version {min}");
+        }
         return format!("{label}: no verified skill or agent target");
     }
     let mut prims = Vec::new();
@@ -256,6 +286,85 @@ mod tests {
         assert!(!v.present);
         assert!(!v.verified);
         assert!(v.detail.contains("not found"));
+    }
+
+    #[test]
+    fn skill_support_is_version_gated_per_primitive() {
+        // Claude Code gained skills in 2.0.20 (#46). A 1.x host is present and
+        // has an ungated agent target, so it stays verified — but its *skill*
+        // support must report false rather than being assumed.
+        let runner = FakeRunner {
+            present: vec![HarnessId::Claude.as_str()],
+            version: "1.9.0",
+        };
+        let v = verify_harness(&runner, HarnessId::Claude, "old").unwrap();
+        assert_eq!(v.skill_min_version.as_deref(), Some("2.0.20"));
+        assert!(!v.skill_version_ok);
+        assert!(!v.skill_supported);
+        assert!(v.agent_supported, "agents have no gate: {}", v.detail);
+        assert!(v.verified);
+    }
+
+    #[test]
+    fn recent_enough_host_supports_both_primitives() {
+        let runner = FakeRunner {
+            present: vec![HarnessId::Claude.as_str()],
+            version: "2.5.0",
+        };
+        let v = verify_harness(&runner, HarnessId::Claude, "new").unwrap();
+        assert!(v.skill_version_ok);
+        assert!(v.skill_supported);
+        assert!(v.agent_supported);
+        assert!(v.detail.contains("skills + agents"), "{}", v.detail);
+    }
+
+    #[test]
+    fn host_below_every_gate_is_reported_as_too_old() {
+        // OpenCode gates both primitives (skills 1.0.186, agents 0.3.65), so a
+        // 0.1 host satisfies neither and must say *why*, naming the lowest gate.
+        let runner = FakeRunner {
+            present: vec![HarnessId::Opencode.as_str()],
+            version: "0.1.0",
+        };
+        let v = verify_harness(&runner, HarnessId::Opencode, "ancient").unwrap();
+        assert!(!v.skill_supported);
+        assert!(!v.agent_supported);
+        assert!(!v.verified);
+        assert!(
+            v.detail.contains("below the required version 0.3.65"),
+            "{}",
+            v.detail
+        );
+    }
+
+    #[test]
+    fn opencode_is_fully_supported_now_that_its_agent_dir_is_pinned() {
+        // While the OpenCode agent target was probe-gated, agent_supported was
+        // always false. Pinning `.opencode/agent` (#46) makes it a real target.
+        let runner = FakeRunner {
+            present: vec![HarnessId::Opencode.as_str()],
+            version: "1.2.0",
+        };
+        let v = verify_harness(&runner, HarnessId::Opencode, "local").unwrap();
+        assert!(v.agent_supported, "{}", v.detail);
+        assert!(v.skill_supported, "{}", v.detail);
+        assert_eq!(v.min_version.as_deref(), Some("0.3.65"));
+    }
+
+    #[test]
+    fn json_shape_keeps_the_agent_gate_fields_and_adds_skill_ones() {
+        // madari pins this shape: `min_version`/`version_ok` must keep their
+        // agent meaning; the skill gate is strictly additive.
+        let runner = FakeRunner {
+            present: vec![HarnessId::Gemini.as_str()],
+            version: "0.30.0",
+        };
+        let v = verify_harness(&runner, HarnessId::Gemini, "local").unwrap();
+        let json = serde_json::to_value(&v).unwrap();
+        assert_eq!(json["minVersion"], "0.25.0");
+        assert_eq!(json["versionOk"], true);
+        assert_eq!(json["skillMinVersion"], "0.28.0");
+        assert_eq!(json["skillVersionOk"], true);
     }
 
     #[test]

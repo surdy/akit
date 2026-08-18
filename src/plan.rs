@@ -10,8 +10,9 @@
 //!
 //! Several harnesses read the *same* skill directory, so one materialization can
 //! serve many. The planner runs a greedy set cover over the registry's
-//! [`crate::harness::skill_paths`] to minimize the number of physical copies,
-//! breaking ties toward the neutral `.agents/skills` path (registry order).
+//! [`crate::harness::planner_skill_paths`] to minimize the number of physical
+//! copies, breaking ties toward the neutral `.agents/skills` path (registry
+//! order).
 //!
 //! ## Agents — one native file per harness
 //!
@@ -146,7 +147,9 @@ pub fn plan_skill(
     // Greedy set cover: repeatedly pick the path covering the most still-
     // uncovered harnesses; ties break toward earlier registry order (which puts
     // the neutral `.agents/skills` first).
-    let paths = harness::skill_paths();
+    // Only the plannable subset: coverage-redundant single-harness aliases are in
+    // the registry for auditability, never as install destinations.
+    let paths: Vec<&harness::SkillPath> = harness::planner_skill_paths().collect();
     while !remaining.is_empty() {
         let mut best: Option<(usize, Vec<HarnessId>)> = None;
         for (idx, path) in paths.iter().enumerate() {
@@ -176,7 +179,7 @@ pub fn plan_skill(
             // rather than loop forever.
             break;
         };
-        let path = &paths[idx];
+        let path = paths[idx];
         remaining.retain(|h| !covered.contains(h));
 
         // Symlink when the registry verifies it for this shared path, or when the
@@ -455,19 +458,39 @@ mod tests {
     }
 
     #[test]
-    fn agent_probe_gated_target_becomes_issue() {
-        // OpenCode is probe-gated in the registry; even with a variant present it
-        // must not be blindly materialized.
+    fn opencode_agent_is_planned_now_that_its_directory_is_pinned() {
+        // #46 resolved the `agent/` vs `agents/` ambiguity against the OpenCode
+        // source instead of probing, so OpenCode is a normal agent target: an
+        // available variant materializes rather than turning into a NeedsProbe
+        // issue the way it did while the target was probe-gated.
         let p = pkg("reviewer", &[HarnessId::Opencode]);
         let plan = plan_agent(&p, &[HarnessId::Opencode]);
-        assert_eq!(plan.materializations, vec![]);
+        assert_eq!(plan.issues, vec![]);
+        assert_eq!(plan.materializations.len(), 1);
+        assert_eq!(plan.materializations[0].path, ".opencode/agent/reviewer.md");
+    }
+
+    #[test]
+    fn agent_plans_every_harness_when_all_variants_exist() {
+        // No registry target is probe-gated today, so a fully-populated package
+        // serves all five harnesses with no issues.
+        let p = pkg("reviewer", &HarnessId::ALL);
+        let plan = plan_agent(&p, &HarnessId::ALL);
+        assert_eq!(plan.issues, vec![]);
+        assert_eq!(plan.materializations.len(), HarnessId::ALL.len());
+        assert_eq!(plan.served(), HarnessId::ALL.to_vec());
+    }
+
+    #[test]
+    fn needs_probe_reason_stays_part_of_the_plan_contract() {
+        // The variant is pinned by madari's JSON contract and by the planner
+        // branch that still guards probe-gated/unverified targets; it simply has
+        // no subject in the registry right now.
         assert_eq!(
-            plan.issues,
-            vec![PlanIssue {
-                harness: HarnessId::Opencode,
-                reason: PlanIssueReason::NeedsProbe,
-            }]
+            serde_json::to_string(&PlanIssueReason::NeedsProbe).unwrap(),
+            "\"needs_probe\""
         );
+        assert!(PlanIssueReason::NeedsProbe.message().contains("probed"));
     }
 
     #[test]
