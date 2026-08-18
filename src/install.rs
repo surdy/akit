@@ -26,7 +26,7 @@ use crate::catalog::Catalog;
 use crate::gitexclude;
 use crate::harness::HarnessId;
 use crate::lockfile::ItemType;
-use crate::materialize::{self, MaterializeItem, remove_materialization};
+use crate::materialize::{self, Drift, MaterializeItem, check_drift, remove_materialization};
 use crate::ownership::{AKIT_LOCKFILE_REL, AkitLockfile, Installation, MaterializationRecord};
 use crate::plan::{self, Plan, PlanIssue, PlannedMaterialization};
 use crate::project::Project;
@@ -154,6 +154,71 @@ pub struct BundleRemoveReport {
     pub bundle: String,
     /// Per-member removal outcomes, in lockfile order.
     pub items: Vec<RemoveReport>,
+}
+
+/// One owned path an uninstall would delete, with the on-disk state of the copy.
+///
+/// The drift state is what the CLI's uninstall gate keys on: a
+/// [`Drift::Modified`] copy is a locally edited file, and deleting it throws away
+/// work, so the CLI confirms before doing so (issue #47).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RemovalPath {
+    /// Project-relative materialization path.
+    pub path: String,
+    /// Whether the owned copy still matches what akit recorded.
+    pub drift: Drift,
+}
+
+/// A read-only preview of what [`remove`] would do (`uninstall --dry-run`), and
+/// the basis for the drift confirmation.
+///
+/// Mirrors [`InstallPreview`]'s conventions — a full uninstall only populates
+/// `remove`; a scoped one re-plans for the remaining harnesses, so it also
+/// reports the materializations the reshape keeps (`unchanged`) and adds
+/// (`create`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RemovePreview {
+    pub id: String,
+    pub item_type: ItemType,
+    /// Owned paths this uninstall would delete, each with its drift state.
+    pub remove: Vec<RemovalPath>,
+    /// Owned materializations a reshape would keep (empty on a full uninstall).
+    pub unchanged: Vec<PlannedMaterialization>,
+    /// Materializations a reshape would newly create (empty on a full uninstall).
+    pub create: Vec<PlannedMaterialization>,
+    /// The harnesses still served afterwards (empty on a full uninstall).
+    pub remaining_harnesses: Vec<HarnessId>,
+    /// True when harnesses remain — a reshape rather than a full removal.
+    pub reshape: bool,
+    /// Whether the item has no installation to begin with.
+    pub not_installed: bool,
+}
+
+impl RemovePreview {
+    /// How many of the paths to delete are locally modified copies.
+    pub fn drifted(&self) -> usize {
+        self.remove
+            .iter()
+            .filter(|r| r.drift == Drift::Modified)
+            .count()
+    }
+}
+
+/// A read-only preview of what [`remove_bundle`] would do: aggregated per-member
+/// previews, in lockfile order.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BundleRemovePreview {
+    /// The bundle name whose tagged members would be removed.
+    pub bundle: String,
+    /// Per-member previews, in lockfile order.
+    pub items: Vec<RemovePreview>,
+}
+
+impl BundleRemovePreview {
+    /// How many locally modified copies the whole bundle uninstall would delete.
+    pub fn drifted(&self) -> usize {
+        self.items.iter().map(RemovePreview::drifted).sum()
+    }
 }
 
 /// Outcome of [`reset`].
@@ -478,6 +543,113 @@ pub fn plan_install_bundle_with_opts(
     })
 }
 
+/// Compute a [`RemovePreview`] for `remove` without applying it (`--dry-run`),
+/// hash-checking every owned copy the uninstall would delete.
+pub fn plan_remove(
+    project: &Project,
+    item_type: ItemType,
+    id: &str,
+    scope: RemoveScope,
+) -> Result<RemovePreview> {
+    plan_remove_with(&LocalFs, project, item_type, id, scope)
+}
+
+/// [`plan_remove`] against an explicit transport.
+///
+/// A full uninstall needs neither the catalog nor a plan — the lockfile lists
+/// exactly what goes. A scoped one re-plans for the remaining harnesses (the same
+/// reshape [`remove_with`] would apply), so it locates the catalog just as the
+/// real scoped remove does.
+pub fn plan_remove_with(
+    fs: &dyn FsTransport,
+    project: &Project,
+    item_type: ItemType,
+    id: &str,
+    scope: RemoveScope,
+) -> Result<RemovePreview> {
+    let lock = AkitLockfile::load_with(fs, &project.akit_lockfile_path())?;
+    let Some(existing) = lock.get(item_type, id).cloned() else {
+        return Ok(RemovePreview {
+            id: id.to_string(),
+            item_type,
+            remove: Vec::new(),
+            unchanged: Vec::new(),
+            create: Vec::new(),
+            remaining_harnesses: Vec::new(),
+            reshape: false,
+            not_installed: true,
+        });
+    };
+
+    let remaining: Vec<HarnessId> = match &scope {
+        RemoveScope::All => Vec::new(),
+        RemoveScope::Harnesses(drop) => existing
+            .harnesses
+            .iter()
+            .copied()
+            .filter(|h| !drop.contains(h))
+            .collect(),
+    };
+
+    // Drift of one owned path, by its recorded materialization.
+    let drift_of = |path: &str| -> Result<Drift> {
+        match existing.materializations.iter().find(|m| m.path == path) {
+            Some(record) => check_drift(fs, &project.root, record),
+            None => Ok(Drift::Missing),
+        }
+    };
+
+    if remaining.is_empty() {
+        let mut remove = Vec::with_capacity(existing.materializations.len());
+        for m in &existing.materializations {
+            remove.push(RemovalPath {
+                path: m.path.clone(),
+                drift: check_drift(fs, &project.root, m)?,
+            });
+        }
+        return Ok(RemovePreview {
+            id: id.to_string(),
+            item_type,
+            remove,
+            unchanged: Vec::new(),
+            create: Vec::new(),
+            remaining_harnesses: Vec::new(),
+            reshape: false,
+            not_installed: false,
+        });
+    }
+
+    // Scoped: the reshape is exactly an install for the reduced harness set, so
+    // reuse the install preview and read the dropped paths off it.
+    let cat = Catalog::locate()?;
+    let ctx = HarnessContext::new(remaining)?;
+    let preview = plan_install_with(fs, project, &cat, item_type, id, &ctx)?;
+    let mut remove = Vec::with_capacity(preview.remove.len());
+    for path in &preview.remove {
+        remove.push(RemovalPath {
+            path: path.clone(),
+            drift: drift_of(path)?,
+        });
+    }
+    let remaining_harnesses = preview
+        .harnesses
+        .iter()
+        .copied()
+        .filter(|h| !preview.issues.iter().any(|i| i.harness == *h))
+        .collect();
+
+    Ok(RemovePreview {
+        id: id.to_string(),
+        item_type,
+        remove,
+        unchanged: preview.unchanged,
+        create: preview.create,
+        remaining_harnesses,
+        reshape: true,
+        not_installed: false,
+    })
+}
+
 /// Remove `id` from some or all harnesses.
 pub fn remove(
     project: &Project,
@@ -612,6 +784,49 @@ pub fn remove_bundle_with(
         items.push(remove_with(fs, project, item_type, &id, scope.clone())?);
     }
     Ok(BundleRemoveReport {
+        bundle: bundle.to_string(),
+        items,
+    })
+}
+
+/// Compute a [`BundleRemovePreview`] for `remove_bundle` without applying it.
+///
+/// Powers both `uninstall --bundle --dry-run` and the aggregate drift
+/// confirmation. Like [`remove_bundle`], the member set comes from the lockfile
+/// bundle tag, so it is empty when nothing carries the tag.
+pub fn plan_remove_bundle(
+    project: &Project,
+    bundle: &str,
+    scope: RemoveScope,
+) -> Result<BundleRemovePreview> {
+    plan_remove_bundle_with(&LocalFs, project, bundle, scope)
+}
+
+/// [`plan_remove_bundle`] against an explicit transport.
+pub fn plan_remove_bundle_with(
+    fs: &dyn FsTransport,
+    project: &Project,
+    bundle: &str,
+    scope: RemoveScope,
+) -> Result<BundleRemovePreview> {
+    let lock = AkitLockfile::load_with(fs, &project.akit_lockfile_path())?;
+    let targets: Vec<(ItemType, String)> = lock
+        .items
+        .iter()
+        .filter(|i| i.bundle.as_deref() == Some(bundle))
+        .map(|i| (i.item_type, i.id.clone()))
+        .collect();
+    let mut items = Vec::with_capacity(targets.len());
+    for (item_type, id) in targets {
+        items.push(plan_remove_with(
+            fs,
+            project,
+            item_type,
+            &id,
+            scope.clone(),
+        )?);
+    }
+    Ok(BundleRemovePreview {
         bundle: bundle.to_string(),
         items,
     })
@@ -1447,6 +1662,97 @@ mod tests {
         let f = setup();
         let report = remove(&f.project, ItemType::Skill, "nope", RemoveScope::All).unwrap();
         assert!(report.not_installed);
+    }
+
+    #[test]
+    fn plan_remove_previews_a_full_removal_without_touching_anything() {
+        let f = setup();
+        write_skill(&f.catalog, "deploy", None);
+        install(
+            &f.project,
+            &f.catalog,
+            ItemType::Skill,
+            "deploy",
+            &ctx(&HarnessId::ALL),
+        )
+        .unwrap();
+
+        let preview = plan_remove(&f.project, ItemType::Skill, "deploy", RemoveScope::All).unwrap();
+        assert!(!preview.not_installed);
+        assert!(!preview.reshape);
+        assert!(preview.remaining_harnesses.is_empty());
+        assert_eq!(preview.remove.len(), 2);
+        assert!(preview.remove.iter().all(|r| r.drift == Drift::Clean));
+        assert_eq!(preview.drifted(), 0);
+        // Dry run: every file and the ownership record survive.
+        assert!(f.project.root.join(".agents/skills/deploy").exists());
+        assert!(f.project.root.join(".claude/skills/deploy").exists());
+        assert_eq!(status(&f.project).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn plan_remove_flags_a_locally_modified_copy() {
+        let f = setup();
+        write_skill(&f.catalog, "deploy", None);
+        install(
+            &f.project,
+            &f.catalog,
+            ItemType::Skill,
+            "deploy",
+            &ctx(&[HarnessId::Claude]),
+        )
+        .unwrap();
+        // Hand-edit the installed copy: its content no longer matches the hash.
+        write(
+            &f.project.root.join(".claude/skills/deploy/SKILL.md"),
+            "edited by hand",
+        );
+
+        let preview = plan_remove(&f.project, ItemType::Skill, "deploy", RemoveScope::All).unwrap();
+        assert_eq!(preview.remove.len(), 1);
+        assert_eq!(preview.remove[0].drift, Drift::Modified);
+        assert_eq!(preview.drifted(), 1);
+    }
+
+    #[test]
+    fn plan_remove_reports_an_absent_item_as_not_installed() {
+        let f = setup();
+        let preview = plan_remove(&f.project, ItemType::Skill, "nope", RemoveScope::All).unwrap();
+        assert!(preview.not_installed);
+        assert!(preview.remove.is_empty());
+        assert_eq!(preview.drifted(), 0);
+    }
+
+    #[test]
+    fn plan_remove_bundle_aggregates_tagged_members_only() {
+        let f = setup();
+        write_skill(&f.catalog, "deploy", None);
+        write_skill(&f.catalog, "lint", None);
+        write_skill(&f.catalog, "solo", None);
+        write_bundle(&f.catalog, "web", "skills: [deploy, lint]\n");
+        install_bundle(&f.project, &f.catalog, "web", &ctx(&[HarnessId::Claude])).unwrap();
+        install(
+            &f.project,
+            &f.catalog,
+            ItemType::Skill,
+            "solo",
+            &ctx(&[HarnessId::Claude]),
+        )
+        .unwrap();
+        write(
+            &f.project.root.join(".claude/skills/lint/SKILL.md"),
+            "edited by hand",
+        );
+
+        let preview = plan_remove_bundle(&f.project, "web", RemoveScope::All).unwrap();
+        assert_eq!(preview.items.len(), 2);
+        // The untagged install is not part of the plan.
+        assert!(preview.items.iter().all(|i| i.id != "solo"));
+        // One member's copy is locally modified — the aggregate count sees it.
+        assert_eq!(preview.drifted(), 1);
+        // Nothing was removed.
+        assert_eq!(status(&f.project).unwrap().len(), 3);
+        assert!(f.project.root.join(".claude/skills/deploy").exists());
     }
 
     #[test]

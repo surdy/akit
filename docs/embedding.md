@@ -129,6 +129,12 @@ install::remove_with(&fs, &project, ItemType::Skill, "deploy", RemoveScope::All)
 install::remove_with(&fs, &project, ItemType::Skill, "deploy",
     RemoveScope::Harnesses(vec![HarnessId::Claude]))?;
 
+// Preview an uninstall: the paths it would delete, each hash-checked for drift.
+// `preview.drifted()` counts locally modified copies — the host's cue to confirm
+// before calling `remove_with` (what `uninstall --dry-run` / its gate use).
+let preview = install::plan_remove_with(&fs, &project, ItemType::Skill, "deploy",
+    RemoveScope::All)?;
+
 // List installs recorded in `.akit/kit.lock.json` (no drift check).
 let installs = install::status_with(&fs, &project)?;
 
@@ -139,11 +145,12 @@ let reset = install::reset_with(&fs, &project)?;
 let health = reconcile::health_with(&fs, &project, &catalog)?;
 ```
 
-Each function has a plain wrapper (`install`, `plan_install`, `remove`, `status`, `reset`,
-`reconcile::health`) that supplies `LocalFs` for callers that don't need a custom transport.
+Each function has a plain wrapper (`install`, `plan_install`, `remove`, `plan_remove`, `status`,
+`reset`, `reconcile::health`) that supplies `LocalFs` for callers that don't need a custom
+transport.
 
 Key types (all `Serialize`): `install::{HarnessContext, RemoveScope, InstallReport, InstallPreview,
-RemoveReport, ResetReport}`, `reconcile::{HealthReport, ItemHealth, MaterializationHealth}`,
+RemoveReport, RemovePreview, RemovalPath, ResetReport}`, `reconcile::{HealthReport, ItemHealth, MaterializationHealth}`,
 `plan::{PlannedMaterialization, PlanIssue}`, `harness::HarnessId`, `ownership::{Installation,
 MaterializationRecord}`, and `materialize::Drift`. `HarnessContext` and `RemoveScope` are inputs
 (not `Serialize`); everything else round-trips to the same JSON the `--json` CLI emits.

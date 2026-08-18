@@ -152,6 +152,10 @@ enum Commands {
         id: Option<String>,
     },
     /// Uninstall a harness-aware install from some or all harnesses.
+    ///
+    /// Locally modified copies are never deleted silently: the removal plan is
+    /// shown and confirmed first (`--yes` skips the prompt, and is required
+    /// non-interactively).
     Uninstall {
         /// Uninstall an agent instead of a skill.
         #[arg(long)]
@@ -159,9 +163,15 @@ enum Commands {
         /// Only remove from these harnesses (repeatable); omit to fully uninstall.
         #[arg(long = "harness", short = 'H', value_name = "ID")]
         harnesses: Vec<String>,
+        /// Preview the removal plan without changing anything.
+        #[arg(long)]
+        dry_run: bool,
         /// Uninstall every installed item tagged with this bundle.
         #[arg(long)]
         bundle: Option<String>,
+        /// Remove locally modified copies without confirming.
+        #[arg(long)]
+        yes: bool,
         /// Catalog id of the skill/agent to uninstall (omit with --bundle).
         id: Option<String>,
     },
@@ -546,7 +556,9 @@ fn run() -> Result<()> {
         Commands::Uninstall {
             agent,
             harnesses,
+            dry_run,
             bundle,
+            yes,
             id,
         } => {
             let project = Project::locate(cli.project.clone())?;
@@ -555,6 +567,9 @@ fn run() -> Result<()> {
             } else {
                 RemoveScope::Harnesses(parse_harnesses(harnesses)?)
             };
+            // The plan is computed for a dry run, and for the drift gate — `--yes`
+            // on a real uninstall waives both, so the hashing is skipped entirely.
+            let need_plan = *dry_run || !*yes;
             match (bundle.as_deref(), id.as_deref()) {
                 (Some(_), Some(_)) => {
                     bail!("uninstall accepts either <id> or --bundle <name>, not both")
@@ -564,6 +579,31 @@ fn run() -> Result<()> {
                     if *agent {
                         bail!("uninstall --bundle cannot be combined with --agent");
                     }
+                    if need_plan {
+                        let preview = install::plan_remove_bundle(&project, bundle, scope.clone())?;
+                        if *dry_run {
+                            if cli.json {
+                                println!("{}", serde_json::to_string(&preview)?);
+                            } else {
+                                print_bundle_uninstall_preview(&preview);
+                                println!(
+                                    "(dry run — nothing removed; re-run without --dry-run to apply)"
+                                );
+                            }
+                            return Ok(());
+                        }
+                        // One aggregate confirmation for the whole bundle.
+                        let drifted = preview.drifted();
+                        if drifted > 0 {
+                            if !cli.json {
+                                print_bundle_uninstall_preview(&preview);
+                            }
+                            if !confirm_drifted_uninstall(cli.json, drifted)? {
+                                println!("Aborted.");
+                                return Ok(());
+                            }
+                        }
+                    }
                     let report = install::remove_bundle(&project, bundle, scope)?;
                     if cli.json {
                         println!("{}", serde_json::to_string(&report)?);
@@ -572,6 +612,31 @@ fn run() -> Result<()> {
                     }
                 }
                 (None, Some(id)) => {
+                    if need_plan {
+                        let preview =
+                            install::plan_remove(&project, item_type(*agent), id, scope.clone())?;
+                        if *dry_run {
+                            if cli.json {
+                                println!("{}", serde_json::to_string(&preview)?);
+                            } else {
+                                print_uninstall_preview(&preview);
+                                println!(
+                                    "(dry run — nothing removed; re-run without --dry-run to apply)"
+                                );
+                            }
+                            return Ok(());
+                        }
+                        let drifted = preview.drifted();
+                        if drifted > 0 {
+                            if !cli.json {
+                                print_uninstall_preview(&preview);
+                            }
+                            if !confirm_drifted_uninstall(cli.json, drifted)? {
+                                println!("Aborted.");
+                                return Ok(());
+                            }
+                        }
+                    }
                     let report = install::remove(&project, item_type(*agent), id, scope)?;
                     if cli.json {
                         println!("{}", serde_json::to_string(&report)?);
@@ -1083,6 +1148,117 @@ fn covers_str(covers: &[HarnessId]) -> String {
         .map(|h| h.as_str())
         .collect::<Vec<_>>()
         .join(", ")
+}
+
+/// Print the removal plan for one item (`uninstall --dry-run`, and the preview
+/// shown before the drift confirmation). The caller adds the trailing dry-run
+/// note or the prompt.
+fn print_uninstall_preview(preview: &install::RemovePreview) {
+    if preview.not_installed {
+        println!(
+            "{} '{}' is not installed",
+            title_case(type_name(preview.item_type)),
+            preview.id
+        );
+        return;
+    }
+    let kind = type_name(preview.item_type);
+    if preview.reshape {
+        let remaining = preview
+            .remaining_harnesses
+            .iter()
+            .map(|h| h.as_str())
+            .collect::<Vec<_>>()
+            .join(", ");
+        println!(
+            "Plan: uninstall {kind} '{}' from selected harness(es); would stay installed for \
+             {remaining}",
+            preview.id
+        );
+    } else {
+        println!("Plan: uninstall {kind} '{}' (full removal)", preview.id);
+    }
+    print_uninstall_preview_sections(preview, "  ");
+}
+
+/// Print the remove/create/unchanged sections of one removal plan at the given
+/// indent. Shared by the single-item and per-bundle-member printing.
+fn print_uninstall_preview_sections(preview: &install::RemovePreview, indent: &str) {
+    if !preview.remove.is_empty() {
+        println!("{indent}remove:");
+        for r in &preview.remove {
+            println!("{indent}  {}{}", r.path, removal_drift_note(r.drift));
+        }
+    }
+    if !preview.create.is_empty() {
+        println!("{indent}create (reshape):");
+        for m in &preview.create {
+            println!(
+                "{indent}  {}  ({})  [{}]",
+                m.path,
+                covers_str(&m.covers),
+                mode_name(m.mode)
+            );
+        }
+    }
+    if !preview.unchanged.is_empty() {
+        println!("{indent}unchanged:");
+        for m in &preview.unchanged {
+            println!("{indent}  {}  ({})", m.path, covers_str(&m.covers));
+        }
+    }
+}
+
+/// The suffix flagging an owned copy that no longer matches what akit recorded.
+/// A locally modified copy is the one deletion the user is asked to confirm.
+fn removal_drift_note(drift: akit::materialize::Drift) -> &'static str {
+    match drift {
+        akit::materialize::Drift::Clean => "",
+        akit::materialize::Drift::Modified => "  (locally modified)",
+        akit::materialize::Drift::Missing => "  (already gone)",
+    }
+}
+
+/// Print the aggregated removal plan for `uninstall --bundle`.
+fn print_bundle_uninstall_preview(preview: &install::BundleRemovePreview) {
+    if preview.items.is_empty() {
+        println!("Bundle '{}' has no harness-aware installs", preview.bundle);
+        return;
+    }
+    println!(
+        "Plan: uninstall bundle '{}' ({} item(s))",
+        preview.bundle,
+        preview.items.len()
+    );
+    for item in &preview.items {
+        let suffix = if item.reshape { "  (reshape)" } else { "" };
+        println!("  {} '{}'{suffix}:", type_name(item.item_type), item.id);
+        print_uninstall_preview_sections(item, "    ");
+    }
+    let drifted = preview.drifted();
+    if drifted > 0 {
+        println!("({drifted} locally modified file(s) would be deleted)");
+    }
+}
+
+/// Confirm deleting locally modified akit-owned copies at an interactive prompt.
+///
+/// Refuses without `--yes` when there is nobody to ask — no TTY, or `--json`,
+/// where a prompt would corrupt the machine-readable output.
+fn confirm_drifted_uninstall(json: bool, drifted: usize) -> Result<bool> {
+    use std::io::{IsTerminal, Write};
+    if json || !std::io::stdin().is_terminal() {
+        bail!(
+            "refusing to delete {drifted} locally modified akit-owned file(s) without \
+             confirmation; re-run with --yes to remove them anyway, or `akit detach <id>` to keep \
+             them and stop managing the install"
+        );
+    }
+    print!("Delete {drifted} locally modified akit-owned file(s)? [y/N] ");
+    std::io::stdout().flush().ok();
+    let mut line = String::new();
+    std::io::stdin().read_line(&mut line)?;
+    Ok(matches!(line.trim(), "y" | "Y" | "yes" | "Yes"))
 }
 
 fn print_uninstall_report(report: &install::RemoveReport) {

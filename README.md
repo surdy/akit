@@ -73,7 +73,8 @@ See [`docs/design.md`](docs/design.md) for the full design, decisions, and Phase
 - **CLI scaffold:** `akit <cmd> [--project <dir>] [--json]`; commands are `install`
   (`[--agent] [-H <id>]... [--dry-run] [--symlink] [--bundle <name>] [--yes] [--force]`, taking a
   catalog id or a remote `owner/repo/path[#ref]` to pull-then-install), `uninstall`
-  (`[--agent] [-H <id>]... [--bundle <name>]`), `installed` (list installs + health), `status`
+  (`[--agent] [-H <id>]... [--dry-run] [--bundle <name>] [--yes]`; confirms before deleting a
+  locally modified copy), `installed` (list installs + health), `status`
   (project overview, bundle completeness), `doctor` (read-only diagnosis), `sync` (= `repair`),
   `repair`/`detach`/`forget`/`adopt` (ownership maintenance), `reset [--yes]`, `where`
   (`[--agent] <id>`: every known project holding an item, with health), `verify` (probe
