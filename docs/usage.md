@@ -48,36 +48,61 @@ cargo build --release
   <catalog>/
     akit.yml                 # manifest of remotely-pulled items (for `akit restore`)
     skills/<name>/SKILL.md
-    agents/<name>.agent.md    # legacy flat agent (Copilot-shaped)
     agents/<name>/agent.yml   # harness-aware agent package (+ one native file per harness)
     bundles/<name>.yml
   ```
 
 Move your personal skills/agents here (out of `~/.copilot/`, which is auto-loaded in *every*
-project). Skills are directories containing `SKILL.md`. Agents come in two shapes: a legacy
-single `agents/<name>.agent.md` file (Copilot-shaped), and a harness-aware **agent package**
-`agents/<name>/` (an `agent.yml` plus one native variant file per harness, installed by
-[`install --agent`](#install--install-a-skill-or-agent-for-one-or-more-harnesses)) — see
+project). Skills are directories containing `SKILL.md`. An agent is always an **agent package**
+`agents/<name>/` — an `agent.yml` plus one native variant file per harness — see
 [Authoring an agent package](#authoring-an-agent-package) for the descriptor format. The
 read/browse commands
 ([`ls`](#ls--list-everything-in-the-catalog) / [`search`](#search--search-the-catalog) /
-[`show`](#show--preview-a-catalog-item)) surface both, preferring the package when an id exists in
-both shapes. `akit` then materializes only the ones you select into a given project with
+[`show`](#show--preview-a-catalog-item)) surface packages; `akit` then materializes only the
+ones you select into a given project with
 [`install`](#install--install-a-skill-or-agent-for-one-or-more-harnesses).
 
-> **Flat `.agent.md` agents are pull-only — they cannot be installed.** A legacy flat
-> `agents/<id>.agent.md` stays fully **browsable**
-> ([`ls`](#ls--list-everything-in-the-catalog) / [`search`](#search--search-the-catalog) /
-> [`show`](#show--preview-a-catalog-item)) and **manageable in the catalog**
-> ([`pull`](#pull--fetch-a-remote-source-into-the-catalog) /
-> [`update`](#update--refresh-pulled-items-to-the-latest-upstream-commit) /
-> [`restore`](#restore--rebootstrap-the-catalog-from-the-manifest) /
-> [`drop`](#drop--remove-an-item-from-the-catalog)), but
-> [`install`](#install--install-a-skill-or-agent-for-one-or-more-harnesses) resolves agents as
-> **packages only** — the legacy `add` command that materialized flat files was removed in
-> v0.30.0, and nothing replaced it for this shape. To make a flat agent installable, convert it
-> to a package: create `agents/<id>/` holding an `agent.yml` descriptor plus one native variant
-> file per harness you want to target.
+### Migrating a legacy flat `agents/<id>.agent.md`
+
+> **Removed in v0.32.0.** The flat single-file agent (`agents/<id>.agent.md`, Copilot-shaped)
+> is no longer a catalog shape. It became uninstallable in v0.30.0 when the legacy `add`
+> command was removed; it is now also invisible to
+> [`ls`](#ls--list-everything-in-the-catalog) / [`search`](#search--search-the-catalog) /
+> [`show`](#show--preview-a-catalog-item) and rejected by
+> [`pull`](#pull--fetch-a-remote-source-into-the-catalog). The agent-package contract is the
+> only agent contract.
+
+A leftover flat file in your catalog is **ignored**, not deleted: nothing lists it, and `ls`
+prints a one-line note to stderr naming the files it skipped. Convert each one:
+
+```bash
+cd ~/.akit/catalog/agents
+mkdir reviewer
+git mv reviewer.agent.md reviewer/copilot.agent.md   # the Copilot-native variant
+$EDITOR reviewer/agent.yml
+```
+
+```yaml
+# reviewer/agent.yml
+name: Code Reviewer
+description: Reviews a diff for correctness and style
+variants:
+  copilot: copilot.agent.md
+```
+
+The old file's body is already valid Copilot Markdown, so it becomes the `copilot:` variant
+verbatim. Add a native file per additional harness you want to target (`claude.md`,
+`codex.toml`, …) and list it under `variants:` — see
+[Authoring an agent package](#authoring-an-agent-package) for the full schema.
+
+If the agent had been **pulled**, its `akit.yml` entry still records the old `.agent.md` path.
+[`restore`](#restore--rebootstrap-the-catalog-from-the-manifest) and
+[`update`](#update--refresh-pulled-items-to-the-latest-upstream-commit) report such an entry as
+a per-item **error** carrying this migration hint and carry on with the rest of the run; the
+entry is left in the manifest so it can be fixed and retried. Either re-point it at a package
+upstream (`akit pull --agent owner/repo/agents/<id>`) or forget it with
+`akit drop --agent <id>`, which prunes the stale entry even though there is nothing on disk to
+remove.
 
 You can populate the catalog by hand (move/copy files into the layout above) or fetch a
 remote source straight into it with [`akit pull`](#pull--fetch-a-remote-source-into-the-catalog).
@@ -213,23 +238,20 @@ cloning and copying by hand. (To fetch and install in one step, pass the remote 
   source (honoring `$KIT_CACHE_DIR` and `$KIT_REMOTE_BASE_URL`), then **copies** the resolved item
   into the catalog — a standalone copy, independent of the cache.
 - By default the source is a **skill** (`<catalog>/skills/<id>/`); with `--agent` it is an
-  agent. An agent may be either a harness-aware **package** — a directory `agents/<id>/` holding
-  an `agent.yml` (stored at `<catalog>/agents/<id>/`) — or a legacy flat `.agent.md` file
-  (stored at `<catalog>/agents/<id>.agent.md`); `pull` detects which the source is and stores it
-  in the matching shape. A pulled **flat** `.agent.md` is browsable and updatable but **not
-  installable** — see [Your catalog](#your-catalog). The same path resolution as a remote
-  `install` applies, so a single-segment `path`
-  like `deploy-to-vercel` resolves to `skills/deploy-to-vercel` (or, with `--agent`, an
-  `agents/deploy-to-vercel/` package if present, else `agents/deploy-to-vercel.agent.md`) in the
-  source repo.
+  agent **package** — a directory `agents/<id>/` holding an `agent.yml`, stored at
+  `<catalog>/agents/<id>/`. A source that resolves to a legacy flat `.agent.md` file is
+  **rejected** with a migration hint (see
+  [Migrating a legacy flat agent](#migrating-a-legacy-flat-agentsidagentmd)). The same path
+  resolution as a remote `install` applies, so a single-segment `path` like `deploy-to-vercel`
+  resolves to `skills/deploy-to-vercel` (or, with `--agent`, the
+  `agents/deploy-to-vercel/` package) in the source repo.
 - The catalog **id** defaults to the source's last path segment; `--as <id>` stores it under
   a different name. Ids must be a single path segment (no `/`).
 - Validates the fetched source before writing: a skill must be a directory containing `SKILL.md`;
-  an agent must be either a valid package directory (`agent.yml` + declared variant files) or a
-  `.agent.md` file.
-- Records an agent package with its real directory path and an explicit `type: agent` in the
-  manifest (flat agents keep the `.agent.md` shorthand), so
-  [`restore`](#restore--rebootstrap-the-catalog-from-the-manifest) rebuilds the whole package.
+  an agent must be a valid package directory (`agent.yml` + declared variant files).
+- Records an agent with its real package directory path and an explicit `type: agent` in the
+  manifest, so [`restore`](#restore--rebootstrap-the-catalog-from-the-manifest) rebuilds the
+  whole package.
 - Creates the `skills/` / `agents/` directories if the catalog does not exist yet.
 - **Idempotent and safe:** an identical existing item is a no-op (`"created": false`); an item
   that already exists and *differs* from the source is left untouched and the command errors
@@ -293,7 +315,7 @@ can recreate your catalog on a new machine. Run it after copying just `akit.yml`
 ```bash
 $ akit restore
   pulled skill 'deploy-to-vercel' from vercel-labs/agent-skills/deploy-to-vercel#main
-  pulled agent 'reviewer' from acme/kits/reviewer.agent.md#main
+  pulled agent 'reviewer' from acme/kits/agents/reviewer#main
 Restored 2 item(s): 2 pulled, 0 already present, 0 overwritten, 0 error(s).
 ```
 
@@ -320,7 +342,11 @@ name: akit-catalog
 version: 0.0.0
 dependencies:
   apm:
-    - acme/kits/reviewer.agent.md#main                 # agent, no recorded commit (legacy form)
+    - vercel-labs/agent-skills/lint-fix#main           # skill, no recorded commit (legacy form)
+    - git: acme/kits                                   # agent package (explicit type)
+      path: agents/reviewer
+      type: agent
+      ref: main
     - git: vercel-labs/agent-skills                    # skill with a resolved commit
       path: deploy-to-vercel
       ref: main
@@ -332,15 +358,20 @@ dependencies:
       alias: vercel
 ```
 
-An entry is stored as the APM **string shorthand** `owner/repo/path[#ref]` (agents use the
-`.agent.md` extension, APM's file-primitive convention) only when it has no recorded commit and
-the default id. As soon as a resolved **`commit`** is recorded — which every `pull`/`update`
-does now — the entry switches to the **object form** (`git` + `path` + `ref` + `commit`, plus
-`alias` for a `--as <id>` pull), because a single string can't carry both the symbolic ref and
-the commit. The loader still accepts the legacy string form, so older `akit.yml` files keep
+An entry is stored as the APM **string shorthand** `owner/repo/path[#ref]` only when it is a
+skill with no recorded commit and the default id. As soon as a resolved **`commit`** is
+recorded — which every `pull`/`update` does now — the entry switches to the **object form**
+(`git` + `path` + `ref` + `commit`, plus `alias` for a `--as <id>` pull), because a single
+string can't carry both the symbolic ref and the commit. An **agent** always uses the object
+form: its package path carries no suffix to classify it by, so it records an explicit
+`type: agent`. The loader still accepts the legacy string form, so older `akit.yml` files keep
 working. Entries are upserted by `(type, id)`, and unknown keys (`name`, `author`, …) are
-preserved across rewrites. `restore` classifies an entry as an agent when its path ends in
-`.agent.md`, otherwise a skill.
+preserved across rewrites.
+
+A path ending in `.agent.md` is still *read* as an agent — that is how a pre-v0.32.0 manifest
+recorded a flat agent — but that shape no longer exists, so `restore`/`update` report the entry
+as an error with a migration hint rather than misreading it as a skill. See
+[Migrating a legacy flat agent](#migrating-a-legacy-flat-agentsidagentmd).
 
 The recorded `commit` is what makes `restore` reproducible and `update` diffs precise; see those
 commands for how it is consumed and refreshed.
@@ -380,7 +411,7 @@ recreate missing items, `update` always contacts the remote so it picks up upstr
 ```bash
 $ akit update
   updated skill 'deploy-to-vercel' from vercel-labs/agent-skills/deploy-to-vercel#main (9f3c1a2 → 4b7e0d1)
-  up to date agent 'reviewer' from acme/kits/reviewer.agent.md#main
+  up to date agent 'reviewer' from acme/kits/agents/reviewer#main
 Updated 2 item(s): 1 updated, 1 up to date, 0 pinned, 0 error(s).
 ```
 
@@ -482,7 +513,7 @@ akit drop [--agent] <id>
 ```
 
 Removes a skill or agent from your catalog (`skills/<id>/`, or for an agent the whole
-`agents/<id>/` package directory when present, else the legacy flat `agents/<id>.agent.md`). If the
+`agents/<id>/` package directory). If the
 item was pulled, it also prunes its entry from the manifest, so
 [`restore`](#restore--rebootstrap-the-catalog-from-the-manifest) won't bring it back. It's the
 inverse of [`pull`](#pull--fetch-a-remote-source-into-the-catalog), but unlike the old behavior
@@ -493,7 +524,7 @@ $ akit drop deploy-to-vercel
 Dropped skill 'deploy-to-vercel' (from vercel-labs/agent-skills/deploy-to-vercel#main) -> /home/you/.akit/catalog/skills/deploy-to-vercel (removed)
 
 $ akit drop --agent reviewer
-Dropped agent 'reviewer' (from acme/kits/reviewer.agent.md#main) -> /home/you/.akit/catalog/agents/reviewer.agent.md (removed)
+Dropped agent 'reviewer' (from acme/kits/agents/reviewer#main) -> /home/you/.akit/catalog/agents/reviewer (removed)
 
 $ akit drop my-local-skill
 Dropped skill 'my-local-skill' -> /home/you/.akit/catalog/skills/my-local-skill (removed)
@@ -707,12 +738,12 @@ With `--json`, `sync` emits a `reconcile::RepairReport` (identical to `repair`):
 akit search [<query>]
 ```
 
-- Scans `<catalog>/skills/<name>/SKILL.md`, legacy flat agents `<catalog>/agents/<name>.agent.md`,
-  and harness-aware **agent packages** `<catalog>/agents/<name>/agent.yml`. When both an agent
-  package and a flat file share an id, the package wins (it is the target contract).
+- Scans `<catalog>/skills/<name>/SKILL.md` and **agent packages**
+  `<catalog>/agents/<name>/agent.yml`. Legacy flat `agents/<name>.agent.md` files are ignored
+  (see [Migrating a legacy flat agent](#migrating-a-legacy-flat-agentsidagentmd)).
 - Reads leading YAML-style frontmatter fields: `name`, `description`, and `category` (an agent
   package reads these from its `agent.yml`).
-- If `name` is missing, uses the skill directory or agent file name.
+- If `name` is missing, uses the skill directory or package directory name.
 - For an agent package, surfaces the **harnesses** it supports (from its variants).
 - Fuzzy-matches `<query>` against `name` first and `description` second; best scores print first.
 - An omitted or empty query lists every catalog item.
@@ -765,10 +796,10 @@ akit show [--agent] <id>
 
 - Reads a single item from the catalog and prints its frontmatter and raw content,
   without touching the project.
-- Defaults to a skill (`<catalog>/skills/<id>/SKILL.md`); pass `--agent` to read an agent.
-  For agents, a harness-aware **package** (`<catalog>/agents/<id>/agent.yml`) is preferred when
-  present — it previews the `agent.yml` descriptor and lists the harnesses it supports — falling
-  back to a legacy flat `<catalog>/agents/<id>.agent.md` otherwise.
+- Defaults to a skill (`<catalog>/skills/<id>/SKILL.md`); pass `--agent` to read an agent
+  **package** (`<catalog>/agents/<id>/agent.yml`) — it previews the `agent.yml` descriptor and
+  lists the harnesses it supports. A missing package is an error; a leftover flat
+  `agents/<id>.agent.md` is not previewed.
 - Reuses the same frontmatter parsing as `search` (`name`, `description`, `category`); a
   missing `name` falls back to the `<id>`, and malformed frontmatter warns to stderr and
   falls back to available fields.
@@ -908,10 +939,9 @@ operate on this engine. (The old Copilot-only `add`/`rm` commands and their
   on every release that ever shipped markdown agents — see
   [`harness-registry.md`](harness-registry.md) for the source citations.
 
-  Harness-aware agents come from a catalog **agent package** — a directory `agents/<id>/`
-  holding an `agent.yml` descriptor plus one native file per harness it supports. akit copies a
-  variant's bytes **verbatim**; it never converts one format to another. (This is a distinct
-  catalog shape from the legacy `agents/<id>.agent.md` single file.) A selected harness with no
+  Agents come from a catalog **agent package** — a directory `agents/<id>/` holding an
+  `agent.yml` descriptor plus one native file per harness it supports. akit copies a variant's
+  bytes **verbatim**; it never converts one format to another. A selected harness with no
   matching variant is reported as a **skipped** issue, not installed. See
   [Authoring an agent package](#authoring-an-agent-package) for the `agent.yml` format.
 
@@ -1000,12 +1030,12 @@ When `<id>` parses as a remote source (`owner/repo/path`, optionally `#ref`) ins
 catalog id, `install` **pulls it into your catalog first, then installs it** — the one-step form of
 `akit pull … && akit install <id>`. The pulled item is recorded in the catalog manifest (`akit.yml`)
 exactly as `pull` would record it, so `update`/`restore`/`log` work on it afterwards. The install id
-is the source's last path segment (for an agent, minus a trailing `.agent.md`); use `--agent` for a
+is the source's last path segment; use `--agent` for a
 remote agent. `--force` re-pulls when the catalog already holds a **differing** copy of that id
 (without it, a drifted copy is an error, matching `pull`). Because previewing would require fetching,
 `--dry-run` is refused for a remote source — `pull` it, then `install --dry-run <id>`. To install a
-remote agent through the harness-aware path it must be a **package** (`agents/<id>/` with `agent.yml`);
-a single-file `.agent.md` remote pulls fine but isn't installable this way.
+remote agent it must be a **package** (`agents/<id>/` with `agent.yml`); a source resolving to a
+single-file `.agent.md` is rejected with a migration hint.
 
 ```bash
 $ akit install -H claude acme/kit-skills/deploy-to-vercel#main

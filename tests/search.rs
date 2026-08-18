@@ -11,7 +11,9 @@ fn make_skill(catalog_root: &Path, dir_name: &str, body: &str) {
     fs::write(dir.join("SKILL.md"), body).unwrap();
 }
 
-fn make_agent(catalog_root: &Path, file_name: &str, body: &str) {
+/// A leftover legacy flat agent file (`agents/<id>.agent.md`), a shape removed in
+/// v0.32.0. Used only to assert that search ignores it.
+fn make_legacy_flat_agent(catalog_root: &Path, file_name: &str, body: &str) {
     let dir = catalog_root.join("agents");
     fs::create_dir_all(&dir).unwrap();
     fs::write(dir.join(format!("{file_name}.agent.md")), body).unwrap();
@@ -110,10 +112,17 @@ fn empty_query_returns_all_items() {
         "deploy-helper",
         "---\nname: Deploy Helper\ndescription: Ship apps safely\ncategory: ops\n---\nbody\n",
     );
-    make_agent(
+    make_agent_pkg(
         &catalog_root,
         "reviewer",
-        "---\nname: Reviewer\ndescription: Review code\ncategory: quality\n---\nbody\n",
+        "Review code",
+        &[("claude", "cl.md")],
+    );
+    // A leftover flat file is not an item and must not appear.
+    make_legacy_flat_agent(
+        &catalog_root,
+        "legacy",
+        "---\nname: Legacy\ndescription: old shape\n---\nbody\n",
     );
 
     let catalog = Catalog::with_root(&catalog_root);
@@ -122,9 +131,11 @@ fn empty_query_returns_all_items() {
     assert_eq!(hits.len(), 2);
     assert!(hits.iter().all(|hit| hit.score == 0));
     assert!(hits.iter().any(|hit| hit.name == "Deploy Helper"));
-    assert!(hits.iter().any(|hit| hit.name == "Reviewer"));
-    assert!(hits.iter().any(|hit| hit.id == "deploy-helper"));
     assert!(hits.iter().any(|hit| hit.id == "reviewer"));
+    assert!(
+        hits.iter().all(|hit| hit.id != "legacy"),
+        "flat .agent.md must not be searchable"
+    );
 }
 
 #[test]
@@ -132,16 +143,16 @@ fn missing_or_malformed_frontmatter_is_included_without_panicking() {
     let tmp = tempfile::tempdir().unwrap();
     let catalog_root = tmp.path().join("catalog");
     make_skill(&catalog_root, "plain", "body without frontmatter\n");
-    make_agent(
-        &catalog_root,
-        "broken",
-        "---\nname: Broken Agent\ndescription: unterminated frontmatter\n",
-    );
+    // An agent package whose `agent.yml` is unparseable stays visible with the
+    // load error, rather than breaking the whole scan.
+    let broken = catalog_root.join("agents").join("broken");
+    fs::create_dir_all(&broken).unwrap();
+    fs::write(broken.join("agent.yml"), "variants: [not, a, mapping\n").unwrap();
 
     let catalog = Catalog::with_root(&catalog_root);
     let hits = search::search(&catalog, "").unwrap();
 
     assert_eq!(hits.len(), 2);
     assert!(hits.iter().any(|hit| hit.name == "plain"));
-    assert!(hits.iter().any(|hit| hit.name == "broken"));
+    assert!(hits.iter().any(|hit| hit.id == "broken"));
 }

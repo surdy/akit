@@ -64,14 +64,10 @@ pub fn load(catalog: &Catalog, name: &str) -> Result<Bundle> {
         });
     }
     for agent in manifest.agents {
-        // Accept either on-disk shape: a legacy flat `agents/<id>.agent.md` file
-        // or a harness-aware `agents/<id>/` package. The existence check is
-        // engine-agnostic; each engine resolves its own shape when installing.
-        if catalog.resolve_agent(&agent).is_err() {
-            catalog
-                .resolve_agent_package(&agent)
-                .with_context(|| format!("bundle '{name}' references agent '{agent}'"))?;
-        }
+        // An agent is a harness-aware `agents/<id>/` package — the only agent shape.
+        catalog
+            .resolve_agent_package(&agent)
+            .with_context(|| format!("bundle '{name}' references agent '{agent}'"))?;
         items.push(BundleItem {
             item_type: ItemType::Agent,
             id: agent,

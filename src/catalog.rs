@@ -4,7 +4,7 @@
 //! ```text
 //! $KIT_CATALOG_DIR/          (default ~/.akit/catalog)
 //!   skills/<name>/SKILL.md
-//!   agents/<name>.agent.md
+//!   agents/<name>/agent.yml   (+ one native variant file per harness)
 //! ```
 
 use anyhow::{Context, Result, bail};
@@ -12,6 +12,10 @@ use std::path::PathBuf;
 
 /// Environment variable that overrides the catalog location.
 pub const ENV_CATALOG_DIR: &str = "KIT_CATALOG_DIR";
+
+/// Filename suffix of the removed legacy flat catalog agent shape
+/// (`agents/<id>.agent.md`). Retained only to recognize and report leftovers.
+pub const LEGACY_FLAT_SUFFIX: &str = ".agent.md";
 
 /// A handle to the on-disk catalog.
 pub struct Catalog {
@@ -42,11 +46,6 @@ impl Catalog {
         self.root.join("skills").join(name)
     }
 
-    /// Path to an agent's source file (may not exist).
-    pub fn agent_source(&self, name: &str) -> PathBuf {
-        self.root.join("agents").join(format!("{name}.agent.md"))
-    }
-
     /// Resolve a skill by name, validating it exists and has a `SKILL.md`.
     pub fn resolve_skill(&self, name: &str) -> Result<PathBuf> {
         let dir = self.skill_source(name);
@@ -64,18 +63,6 @@ impl Catalog {
             );
         }
         Ok(dir)
-    }
-
-    /// Resolve an agent by name, validating `<name>.agent.md` exists.
-    pub fn resolve_agent(&self, name: &str) -> Result<PathBuf> {
-        let file = self.agent_source(name);
-        if !file.is_file() {
-            bail!(
-                "agent '{name}' not found in catalog (looked in {})",
-                file.display()
-            );
-        }
-        Ok(file)
     }
 
     /// Path to a native-agent package directory (`agents/<id>/`, may not exist).
@@ -101,56 +88,50 @@ impl Catalog {
         crate::agentpkg::SkillCompat::load(&self.skill_source(name))
     }
 
-    /// Discover every agent in the catalog, across **both** on-disk shapes: legacy
-    /// flat files (`agents/<id>.agent.md`) and harness-aware packages
-    /// (`agents/<id>/` with an `agent.yml`). When both exist for one id, the
-    /// package wins — it is the target contract. Results are sorted by id.
+    /// Discover every agent **package** in the catalog (`agents/<id>/` holding an
+    /// `agent.yml`), sorted by id.
     ///
     /// This is the single source of truth for the read/browse surface
-    /// (`ls` / `search` / `show`) so packages are never invisible to it.
-    pub fn discover_agents(&self) -> Result<Vec<DiscoveredAgent>> {
-        use std::collections::BTreeMap;
+    /// (`ls` / `search` / `show`), so a package is never invisible to it.
+    ///
+    /// Legacy flat `agents/<id>.agent.md` files are **not** a catalog shape any
+    /// more (removed in v0.32.0). They are skipped here rather than listed, but
+    /// a one-line note naming them is written to stderr — silently dropping items
+    /// a user pulled before would look like data loss, whereas a stderr note
+    /// keeps `--json` stdout free of entries no command can act on.
+    pub fn discover_agents(&self) -> Result<Vec<String>> {
         let dir = self.root.join("agents");
         let entries = match std::fs::read_dir(&dir) {
             Ok(entries) => entries,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
             Err(e) => return Err(e).with_context(|| format!("reading {}", dir.display())),
         };
-        // id → shape; a package overwrites a flat file of the same id, and a flat
-        // file never overwrites a package (`or_insert`), so package always wins.
-        let mut found: BTreeMap<String, AgentShape> = BTreeMap::new();
+        let mut ids = Vec::new();
+        let mut legacy = Vec::new();
         for entry in entries {
             let entry = entry.with_context(|| format!("reading {}", dir.display()))?;
             let path = entry.path();
             let name = entry.file_name().to_string_lossy().into_owned();
             if path.is_dir() {
                 if path.join(crate::agentpkg::AGENT_DESCRIPTOR).is_file() {
-                    found.insert(name, AgentShape::Package);
+                    ids.push(name);
                 }
-            } else if let Some(id) = name.strip_suffix(".agent.md") {
-                found
-                    .entry(id.to_string())
-                    .or_insert(AgentShape::Flat(path));
+            } else if let Some(id) = name.strip_suffix(LEGACY_FLAT_SUFFIX) {
+                legacy.push(id.to_string());
             }
         }
-        Ok(found
-            .into_iter()
-            .map(|(id, shape)| DiscoveredAgent { id, shape })
-            .collect())
+        ids.sort();
+        if !legacy.is_empty() {
+            legacy.sort();
+            eprintln!(
+                "warning: ignoring {} legacy flat agent file(s) in {} ({}). \
+                 Flat `.agent.md` agents are no longer a catalog shape — convert each to \
+                 `agents/<id>/agent.yml` plus a native variant file.",
+                legacy.len(),
+                dir.display(),
+                legacy.join(", ")
+            );
+        }
+        Ok(ids)
     }
-}
-
-/// The on-disk shape of a discovered catalog agent.
-pub enum AgentShape {
-    /// Legacy single file `agents/<id>.agent.md` (Copilot-shaped). Carries its path.
-    Flat(PathBuf),
-    /// Harness-aware package directory `agents/<id>/` (load via
-    /// [`Catalog::resolve_agent_package`]).
-    Package,
-}
-
-/// One agent discovered by [`Catalog::discover_agents`].
-pub struct DiscoveredAgent {
-    pub id: String,
-    pub shape: AgentShape,
 }

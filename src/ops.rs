@@ -8,7 +8,7 @@ use std::collections::{HashMap, HashSet};
 use std::io::ErrorKind;
 use std::path::PathBuf;
 
-use crate::catalog::{AgentShape, Catalog};
+use crate::catalog::Catalog;
 use crate::fsops;
 use crate::harness::HarnessId;
 use crate::lockfile::{ItemType, Mode};
@@ -55,8 +55,8 @@ pub struct CatalogItem {
     /// recorded in the manifest; `None` for hand-authored (local) items.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub source: Option<String>,
-    /// Harnesses an agent *package* supports. Empty for skills and for legacy
-    /// flat `.agent.md` agents (which have no per-harness contract).
+    /// Harnesses an agent *package* supports. Empty for skills, and for an
+    /// invalid package (which has no resolvable per-harness contract).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub harnesses: Vec<HarnessId>,
     /// True when this agent is an invalid package (surfaced but not installable);
@@ -89,9 +89,9 @@ pub struct PullReport {
 
 /// Fetch a remote `owner/repo/path[#ref]` source and copy it into the local catalog.
 ///
-/// This seeds a reusable **catalog** item (`skills/<id>/`, or `agents/<id>/` package /
-/// `agents/<id>.agent.md`) so it can later be installed, searched, and previewed like any
-/// other local item. The copy is standalone, independent of the git-fetch cache.
+/// This seeds a reusable **catalog** item (`skills/<id>/`, or an `agents/<id>/` agent
+/// package) so it can later be installed, searched, and previewed like any other local
+/// item. The copy is standalone, independent of the git-fetch cache.
 ///
 /// The remote provenance is recorded in the catalog manifest ([`manifest`]) so the item can
 /// be re-fetched on a new machine with [`restore_catalog`].
@@ -126,7 +126,8 @@ pub fn pull_into_catalog(
 }
 
 /// Whether `(item_type, id)` is materialized in the catalog as a harness-aware
-/// agent package directory (rather than a legacy flat `.agent.md` file).
+/// agent package directory. Every agent is one — this guards against recording a
+/// manifest entry for an agent that did not land as a package.
 fn is_agent_package(catalog: &Catalog, item_type: ItemType, id: &str) -> bool {
     item_type == ItemType::Agent && catalog.agent_package_dir(id).is_dir()
 }
@@ -268,6 +269,23 @@ pub fn restore_catalog(
     let mut summary = RestoreSummary::default();
 
     for entry in entries {
+        // A pre-v0.32.0 manifest may still record a legacy flat `.agent.md` agent. That
+        // shape no longer exists, so it cannot be re-fetched — report it as a per-item
+        // error with a migration hint and carry on, leaving the entry in place so it can
+        // be fixed and retried.
+        if entry.is_legacy_flat_agent() {
+            summary.errors += 1;
+            items.push(RestoreItem {
+                id: entry.id.clone(),
+                item_type: entry.item_type,
+                source: entry.spec.source(),
+                git_ref: entry.spec.ref_.clone(),
+                status: RestoreStatus::Error,
+                error: Some(entry.legacy_flat_hint()),
+            });
+            continue;
+        }
+
         // Pin to the recorded commit for reproducibility unless the caller asked for the latest
         // (or no commit was ever recorded), in which case follow the symbolic ref.
         let pin_to_commit = !latest && entry.commit.is_some();
@@ -461,6 +479,23 @@ pub fn update_catalog(
         }
         matched = true;
 
+        // A legacy flat `.agent.md` entry from a pre-v0.32.0 manifest can no longer be
+        // materialized; report it and continue rather than failing the whole run.
+        if entry.is_legacy_flat_agent() {
+            summary.errors += 1;
+            items.push(UpdateItem {
+                id: entry.id.clone(),
+                item_type: entry.item_type,
+                source: entry.spec.source(),
+                git_ref: entry.spec.ref_.clone(),
+                status: UpdateStatus::Error,
+                previous_commit: entry.commit.clone(),
+                commit: entry.commit.clone(),
+                error: Some(entry.legacy_flat_hint()),
+            });
+            continue;
+        }
+
         if entry.spec.ref_.as_deref().is_some_and(is_full_sha) {
             summary.pinned += 1;
             items.push(UpdateItem {
@@ -649,6 +684,9 @@ pub fn rollback_catalog(
 ) -> Result<UpdateReport> {
     ensure_simple_id(id)?;
     let entry = find_pulled_entry(catalog, item_type, id)?;
+    if entry.is_legacy_flat_agent() {
+        anyhow::bail!("{}", entry.legacy_flat_hint());
+    }
 
     // Resolve `to` against the recorded ref's history: this both expands a prefix to the full SHA
     // and enforces reachability (git log lists exactly the ancestors of the ref tip).
@@ -752,10 +790,13 @@ pub struct DropReport {
 
 /// Remove an item from the catalog, pruning its manifest entry when present.
 ///
-/// Deletes the catalog copy (`skills/<id>/` or `agents/<id>.agent.md`) and, if the
-/// item was recorded as a pull, removes its manifest entry so `restore` won't bring
-/// it back. Works on both pulled and hand-authored (local) items. Errors only when
-/// `id` exists neither on disk nor in the manifest.
+/// Deletes the catalog copy (`skills/<id>/` or `agents/<id>/`) and, if the item was
+/// recorded as a pull, removes its manifest entry so `restore` won't bring it back.
+/// Works on both pulled and hand-authored (local) items. Errors only when `id` exists
+/// neither on disk nor in the manifest.
+///
+/// This is also how a stale manifest entry for a removed legacy flat agent is cleaned
+/// up: nothing is deleted from disk (`item_removed: false`) but the entry is pruned.
 pub fn drop_from_catalog(catalog: &Catalog, item_type: ItemType, id: &str) -> Result<DropReport> {
     ensure_simple_id(id)?;
     let entry = manifest::entries(catalog)?
@@ -789,20 +830,12 @@ pub fn drop_from_catalog(catalog: &Catalog, item_type: ItemType, id: &str) -> Re
     })
 }
 
-/// The catalog path `drop` should remove for `(item_type, id)`. For an agent this
-/// prefers a package directory (`agents/<id>/`) when present, else the legacy flat
-/// `agents/<id>.agent.md` file.
+/// The catalog path `drop` should remove for `(item_type, id)`: a skill directory or
+/// an agent **package** directory. Those are the only two catalog shapes.
 fn drop_target(catalog: &Catalog, item_type: ItemType, id: &str) -> PathBuf {
     match item_type {
         ItemType::Skill => catalog.skill_source(id),
-        ItemType::Agent => {
-            let pkg = catalog.agent_package_dir(id);
-            if pkg.is_dir() {
-                pkg
-            } else {
-                catalog.agent_source(id)
-            }
-        }
+        ItemType::Agent => catalog.agent_package_dir(id),
     }
 }
 
@@ -838,11 +871,10 @@ fn validate_remote_skill(id: &str, src: &std::path::Path) -> Result<()> {
 }
 
 /// Resolve where a fetched remote item is stored **in the catalog**, validating
-/// its on-disk shape. Skills are always directories. An agent may arrive as a
-/// harness-aware **package** directory (`agent.yml` + variants) — the target
-/// contract, stored at `agents/<id>/` — or a legacy flat `.agent.md` file, stored
-/// at `agents/<id>.agent.md`. This is what puts `pull`/`update`/`restore` onto
-/// agent packages while still accepting legacy flat sources.
+/// its on-disk shape. Skills are always directories; an agent is always a
+/// harness-aware **package** directory (`agent.yml` + variants) stored at
+/// `agents/<id>/`. A remote that resolves to a legacy flat `.agent.md` file is
+/// rejected with a migration hint — it is no longer a catalog shape.
 fn catalog_dst_for_source(
     catalog: &Catalog,
     item_type: ItemType,
@@ -860,10 +892,17 @@ fn catalog_dst_for_source(
                 .with_context(|| format!("remote agent '{id}' is not a valid agent package"))?;
             Ok(catalog.agent_package_dir(id))
         }
-        ItemType::Agent if src.is_file() => Ok(catalog.agent_source(id)),
+        ItemType::Agent if src.is_file() => anyhow::bail!(
+            "remote agent '{id}' resolved to a legacy flat .agent.md file ({}), which is no \
+             longer a supported catalog shape — akit needs an agent *package*: a directory \
+             `agents/{id}/` holding an `agent.yml` descriptor plus one native variant file \
+             per harness",
+            src.display()
+        ),
         ItemType::Agent => anyhow::bail!(
-            "remote agent '{id}' resolved to neither an agent package directory nor a \
-             .agent.md file ({})",
+            "remote agent '{id}' did not resolve to an agent package directory ({}) — an agent \
+             must be a directory holding an `agent.yml` descriptor plus one native variant file \
+             per harness",
             src.display()
         ),
     }
@@ -873,7 +912,12 @@ fn remote_id(item_type: ItemType, spec: &SourceSpec) -> String {
     let leaf = spec.leaf();
     match item_type {
         ItemType::Skill => leaf.to_string(),
-        ItemType::Agent => leaf.strip_suffix(".agent.md").unwrap_or(leaf).to_string(),
+        // A `.agent.md` leaf no longer resolves to anything installable, but stripping
+        // the suffix still yields the id the rejection message should name.
+        ItemType::Agent => leaf
+            .strip_suffix(crate::catalog::LEGACY_FLAT_SUFFIX)
+            .unwrap_or(leaf)
+            .to_string(),
     }
 }
 
@@ -948,13 +992,8 @@ fn scan_catalog_agents(
     sources: &HashMap<(ItemType, String), String>,
     items: &mut Vec<CatalogItem>,
 ) -> Result<()> {
-    for agent in catalog.discover_agents()? {
-        match agent.shape {
-            AgentShape::Flat(path) => {
-                items.push(catalog_item(ItemType::Agent, agent.id, &path, sources));
-            }
-            AgentShape::Package => items.push(catalog_package_item(catalog, agent.id, sources)),
-        }
+    for id in catalog.discover_agents()? {
+        items.push(catalog_package_item(catalog, id, sources));
     }
     Ok(())
 }

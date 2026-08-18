@@ -13,7 +13,6 @@
 //! dependencies:
 //!   apm:
 //!     - vercel-labs/agent-skills/deploy-to-vercel#main   # skill (string shorthand)
-//!     - acme/kits/reviewer.agent.md#main                 # legacy flat agent (.agent.md primitive)
 //!     - git: acme/kits                                   # harness-aware agent package
 //!       path: agents/reviewer                            #   (real dir path + explicit type)
 //!       type: agent
@@ -56,11 +55,39 @@ pub struct ManifestEntry {
     /// items that could not be resolved to a commit.
     pub commit: Option<String>,
     /// Whether this agent is a harness-aware **package** directory (`agent.yml` +
-    /// variants) rather than a legacy flat `.agent.md` file. Always `false` for
-    /// skills. A package keeps its real directory path and records an explicit
-    /// `type: agent` in the manifest — the `.agent.md` suffix trick used to
-    /// classify flat agents can't encode a package path.
+    /// variants). Always `false` for skills.
+    ///
+    /// Every agent akit writes today is a package: it keeps its real directory
+    /// path and records an explicit `type: agent`. The flag survives only to
+    /// classify what is *read back* — an agent entry with `agent_package: false`
+    /// can only have come from a manifest written before v0.32.0, when a flat
+    /// `agents/<id>.agent.md` was encoded by its path suffix. See
+    /// [`ManifestEntry::is_legacy_flat_agent`].
     pub agent_package: bool,
+}
+
+impl ManifestEntry {
+    /// Whether this entry records a **legacy flat** `agents/<id>.agent.md` agent,
+    /// a catalog shape removed in v0.32.0.
+    ///
+    /// Such entries are still parsed (an old `akit.yml` must not fail to load),
+    /// but they can no longer be materialized: `restore`/`update` report them as
+    /// a per-item error carrying [`ManifestEntry::legacy_flat_hint`] and move on,
+    /// leaving the manifest untouched so the entry can be migrated and retried.
+    pub fn is_legacy_flat_agent(&self) -> bool {
+        self.item_type == ItemType::Agent && !self.agent_package
+    }
+
+    /// The actionable message shown for a [`Self::is_legacy_flat_agent`] entry.
+    pub fn legacy_flat_hint(&self) -> String {
+        format!(
+            "'{}' is recorded as a legacy flat `.agent.md` agent ({}), a catalog shape removed \
+             in v0.32.0 — re-point it at an agent *package* (`agents/<id>/agent.yml` plus one \
+             native variant file per harness) and `akit pull --agent` it again, or run \
+             `akit drop --agent {}` to forget the entry",
+            self.id, self.spec.path, self.id
+        )
+    }
 }
 
 /// Path to the catalog manifest (may not exist).
@@ -74,7 +101,18 @@ pub fn exists(catalog: &Catalog) -> bool {
 }
 
 /// Record (upsert) a remote item in the catalog manifest, keyed by `(type, id)`.
+///
+/// Refuses to *write* a legacy flat agent entry — that shape can no longer be
+/// materialized, so recording one would create an entry `restore` could only
+/// ever fail on. Existing such entries are read back untouched.
 pub fn record(catalog: &Catalog, entry: &ManifestEntry) -> Result<()> {
+    if entry.is_legacy_flat_agent() {
+        anyhow::bail!(
+            "refusing to record agent '{}' as a legacy flat `.agent.md` entry — agents are \
+             recorded as packages (`agents/<id>/agent.yml`)",
+            entry.id
+        );
+    }
     let path = manifest_path(catalog);
     let mut root = load_value(&path)?;
     if root.is_null() {
@@ -200,20 +238,10 @@ fn ensure_sequence<'a>(map: &'a mut Mapping, key: &str) -> Result<&'a mut Vec<Va
         .with_context(|| format!("`{key}` must be a sequence"))
 }
 
-/// Canonical repo path for an entry. A legacy flat agent gets the `.agent.md` suffix
-/// forced so the APM file-primitive classification round-trips; an agent **package**
-/// keeps its real directory path (its type is recorded explicitly instead).
-fn canonical_path(entry: &ManifestEntry) -> String {
-    let path = &entry.spec.path;
-    if entry.item_type == ItemType::Agent && !entry.agent_package && !path.ends_with(".agent.md") {
-        format!("{path}.agent.md")
-    } else {
-        path.clone()
-    }
-}
-
 fn entry_to_value(entry: &ManifestEntry) -> Value {
-    let path = canonical_path(entry);
+    // An agent keeps its real package directory path; its type is recorded
+    // explicitly (`type: agent`) rather than encoded in a filename suffix.
+    let path = entry.spec.path.clone();
     let default_id = default_id_for(entry.item_type, &path);
     let is_default_id = entry.id == default_id;
 
@@ -299,8 +327,10 @@ fn parse_entry(value: &Value) -> Option<ManifestEntry> {
                 Some("skill") => ItemType::Skill,
                 _ => type_from_path(&spec.path),
             };
-            // A package is an agent whose recorded path is not a `.agent.md` file.
-            let agent_package = item_type == ItemType::Agent && !spec.path.ends_with(".agent.md");
+            // A package is an agent whose recorded path is not a `.agent.md` file;
+            // a `.agent.md` path can only be a pre-v0.32.0 legacy flat entry.
+            let agent_package = item_type == ItemType::Agent
+                && !spec.path.ends_with(crate::catalog::LEGACY_FLAT_SUFFIX);
             let id = alias.unwrap_or_else(|| default_id_for(item_type, &spec.path));
             Some(ManifestEntry {
                 spec,
@@ -314,9 +344,12 @@ fn parse_entry(value: &Value) -> Option<ManifestEntry> {
     }
 }
 
+/// Infer an entry's type from its path. The `.agent.md` suffix is still honored so a
+/// pre-v0.32.0 manifest keeps loading — such an entry is classified as an agent and
+/// then reported as a legacy flat entry, rather than silently read back as a skill.
 fn type_from_path(path: &str) -> ItemType {
     let leaf = path.rsplit('/').next().unwrap_or(path);
-    if leaf.ends_with(".agent.md") {
+    if leaf.ends_with(crate::catalog::LEGACY_FLAT_SUFFIX) {
         ItemType::Agent
     } else {
         ItemType::Skill
@@ -330,7 +363,10 @@ fn default_id(item_type: ItemType, spec: &SourceSpec) -> String {
 fn default_id_for(item_type: ItemType, path: &str) -> String {
     let leaf = path.rsplit('/').next().unwrap_or(path);
     match item_type {
-        ItemType::Agent => leaf.strip_suffix(".agent.md").unwrap_or(leaf).to_string(),
+        ItemType::Agent => leaf
+            .strip_suffix(crate::catalog::LEGACY_FLAT_SUFFIX)
+            .unwrap_or(leaf)
+            .to_string(),
         ItemType::Skill => leaf.to_string(),
     }
 }
@@ -372,25 +408,43 @@ mod tests {
     }
 
     #[test]
-    fn agent_roundtrips_with_agent_extension() {
+    fn legacy_flat_agent_entry_still_parses_and_is_flagged() {
+        // A manifest written before v0.32.0 encoded a flat agent by its `.agent.md`
+        // path suffix. It must still load — classified as an agent, not misread as a
+        // skill — and be recognizable as the removed shape.
         let tmp = TempDir::new().unwrap();
         let c = catalog(&tmp);
-        let entry = ManifestEntry {
-            spec: spec("acme/repo/reviewer#main"),
-            item_type: ItemType::Agent,
-            id: "reviewer".to_string(),
-            commit: None,
-            agent_package: false,
-        };
-        record(&c, &entry).unwrap();
-
-        let text = std::fs::read_to_string(manifest_path(&c)).unwrap();
-        assert!(text.contains("reviewer.agent.md#main"), "{text}");
+        std::fs::create_dir_all(&c.root).unwrap();
+        std::fs::write(
+            manifest_path(&c),
+            "name: akit-catalog\nversion: 0.0.0\ndependencies:\n  apm:\n    \
+             - acme/repo/reviewer.agent.md#main\n",
+        )
+        .unwrap();
 
         let got = entries(&c).unwrap();
         assert_eq!(got.len(), 1);
         assert_eq!(got[0].item_type, ItemType::Agent);
         assert_eq!(got[0].id, "reviewer");
+        assert!(!got[0].agent_package);
+        assert!(got[0].is_legacy_flat_agent());
+        assert!(got[0].legacy_flat_hint().contains("agent.yml"));
+    }
+
+    #[test]
+    fn recording_a_legacy_flat_agent_is_refused() {
+        let tmp = TempDir::new().unwrap();
+        let c = catalog(&tmp);
+        let entry = ManifestEntry {
+            spec: spec("acme/repo/reviewer.agent.md#main"),
+            item_type: ItemType::Agent,
+            id: "reviewer".to_string(),
+            commit: None,
+            agent_package: false,
+        };
+        let err = record(&c, &entry).unwrap_err();
+        assert!(err.to_string().contains("legacy flat"), "{err}");
+        assert!(!exists(&c), "nothing should have been written");
     }
 
     #[test]
@@ -549,11 +603,11 @@ mod tests {
             agent_package: false,
         };
         let agent = ManifestEntry {
-            spec: spec("acme/repo/reviewer#main"),
+            spec: spec("acme/repo/agents/reviewer#main"),
             item_type: ItemType::Agent,
             id: "reviewer".to_string(),
             commit: None,
-            agent_package: false,
+            agent_package: true,
         };
         record(&c, &skill).unwrap();
         record(&c, &agent).unwrap();

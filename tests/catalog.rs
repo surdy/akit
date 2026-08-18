@@ -13,7 +13,9 @@ fn make_skill(catalog_root: &Path, dir_name: &str, body: &str) {
     fs::write(dir.join("SKILL.md"), body).unwrap();
 }
 
-fn make_agent(catalog_root: &Path, file_name: &str, body: &str) {
+/// Write a leftover **legacy flat** agent file `agents/<id>.agent.md`. This shape was
+/// removed in v0.32.0; the fixture exists only to prove akit ignores it.
+fn make_legacy_flat_agent(catalog_root: &Path, file_name: &str, body: &str) {
     let dir = catalog_root.join("agents");
     fs::create_dir_all(&dir).unwrap();
     fs::write(dir.join(format!("{file_name}.agent.md")), body).unwrap();
@@ -33,11 +35,11 @@ fn make_agent_pkg(catalog_root: &Path, id: &str, description: &str, variants: &[
 }
 
 #[test]
-fn list_catalog_surfaces_agent_packages_with_harnesses() {
+fn list_catalog_surfaces_agent_packages_and_ignores_legacy_flat_files() {
     let tmp = tempfile::tempdir().unwrap();
     let catalog_root = tmp.path().join("catalog");
-    // A legacy flat agent and a harness-aware package coexist.
-    make_agent(&catalog_root, "legacy", "---\nname: Legacy\n---\nprompt\n");
+    // A leftover legacy flat agent sits beside a harness-aware package.
+    make_legacy_flat_agent(&catalog_root, "legacy", "---\nname: Legacy\n---\nprompt\n");
     make_agent_pkg(
         &catalog_root,
         "reviewer",
@@ -54,18 +56,36 @@ fn list_catalog_surfaces_agent_packages_with_harnesses() {
     assert_eq!(pkg.harnesses, vec![HarnessId::Copilot, HarnessId::Claude]);
     assert!(!pkg.disabled);
 
-    // The legacy flat agent is still listed, with no per-harness contract.
-    let flat = items.iter().find(|i| i.id == "legacy").unwrap();
-    assert!(flat.harnesses.is_empty());
-    assert!(!flat.disabled);
+    // The flat file is not a catalog shape any more: no row, no discovery entry.
+    assert!(
+        items.iter().all(|i| i.id != "legacy"),
+        "flat .agent.md must not be listed"
+    );
+    assert_eq!(catalog.discover_agents().unwrap(), vec!["reviewer"]);
 }
 
 #[test]
-fn list_catalog_prefers_package_over_flat_for_same_id_and_flags_invalid() {
+fn show_and_search_ignore_a_legacy_flat_agent() {
     let tmp = tempfile::tempdir().unwrap();
     let catalog_root = tmp.path().join("catalog");
-    // Same id in both shapes: the package must win.
-    make_agent(&catalog_root, "dup", "---\nname: Flat Dup\n---\nprompt\n");
+    make_legacy_flat_agent(&catalog_root, "legacy", "---\nname: Legacy\n---\nprompt\n");
+    let catalog = Catalog::with_root(&catalog_root);
+
+    // `search` never surfaces it ...
+    let hits = akit::search::search(&catalog, "legacy").unwrap();
+    assert!(hits.is_empty(), "{hits:?}");
+
+    // ... and `show` reports the missing *package* rather than previewing the file.
+    let err = akit::show::show(&catalog, "legacy", ItemType::Agent).unwrap_err();
+    assert!(err.to_string().contains("agent package"), "{err}");
+}
+
+#[test]
+fn list_catalog_ignores_stray_flat_file_for_a_package_id_and_flags_invalid() {
+    let tmp = tempfile::tempdir().unwrap();
+    let catalog_root = tmp.path().join("catalog");
+    // A leftover flat file beside a package of the same id: only the package exists.
+    make_legacy_flat_agent(&catalog_root, "dup", "---\nname: Flat Dup\n---\nprompt\n");
     make_agent_pkg(&catalog_root, "dup", "Package Dup", &[("codex", "x.toml")]);
     // An invalid package (no variants) stays visible-but-disabled.
     let broken = catalog_root.join("agents").join("broken");
@@ -81,7 +101,10 @@ fn list_catalog_prefers_package_over_flat_for_same_id_and_flags_invalid() {
 
     let dups: Vec<_> = items.iter().filter(|i| i.id == "dup").collect();
     assert_eq!(dups.len(), 1, "duplicate id should collapse to one row");
-    assert_eq!(dups[0].description, "Package Dup", "package should win");
+    assert_eq!(
+        dups[0].description, "Package Dup",
+        "only the package is listed"
+    );
     assert_eq!(dups[0].harnesses, vec![HarnessId::Codex]);
 
     let broken_item = items.iter().find(|i| i.id == "broken").unwrap();
@@ -141,11 +164,12 @@ fn list_catalog_reports_ids_provenance_and_descriptions() {
         "grill-me",
         "---\nname: Grill Me\ndescription: Stress-test a plan\n---\nbody\n",
     );
-    // A hand-authored agent (no manifest entry → local).
-    make_agent(
+    // A hand-authored agent package (no manifest entry → local).
+    make_agent_pkg(
         &catalog_root,
         "reviewer",
-        "---\nname: Reviewer\ndescription: Review code\n---\nbody\n",
+        "Review code",
+        &[("claude", "cl.md")],
     );
 
     // Record only grill-me as a remote pull.

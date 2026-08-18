@@ -383,18 +383,24 @@ fn resolved_item_path(checkout: &Path, spec: &SourceSpec) -> PathBuf {
         return skill_dir;
     }
 
-    // A harness-aware agent *package* dir (`agents/<path>/agent.yml`) is preferred
-    // over the legacy flat file when a bare path is given — packages are the
-    // target contract.
-    let stem = spec.path.strip_suffix(".agent.md").unwrap_or(&spec.path);
+    // An agent is a *package* dir (`agents/<path>/agent.yml`) — the only agent shape.
+    let stem = spec
+        .path
+        .strip_suffix(crate::catalog::LEGACY_FLAT_SUFFIX)
+        .unwrap_or(&spec.path);
     let agent_pkg = checkout.join("agents").join(stem);
     if agent_pkg.join(crate::agentpkg::AGENT_DESCRIPTOR).is_file() {
         return agent_pkg;
     }
 
-    let agent_file = checkout.join("agents").join(format!("{stem}.agent.md"));
-    if agent_file.exists() {
-        return agent_file;
+    // A legacy flat `agents/<stem>.agent.md` is *resolved* but never accepted: letting it
+    // resolve is what lets the caller reject it by name with a migration hint (see
+    // `ops::catalog_dst_for_source`) instead of an opaque "not found".
+    let legacy_flat = checkout
+        .join("agents")
+        .join(format!("{stem}{}", crate::catalog::LEGACY_FLAT_SUFFIX));
+    if legacy_flat.exists() {
+        return legacy_flat;
     }
 
     direct

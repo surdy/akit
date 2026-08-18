@@ -53,7 +53,7 @@ enum Commands {
     },
     /// Print a read-only preview of a catalog item (frontmatter + content).
     Show {
-        /// Show an agent (`agents/<id>.agent.md`) instead of a skill.
+        /// Show an agent package (`agents/<id>/`) instead of a skill.
         #[arg(long)]
         agent: bool,
         /// Item id: a skill directory name, or an agent file stem.
@@ -61,7 +61,7 @@ enum Commands {
     },
     /// Fetch a remote owner/repo/path[#ref] source into your local catalog.
     Pull {
-        /// Pull an agent (`.agent.md`) instead of a skill.
+        /// Pull an agent package (`agents/<id>/`) instead of a skill.
         #[arg(long)]
         agent: bool,
         /// Store under this id instead of the source's last path segment.
@@ -85,7 +85,7 @@ enum Commands {
     },
     /// Update pulled catalog items to the latest upstream commit of their recorded ref.
     Update {
-        /// Update an agent (`.agent.md`) instead of a skill (only meaningful with `id`).
+        /// Update an agent package instead of a skill (only meaningful with `id`).
         #[arg(long)]
         agent: bool,
         /// Report what would change without writing anything.
@@ -99,7 +99,7 @@ enum Commands {
     },
     /// Show the upstream commit history of a pulled catalog item (newest first).
     Log {
-        /// Inspect an agent (`.agent.md`) instead of a skill.
+        /// Inspect an agent package instead of a skill.
         #[arg(long)]
         agent: bool,
         /// Catalog id of the pulled item.
@@ -107,7 +107,7 @@ enum Commands {
     },
     /// Remove a skill or agent from the catalog (prunes its manifest entry if it was pulled).
     Drop {
-        /// Drop an agent (`.agent.md`) instead of a skill.
+        /// Drop an agent package instead of a skill.
         #[arg(long)]
         agent: bool,
         /// Catalog id to drop.
@@ -1678,7 +1678,7 @@ fn print_catalog_table(items: &[CatalogItem]) {
 }
 
 /// The HARNESSES cell for a catalog row: an agent package's supported set, an
-/// invalid package as `disabled`, or `-` for skills and legacy flat agents.
+/// invalid package as `disabled`, or `-` for skills.
 fn catalog_harnesses(item: &CatalogItem) -> String {
     if item.disabled {
         "disabled".to_string()

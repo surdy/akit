@@ -8,7 +8,7 @@ use std::cmp::Ordering;
 use std::io::ErrorKind;
 use std::path::Path;
 
-use crate::catalog::{AgentShape, Catalog};
+use crate::catalog::Catalog;
 use crate::harness::HarnessId;
 use crate::lockfile::ItemType;
 
@@ -88,11 +88,8 @@ fn scan_skills(catalog: &Catalog, items: &mut Vec<SearchHit>) -> Result<()> {
 }
 
 fn scan_agents(catalog: &Catalog, items: &mut Vec<SearchHit>) -> Result<()> {
-    for agent in catalog.discover_agents()? {
-        match agent.shape {
-            AgentShape::Flat(path) => items.push(hit_from_file(ItemType::Agent, &agent.id, &path)),
-            AgentShape::Package => items.push(hit_from_package(catalog, agent.id)),
-        }
+    for id in catalog.discover_agents()? {
+        items.push(hit_from_package(catalog, id));
     }
     Ok(())
 }

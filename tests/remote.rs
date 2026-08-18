@@ -162,6 +162,51 @@ fn make_local_bare_agent_pkg_remote(base: &Path) -> PathBuf {
     git_base
 }
 
+/// Build a local bare remote whose repo holds a **legacy flat** agent at
+/// `agents/reviewer.agent.md` — the shape removed in v0.32.0. Reachable as
+/// `acme/kit-agents/agents/reviewer.agent.md`.
+fn make_local_bare_flat_agent_remote(base: &Path) -> PathBuf {
+    let work = base.join("flat-agent-remote-work");
+    let agents = work.join("agents");
+    fs::create_dir_all(&agents).unwrap();
+    fs::write(
+        agents.join("reviewer.agent.md"),
+        "---\nname: Reviewer\ndescription: Reviews PRs\n---\nprompt\n",
+    )
+    .unwrap();
+
+    assert_git(&["init", "-q", "--initial-branch", "main"], &work);
+    assert_git(&["add", "."], &work);
+    assert_git(
+        &[
+            "-c",
+            "user.email=ci@example.com",
+            "-c",
+            "user.name=ci",
+            "commit",
+            "-q",
+            "-m",
+            "initial",
+        ],
+        &work,
+    );
+
+    let git_base = base.join("git-base");
+    let bare = git_base.join("acme").join("kit-agents");
+    fs::create_dir_all(bare.parent().unwrap()).unwrap();
+    assert_git(
+        &[
+            "clone",
+            "-q",
+            "--bare",
+            work.to_str().unwrap(),
+            bare.to_str().unwrap(),
+        ],
+        base,
+    );
+    git_base
+}
+
 fn run_akit(
     args: &[&str],
     project: &Path,
@@ -868,6 +913,106 @@ fn update_advances_and_records_commit() {
     // The manifest now records the advanced commit.
     let manifest = fs::read_to_string(catalog.join("akit.yml")).unwrap();
     assert!(manifest.contains(&format!("commit: {c2}")), "{manifest}");
+}
+
+#[test]
+fn pull_of_a_flat_remote_agent_is_rejected_with_a_migration_message() {
+    let tmp = test_tempdir();
+    let base = tmp.path();
+    let git_base = make_local_bare_flat_agent_remote(base);
+    let cache = base.join("cache");
+    let catalog = base.join("catalog");
+    let base_url = format!("file://{}", git_base.display());
+
+    for spec in [
+        "acme/kit-agents/agents/reviewer.agent.md#main",
+        // The bare-path form resolves to the same flat file and must fail the same way.
+        "acme/kit-agents/reviewer#main",
+    ] {
+        let output = run_akit_pull(&["pull", "--agent", spec], &catalog, &cache, &base_url);
+        assert!(!output.status.success(), "pull of a flat agent must fail");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains("no longer a supported catalog shape"),
+            "expected a migration hint, got:\n{stderr}"
+        );
+        assert!(stderr.contains("agent.yml"), "{stderr}");
+    }
+
+    // Nothing was written to the catalog, and no manifest entry was recorded.
+    assert!(!catalog.join("agents/reviewer.agent.md").exists());
+    assert!(!catalog.join("akit.yml").exists());
+}
+
+#[test]
+fn old_manifest_with_a_flat_agent_entry_degrades_gracefully() {
+    let tmp = test_tempdir();
+    let base = tmp.path();
+    // A real (package) remote so the *other* entry still restores normally.
+    let git_base = make_local_bare_agent_pkg_remote(base);
+    let cache = base.join("cache");
+    let catalog = base.join("catalog");
+    let base_url = format!("file://{}", git_base.display());
+
+    // A manifest as written before v0.32.0: a flat `.agent.md` string shorthand
+    // alongside a modern agent package entry.
+    fs::create_dir_all(&catalog).unwrap();
+    fs::write(
+        catalog.join("akit.yml"),
+        "name: akit-catalog\nversion: 0.0.0\ndependencies:\n  apm:\n  \
+         - acme/kit-agents/agents/legacy.agent.md#main\n  - git: acme/kit-agents\n    \
+         path: agents/reviewer\n    type: agent\n    ref: main\n",
+    )
+    .unwrap();
+
+    let output = run_akit_pull(&["restore"], &catalog, &cache, &base_url);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let json: serde_json::Value = serde_json::from_str(&stdout).unwrap_or_else(|e| {
+        panic!("restore should still emit a report ({e})\nstdout:\n{stdout}");
+    });
+
+    // The legacy entry is a per-item error with a migration hint; it does not panic
+    // and does not abort the run.
+    let items = json["items"].as_array().unwrap();
+    let legacy = items
+        .iter()
+        .find(|i| i["id"] == "legacy")
+        .expect("legacy entry must be reported, not dropped");
+    assert_eq!(legacy["status"], "error");
+    let err = legacy["error"].as_str().unwrap();
+    assert!(err.contains("legacy flat"), "{err}");
+    assert!(err.contains("agent.yml"), "{err}");
+
+    // The package entry beside it restored normally.
+    let reviewer = items.iter().find(|i| i["id"] == "reviewer").unwrap();
+    assert_ne!(reviewer["status"], "error", "{stdout}");
+    assert!(catalog.join("agents/reviewer/agent.yml").is_file());
+
+    // The manifest is left untouched so the entry can be migrated and retried.
+    let manifest = fs::read_to_string(catalog.join("akit.yml")).unwrap();
+    assert!(manifest.contains("legacy.agent.md"), "{manifest}");
+
+    // `update` degrades the same way ...
+    let output = run_akit_pull(&["update"], &catalog, &cache, &base_url);
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let legacy = json["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|i| i["id"] == "legacy")
+        .unwrap();
+    assert_eq!(legacy["status"], "error");
+    assert!(legacy["error"].as_str().unwrap().contains("legacy flat"));
+
+    // ... and `drop` is the escape hatch that forgets the stale entry.
+    let output = run_akit_pull(&["drop", "--agent", "legacy"], &catalog, &cache, &base_url);
+    assert!(
+        output.status.success(),
+        "drop of a stale flat entry should succeed\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let manifest = fs::read_to_string(catalog.join("akit.yml")).unwrap();
+    assert!(!manifest.contains("legacy.agent.md"), "{manifest}");
 }
 
 #[test]

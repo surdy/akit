@@ -58,10 +58,10 @@ See [`docs/design.md`](docs/design.md) for the full design, decisions, and Phase
 
 - **Catalog layout:** `$KIT_CATALOG_DIR` (default `~/.akit/catalog`) with
   `skills/<name>/SKILL.md`, `agents/<id>/agent.yml` (a harness-aware **agent package**: a
-  descriptor plus one native variant file per harness — the installable shape),
-  `bundles/<name>.yml`, and an `akit.yml` manifest of remotely-pulled items. The flat
-  `agents/<id>.agent.md` file is the legacy shape: still browsable and pullable, but not
-  installable.
+  descriptor plus one native variant file per harness — the *only* agent shape),
+  `bundles/<name>.yml`, and an `akit.yml` manifest of remotely-pulled items. The legacy flat
+  `agents/<id>.agent.md` file was removed in v0.32.0 — see
+  [migrating a flat agent](docs/usage.md#migrating-a-legacy-flat-agentsidagentmd).
 - **Lockfile:** `<project>/.akit/kit.lock.json` (excluded via `.git/info/exclude`):
   `{ "version": 2, "items": [ { "id", "type", "source", "ref"?, "bundle"?, "harnesses",
   "materializations": [ { "path", "mode", "covers", "hash"? } ] } ] }`.
