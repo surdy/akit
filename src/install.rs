@@ -900,7 +900,7 @@ mod tests {
         write(&dir.join("claude.md"), "---\nname: r\n---\nbody");
         write(
             &dir.join("agent.yml"),
-            "variants:\n  copilot: copilot.agent.md\n  claude: claude.md\n",
+            "description: Reviews code\nvariants:\n  copilot: copilot.agent.md\n  claude: claude.md\n",
         );
     }
 

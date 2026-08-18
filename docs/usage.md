@@ -57,7 +57,8 @@ Move your personal skills/agents here (out of `~/.copilot/`, which is auto-loade
 project). Skills are directories containing `SKILL.md`. Agents come in two shapes: a legacy
 single `agents/<name>.agent.md` file (Copilot-shaped), and a harness-aware **agent package**
 `agents/<name>/` (an `agent.yml` plus one native variant file per harness, installed by
-[`install --agent`](#install--install-a-skill-or-agent-for-one-or-more-harnesses)). The
+[`install --agent`](#install--install-a-skill-or-agent-for-one-or-more-harnesses)) — see
+[Authoring an agent package](#authoring-an-agent-package) for the descriptor format. The
 read/browse commands
 ([`ls`](#ls--list-everything-in-the-catalog) / [`search`](#search--search-the-catalog) /
 [`show`](#show--preview-a-catalog-item)) surface both, preferring the package when an id exists in
@@ -93,6 +94,99 @@ agents: [code-reviewer]
 Either key may be omitted and is treated as an empty list. `install --bundle` validates every
 referenced skill and agent before materializing anything; if an id is missing, the whole bundle
 install fails.
+
+## Authoring an agent package
+
+An **agent package** is a directory `agents/<id>/` in the catalog holding an `agent.yml`
+descriptor plus one *native* file per harness the agent supports. akit copies a variant's bytes
+**verbatim** into that harness's destination — it never converts one harness's format into
+another's — so each variant is authored in the harness's own format.
+
+```text
+<catalog>/agents/code-reviewer/
+  agent.yml            # the descriptor (required)
+  copilot.agent.md     # native variant files, named however you like
+  claude.md
+  codex.toml
+```
+
+### `agent.yml`
+
+```yaml
+# Display name shown by `show`. Optional — defaults to the package id
+# (the directory name).
+name: Code Reviewer
+
+# One-line summary shown by `ls`, `search` and `show`. REQUIRED: a package
+# with no `description` (or a blank one) fails to load.
+description: Reviews a diff for correctness and style
+
+# Free-text grouping used by search/preview. Optional, defaults to empty.
+category: quality
+
+# Destination filename *stem* for every harness. Optional — defaults to the
+# package id. akit owns the directory and extension (see the table below), so
+# this is a bare name: no `/`, no `\`, no `..`.
+basename: code-reviewer
+
+# REQUIRED: at least one entry. Maps a harness id to the variant file to copy,
+# as a path relative to this package directory.
+variants:
+  copilot: copilot.agent.md
+  claude: claude.md
+  codex: codex.toml
+```
+
+The package **id** is the directory name — it is not read from `agent.yml` (an `id:` key there is
+ignored). Variant keys must be one of the five supported harness ids: `copilot`, `claude`,
+`codex`, `gemini`, `opencode`.
+
+### Where each variant lands, and in what format
+
+Only the *basename* comes from the package; the directory and extension come from the harness
+registry:
+
+| Harness | Agent destination | Format |
+|---|---|---|
+| copilot | `.github/agents/<basename>.agent.md` | Markdown + YAML |
+| claude | `.claude/agents/<basename>.md` | Markdown + YAML |
+| codex | `.codex/agents/<basename>.toml` | TOML |
+| gemini | `.gemini/agents/<basename>.md` | Markdown + YAML |
+| opencode | `.opencode/agent/<basename>.md` | Markdown + YAML |
+
+Write each variant file in the destination format above — a `codex:` variant is TOML, the rest
+are Markdown with YAML frontmatter. akit does not validate a variant's *contents*; it validates
+the package's structure and copies bytes.
+
+A package need not cover every harness. Installing for a harness the package has no variant for
+is reported as a **skipped** issue rather than an error, and `ls` / `search` / `show` list the
+harnesses each package actually supports.
+
+### What makes a package invalid
+
+`agent.yml` fails to load — and the agent becomes uninstallable — when:
+
+- `agent.yml` is missing from the package directory, or is not parseable YAML.
+- `variants` is absent or empty (an agent must provide at least one harness variant).
+- `description` is missing, empty, or only whitespace.
+- `basename` is empty or contains `/`, `\`, or `..`.
+- A variant key is not a supported harness id.
+- A variant path is absolute, empty, or escapes the package directory (`../…`).
+- A variant points at a file that does not exist.
+
+Invalid packages are **not** hidden. One bad package never breaks the rest of the catalog:
+[`ls`](#ls--list-everything-in-the-catalog) still lists it with `disabled` in the HARNESSES
+column (`"disabled": true` and an empty `harnesses` array under `--json`) and the load error as
+its description:
+
+```text
+TYPE   ID             ORIGIN  HARNESSES  DESCRIPTION
+agent  code-reviewer  local   disabled   invalid package: agent package 'code-reviewer' declares no description in …
+```
+
+Commands that act on the item — [`show`](#show--preview-a-catalog-item) and
+[`install`](#install--install-a-skill-or-agent-for-one-or-more-harnesses) — fail with that same
+message, so the defect is always reported rather than silently skipped.
 
 ## Global flags
 
@@ -818,7 +912,8 @@ operate on this engine. (The old Copilot-only `add`/`rm` commands and their
   holding an `agent.yml` descriptor plus one native file per harness it supports. akit copies a
   variant's bytes **verbatim**; it never converts one format to another. (This is a distinct
   catalog shape from the legacy `agents/<id>.agent.md` single file.) A selected harness with no
-  matching variant is reported as a **skipped** issue, not installed.
+  matching variant is reported as a **skipped** issue, not installed. See
+  [Authoring an agent package](#authoring-an-agent-package) for the `agent.yml` format.
 
 Everything the engine writes (both materializations and the `.akit/kit.lock.json` itself) is
 added to `.git/info/exclude`, so it never touches your tracked `.gitignore` and `git status`

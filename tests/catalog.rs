@@ -70,7 +70,11 @@ fn list_catalog_prefers_package_over_flat_for_same_id_and_flags_invalid() {
     // An invalid package (no variants) stays visible-but-disabled.
     let broken = catalog_root.join("agents").join("broken");
     fs::create_dir_all(&broken).unwrap();
-    fs::write(broken.join("agent.yml"), "name: Broken\nvariants: {}\n").unwrap();
+    fs::write(
+        broken.join("agent.yml"),
+        "name: Broken\ndescription: Broken\nvariants: {}\n",
+    )
+    .unwrap();
 
     let catalog = Catalog::with_root(&catalog_root);
     let items = ops::list_catalog(&catalog).unwrap();
@@ -83,6 +87,41 @@ fn list_catalog_prefers_package_over_flat_for_same_id_and_flags_invalid() {
     let broken_item = items.iter().find(|i| i.id == "broken").unwrap();
     assert!(broken_item.disabled, "invalid package should be disabled");
     assert!(broken_item.harnesses.is_empty());
+}
+
+#[test]
+fn description_less_package_is_listed_but_disabled() {
+    let tmp = tempfile::tempdir().unwrap();
+    let catalog_root = tmp.path().join("catalog");
+    // A package that omits `description:` is invalid — but it must still be
+    // visible in `ls`, carrying its load error, rather than vanishing.
+    let dir = catalog_root.join("agents").join("mute");
+    fs::create_dir_all(&dir).unwrap();
+    fs::write(dir.join("claude.md"), "---\nname: a\n---\nprompt\n").unwrap();
+    fs::write(
+        dir.join("agent.yml"),
+        "name: Mute\nvariants:\n  claude: claude.md\n",
+    )
+    .unwrap();
+
+    let catalog = Catalog::with_root(&catalog_root);
+    let items = ops::list_catalog(&catalog).unwrap();
+
+    let item = items
+        .iter()
+        .find(|i| i.id == "mute")
+        .expect("invalid package must still be listed");
+    assert!(item.disabled, "description-less package should be disabled");
+    assert!(item.harnesses.is_empty());
+    assert!(
+        item.description.contains("no description"),
+        "row should explain the defect: {}",
+        item.description
+    );
+
+    // ... and it must not resolve for installation either.
+    let err = catalog.resolve_agent_package("mute").unwrap_err();
+    assert!(err.to_string().contains("no description"), "{err}");
 }
 
 #[test]

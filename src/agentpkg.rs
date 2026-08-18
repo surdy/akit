@@ -39,6 +39,8 @@ pub const SKILL_DESCRIPTOR: &str = "skill.yml";
 struct RawAgentDescriptor {
     #[serde(default)]
     name: Option<String>,
+    /// Required: a one-line summary. Optional here only so a missing field
+    /// becomes an akit validation error rather than a raw serde error.
     #[serde(default)]
     description: Option<String>,
     #[serde(default)]
@@ -69,7 +71,8 @@ pub struct AgentPackage {
     pub id: String,
     /// Frontmatter-style display name (defaults to `id`).
     pub name: String,
-    /// Short description for search/preview.
+    /// Short description for search/preview. Required and never empty — a
+    /// package that omits it fails to load.
     pub description: String,
     /// Optional category for search/preview.
     pub category: String,
@@ -120,6 +123,19 @@ impl AgentPackage {
             );
         }
 
+        // Every package must describe itself: the description is what `ls`,
+        // `search` and `show` render, so an empty one leaves the agent
+        // unidentifiable in every browse surface.
+        let description = raw.description.unwrap_or_default().trim().to_string();
+        if description.is_empty() {
+            bail!(
+                "agent package '{id}' declares no description in {} — add a \
+                 one-line `description:` saying what the agent does (it is what \
+                 `akit ls`, `akit search` and `akit show` display)",
+                descriptor.display()
+            );
+        }
+
         let basename = raw.basename.unwrap_or_else(|| id.to_string());
         validate_basename(id, &basename)?;
 
@@ -153,7 +169,7 @@ impl AgentPackage {
         Ok(Self {
             id: id.to_string(),
             name: raw.name.unwrap_or_else(|| id.to_string()),
-            description: raw.description.unwrap_or_default(),
+            description,
             category: raw.category.unwrap_or_default(),
             basename,
             dir: dir.to_path_buf(),
@@ -307,7 +323,7 @@ mod tests {
         write(&dir.join("claude.md"), "body");
         write(
             &dir.join(AGENT_DESCRIPTOR),
-            "variants:\n  claude: claude.md\n",
+            "description: Deploys things\nvariants:\n  claude: claude.md\n",
         );
         let pkg = AgentPackage::load("deployer", &dir).unwrap();
         assert_eq!(pkg.basename, "deployer");
@@ -318,9 +334,51 @@ mod tests {
     fn rejects_package_without_variants() {
         let tmp = TempDir::new().unwrap();
         let dir = agent_dir(&tmp, "empty");
-        write(&dir.join(AGENT_DESCRIPTOR), "name: Empty\nvariants: {}\n");
+        write(
+            &dir.join(AGENT_DESCRIPTOR),
+            "name: Empty\ndescription: Nothing\nvariants: {}\n",
+        );
         let err = AgentPackage::load("empty", &dir).unwrap_err();
         assert!(err.to_string().contains("no variants"), "{err}");
+    }
+
+    #[test]
+    fn rejects_package_without_description() {
+        let tmp = TempDir::new().unwrap();
+        let dir = agent_dir(&tmp, "mute");
+        write(&dir.join("claude.md"), "body");
+        write(
+            &dir.join(AGENT_DESCRIPTOR),
+            "name: Mute\nvariants:\n  claude: claude.md\n",
+        );
+        let err = AgentPackage::load("mute", &dir).unwrap_err();
+        assert!(err.to_string().contains("no description"), "{err}");
+    }
+
+    #[test]
+    fn rejects_blank_description() {
+        let tmp = TempDir::new().unwrap();
+        let dir = agent_dir(&tmp, "blank");
+        write(&dir.join("claude.md"), "body");
+        write(
+            &dir.join(AGENT_DESCRIPTOR),
+            "description: \"   \"\nvariants:\n  claude: claude.md\n",
+        );
+        let err = AgentPackage::load("blank", &dir).unwrap_err();
+        assert!(err.to_string().contains("no description"), "{err}");
+    }
+
+    #[test]
+    fn description_is_trimmed() {
+        let tmp = TempDir::new().unwrap();
+        let dir = agent_dir(&tmp, "trim");
+        write(&dir.join("claude.md"), "body");
+        write(
+            &dir.join(AGENT_DESCRIPTOR),
+            "description: \"  Reviews code  \"\nvariants:\n  claude: claude.md\n",
+        );
+        let pkg = AgentPackage::load("trim", &dir).unwrap();
+        assert_eq!(pkg.description, "Reviews code");
     }
 
     #[test]
@@ -328,7 +386,10 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let dir = agent_dir(&tmp, "bad");
         write(&dir.join("x.md"), "body");
-        write(&dir.join(AGENT_DESCRIPTOR), "variants:\n  cursor: x.md\n");
+        write(
+            &dir.join(AGENT_DESCRIPTOR),
+            "description: Bad\nvariants:\n  cursor: x.md\n",
+        );
         let err = AgentPackage::load("bad", &dir).unwrap_err();
         assert!(format!("{err:#}").contains("cursor"), "{err:#}");
     }
@@ -339,7 +400,7 @@ mod tests {
         let dir = agent_dir(&tmp, "gone");
         write(
             &dir.join(AGENT_DESCRIPTOR),
-            "variants:\n  claude: nope.md\n",
+            "description: Gone\nvariants:\n  claude: nope.md\n",
         );
         let err = AgentPackage::load("gone", &dir).unwrap_err();
         assert!(err.to_string().contains("missing file"), "{err}");
@@ -351,7 +412,7 @@ mod tests {
         let dir = agent_dir(&tmp, "evil");
         write(
             &dir.join(AGENT_DESCRIPTOR),
-            "variants:\n  claude: ../escape.md\n",
+            "description: Evil\nvariants:\n  claude: ../escape.md\n",
         );
         let err = AgentPackage::load("evil", &dir).unwrap_err();
         assert!(err.to_string().contains("unsafe file path"), "{err}");

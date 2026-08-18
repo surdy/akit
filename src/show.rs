@@ -195,7 +195,7 @@ mod tests {
         make_agent_pkg(
             &root,
             "dup",
-            "name: Package\nvariants:\n  codex: x.toml\n",
+            "name: Package\ndescription: The package\nvariants:\n  codex: x.toml\n",
             &["x.toml"],
         );
         let catalog = Catalog::with_root(&root);
