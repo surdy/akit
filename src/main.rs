@@ -581,27 +581,26 @@ fn run() -> Result<()> {
                     }
                     if need_plan {
                         let preview = install::plan_remove_bundle(&project, bundle, scope.clone())?;
-                        if *dry_run {
-                            if cli.json {
-                                println!("{}", serde_json::to_string(&preview)?);
-                            } else {
-                                print_bundle_uninstall_preview(&preview);
-                                println!(
-                                    "(dry run — nothing removed; re-run without --dry-run to apply)"
-                                );
-                            }
+                        // One aggregate gate for the whole bundle: declining
+                        // removes no member at all.
+                        let gate = DriftGate {
+                            drifted: preview.drifted(),
+                            drifted_items: preview
+                                .items
+                                .iter()
+                                .filter(|i| i.drifted() > 0)
+                                .map(detach_target)
+                                .collect(),
+                            applies: !preview.items.is_empty(),
+                        };
+                        if !uninstall_gate(
+                            cli.json,
+                            *dry_run,
+                            &preview,
+                            gate,
+                            print_bundle_uninstall_preview,
+                        )? {
                             return Ok(());
-                        }
-                        // One aggregate confirmation for the whole bundle.
-                        let drifted = preview.drifted();
-                        if drifted > 0 {
-                            if !cli.json {
-                                print_bundle_uninstall_preview(&preview);
-                            }
-                            if !confirm_drifted_uninstall(cli.json, drifted)? {
-                                println!("Aborted.");
-                                return Ok(());
-                            }
                         }
                     }
                     let report = install::remove_bundle(&project, bundle, scope)?;
@@ -615,26 +614,24 @@ fn run() -> Result<()> {
                     if need_plan {
                         let preview =
                             install::plan_remove(&project, item_type(*agent), id, scope.clone())?;
-                        if *dry_run {
-                            if cli.json {
-                                println!("{}", serde_json::to_string(&preview)?);
-                            } else {
-                                print_uninstall_preview(&preview);
-                                println!(
-                                    "(dry run — nothing removed; re-run without --dry-run to apply)"
-                                );
-                            }
-                            return Ok(());
-                        }
                         let drifted = preview.drifted();
-                        if drifted > 0 {
-                            if !cli.json {
-                                print_uninstall_preview(&preview);
-                            }
-                            if !confirm_drifted_uninstall(cli.json, drifted)? {
-                                println!("Aborted.");
-                                return Ok(());
-                            }
+                        let gate = DriftGate {
+                            drifted,
+                            drifted_items: if drifted > 0 {
+                                vec![detach_target(&preview)]
+                            } else {
+                                Vec::new()
+                            },
+                            applies: !preview.not_installed,
+                        };
+                        if !uninstall_gate(
+                            cli.json,
+                            *dry_run,
+                            &preview,
+                            gate,
+                            print_uninstall_preview,
+                        )? {
+                            return Ok(());
                         }
                     }
                     let report = install::remove(&project, item_type(*agent), id, scope)?;
@@ -1163,7 +1160,7 @@ fn print_uninstall_preview(preview: &install::RemovePreview) {
         return;
     }
     let kind = type_name(preview.item_type);
-    if preview.reshape {
+    if preview.reshape() {
         let remaining = preview
             .remaining_harnesses
             .iter()
@@ -1201,10 +1198,15 @@ fn print_uninstall_preview_sections(preview: &install::RemovePreview, indent: &s
             );
         }
     }
-    if !preview.unchanged.is_empty() {
-        println!("{indent}unchanged:");
-        for m in &preview.unchanged {
-            println!("{indent}  {}  ({})", m.path, covers_str(&m.covers));
+    if !preview.keep.is_empty() {
+        println!("{indent}keep (rewritten by the reshape):");
+        for k in &preview.keep {
+            println!(
+                "{indent}  {}  ({}){}",
+                k.materialization.path,
+                covers_str(&k.materialization.covers),
+                kept_drift_note(k.drift)
+            );
         }
     }
 }
@@ -1216,6 +1218,17 @@ fn removal_drift_note(drift: akit::materialize::Drift) -> &'static str {
         akit::materialize::Drift::Clean => "",
         akit::materialize::Drift::Modified => "  (locally modified)",
         akit::materialize::Drift::Missing => "  (already gone)",
+    }
+}
+
+/// The suffix for a path the reshape *keeps*. Keeping is not leaving alone — the
+/// reshape rewrites the path from the catalog — so a locally modified copy here
+/// loses its edits just as a deleted one does, and the gate counts it.
+fn kept_drift_note(drift: akit::materialize::Drift) -> &'static str {
+    match drift {
+        akit::materialize::Drift::Clean => "",
+        akit::materialize::Drift::Modified => "  (locally modified — will be reverted)",
+        akit::materialize::Drift::Missing => "  (missing — will be restored)",
     }
 }
 
@@ -1231,34 +1244,111 @@ fn print_bundle_uninstall_preview(preview: &install::BundleRemovePreview) {
         preview.items.len()
     );
     for item in &preview.items {
-        let suffix = if item.reshape { "  (reshape)" } else { "" };
+        let suffix = if item.reshape() { "  (reshape)" } else { "" };
         println!("  {} '{}'{suffix}:", type_name(item.item_type), item.id);
         print_uninstall_preview_sections(item, "    ");
     }
     let drifted = preview.drifted();
     if drifted > 0 {
-        println!("({drifted} locally modified file(s) would be deleted)");
+        println!("({drifted} locally modified file(s) would be deleted or reverted)");
     }
 }
 
-/// Confirm deleting locally modified akit-owned copies at an interactive prompt.
+/// The shared `uninstall` gate: the dry-run output, and the confirmation that
+/// stands between a locally modified akit-owned copy and its deletion (or, for a
+/// path a scoped reshape keeps, its reversion to catalog content).
 ///
-/// Refuses without `--yes` when there is nobody to ask — no TTY, or `--json`,
-/// where a prompt would corrupt the machine-readable output.
-fn confirm_drifted_uninstall(json: bool, drifted: usize) -> Result<bool> {
+/// Returns `Ok(false)` when the caller must stop without applying anything — a
+/// dry run, or a declined confirmation. Both `uninstall <id>` and
+/// `uninstall --bundle <name>` go through here, so the two paths cannot drift
+/// apart on what they print, count, or refuse.
+fn uninstall_gate<P: serde::Serialize>(
+    json: bool,
+    dry_run: bool,
+    preview: &P,
+    gate: DriftGate,
+    print: impl FnOnce(&P),
+) -> Result<bool> {
     use std::io::{IsTerminal, Write};
+    if dry_run {
+        if json {
+            println!("{}", serde_json::to_string(preview)?);
+        } else {
+            print(preview);
+            // Nothing to apply (not installed, or a bundle nobody tagged): the
+            // "re-run without --dry-run" nudge would be a dead end.
+            if gate.applies {
+                println!("(dry run — nothing removed; re-run without --dry-run to apply)");
+            }
+        }
+        return Ok(false);
+    }
+    if gate.drifted == 0 {
+        return Ok(true);
+    }
+    if !json {
+        print(preview);
+    }
     if json || !std::io::stdin().is_terminal() {
+        if json {
+            // Structured refusal: a machine consumer gets the same preview object
+            // `--dry-run` emits, so it can see *what* drifted and tell a refusal
+            // apart from an infrastructure failure. The reason goes to stderr.
+            println!("{}", serde_json::to_string(preview)?);
+        }
         bail!(
-            "refusing to delete {drifted} locally modified akit-owned file(s) without \
-             confirmation; re-run with --yes to remove them anyway, or `akit detach <id>` to keep \
-             them and stop managing the install"
+            "refusing to discard local edits to {} akit-owned file(s) without confirmation; \
+             re-run with --yes to delete/revert them anyway, or {} to keep them and stop \
+             managing the install",
+            gate.drifted,
+            gate.detach_hint()
         );
     }
-    print!("Delete {drifted} locally modified akit-owned file(s)? [y/N] ");
-    std::io::stdout().flush().ok();
+    // Prompt on stderr: stdout may well be a redirected log, and an invisible
+    // prompt is an unexplained hang.
+    eprint!(
+        "Discard local edits to {} akit-owned file(s)? [y/N] ",
+        gate.drifted
+    );
+    std::io::stderr().flush().ok();
     let mut line = String::new();
     std::io::stdin().read_line(&mut line)?;
-    Ok(matches!(line.trim(), "y" | "Y" | "yes" | "Yes"))
+    if matches!(line.trim(), "y" | "Y" | "yes" | "Yes") {
+        return Ok(true);
+    }
+    eprintln!("Aborted.");
+    Ok(false)
+}
+
+/// What the uninstall gate needs to know about a plan it did not compute.
+struct DriftGate {
+    /// Locally modified akit-owned copies the uninstall would delete or revert.
+    drifted: usize,
+    /// The drifted items, as `detach` would address them (`--agent <id>` for an
+    /// agent), so the refusal names the real way out rather than a placeholder.
+    drifted_items: Vec<String>,
+    /// False when there is nothing to apply at all — an item that is not
+    /// installed, or a bundle with no tagged members.
+    applies: bool,
+}
+
+impl DriftGate {
+    /// The `akit detach` invocation the refusal points at.
+    fn detach_hint(&self) -> String {
+        match self.drifted_items.as_slice() {
+            [] => "`akit detach <id>`".to_string(),
+            [one] => format!("`akit detach {one}`"),
+            many => format!("`akit detach` on each of: {}", many.join(", ")),
+        }
+    }
+}
+
+/// How `akit detach` addresses one previewed item.
+fn detach_target(preview: &install::RemovePreview) -> String {
+    match preview.item_type {
+        ItemType::Agent => format!("--agent {}", preview.id),
+        ItemType::Skill => preview.id.clone(),
+    }
 }
 
 fn print_uninstall_report(report: &install::RemoveReport) {

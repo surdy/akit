@@ -20,6 +20,12 @@ fn git(args: &[&str], cwd: &Path) {
 /// Run the akit binary against `project` with `KIT_CATALOG_DIR` pointed at
 /// `catalog`, returning (stdout, success).
 fn akit(project: &Path, catalog: &Path, args: &[&str]) -> (String, bool) {
+    let (out, _err, ok) = akit_io(project, catalog, args);
+    (out, ok)
+}
+
+/// [`akit`], keeping stderr — where prompts and error messages go.
+fn akit_io(project: &Path, catalog: &Path, args: &[&str]) -> (String, String, bool) {
     let out = Command::new(env!("CARGO_BIN_EXE_akit"))
         .args(["--project", project.to_str().unwrap()])
         .args(args)
@@ -35,6 +41,7 @@ fn akit(project: &Path, catalog: &Path, args: &[&str]) -> (String, bool) {
         .expect("akit binary runs");
     (
         String::from_utf8_lossy(&out.stdout).into_owned(),
+        String::from_utf8_lossy(&out.stderr).into_owned(),
         out.status.success(),
     )
 }
@@ -595,7 +602,12 @@ fn uninstall_dry_run_json_reports_paths_and_drift() {
     let v: serde_json::Value = serde_json::from_str(&json).expect("RemovePreview json");
     assert_eq!(v["id"], "demo", "{json}");
     assert_eq!(v["item_type"], "skill", "{json}");
-    assert_eq!(v["reshape"], false, "{json}");
+    // No harness remains: a full removal, not a reshape.
+    assert_eq!(
+        v["remaining_harnesses"].as_array().unwrap().len(),
+        0,
+        "{json}"
+    );
     assert_eq!(v["not_installed"], false, "{json}");
     assert_eq!(v["remove"][0]["path"], ".agents/skills/demo", "{json}");
     assert_eq!(v["remove"][0]["drift"], "clean", "{json}");
@@ -681,16 +693,122 @@ fn uninstall_refuses_to_delete_a_drifted_copy_without_yes() {
 }
 
 #[test]
-fn uninstall_json_refuses_a_drifted_copy_without_yes() {
+fn uninstall_json_refuses_a_drifted_copy_with_a_structured_preview() {
     let (_tmp, catalog, project) = setup();
     assert!(akit(&project, &catalog, &["install", "-H", "copilot", "demo"]).1);
     modify(&project.join(".agents/skills/demo/SKILL.md"));
 
-    // `--json` can't prompt, so it refuses rather than deleting silently.
-    let (out, ok) = akit(&project, &catalog, &["--json", "uninstall", "demo"]);
+    // `--json` can't prompt, so it refuses rather than deleting silently — but a
+    // machine consumer still gets the preview object, not an empty stdout.
+    let (out, err, ok) = akit_io(&project, &catalog, &["--json", "uninstall", "demo"]);
     assert!(!ok, "json uninstall should refuse:\n{out}");
-    assert!(out.is_empty(), "stdout polluted on refusal:\n{out}");
+    let v: serde_json::Value = serde_json::from_str(&out).expect("RemovePreview on stdout");
+    assert_eq!(v["id"], "demo", "{out}");
+    assert_eq!(v["remove"][0]["drift"], "modified", "{out}");
+    // The human-readable reason stays on stderr, and names the way out.
+    assert!(err.contains("refusing to discard local edits"), "{err}");
+    assert!(err.contains("akit detach demo"), "{err}");
     assert!(project.join(".agents/skills/demo").exists());
+}
+
+#[test]
+fn uninstall_dry_run_of_an_absent_item_omits_the_re_run_footer() {
+    let (_tmp, catalog, project) = setup();
+    let (out, ok) = akit(&project, &catalog, &["uninstall", "--dry-run", "demo"]);
+    assert!(ok, "dry-run failed:\n{out}");
+    assert!(out.contains("not installed"), "{out}");
+    assert!(
+        !out.contains("re-run without --dry-run"),
+        "nothing to apply, so no re-run nudge:\n{out}"
+    );
+}
+
+#[test]
+fn uninstall_scoped_gates_a_kept_copy_the_reshape_would_revert() {
+    let (_tmp, catalog, project) = setup();
+    // Copilot and codex share one `.agents/skills` copy; dropping codex keeps
+    // that very path — and the reshape rewrites it from the catalog.
+    assert!(
+        akit(
+            &project,
+            &catalog,
+            &["install", "-H", "copilot", "-H", "codex", "demo"],
+        )
+        .1
+    );
+    let file = project.join(".agents/skills/demo/SKILL.md");
+    let edited = "---\nname: demo\n---\nhand-edited\n";
+    modify(&file);
+
+    // The dry run says so out loud.
+    let (out, ok) = akit(
+        &project,
+        &catalog,
+        &["uninstall", "-H", "codex", "--dry-run", "demo"],
+    );
+    assert!(ok, "dry-run failed:\n{out}");
+    assert!(out.contains("keep (rewritten by the reshape)"), "{out}");
+    assert!(
+        out.contains("locally modified — will be reverted"),
+        "kept path not flagged:\n{out}"
+    );
+
+    // And the real uninstall refuses to revert it unprompted.
+    let (out, err, ok) = akit_io(&project, &catalog, &["uninstall", "-H", "codex", "demo"]);
+    assert!(!ok, "scoped uninstall should refuse:\n{out}{err}");
+    assert!(err.contains("refusing to discard local edits"), "{err}");
+    assert_eq!(fs::read_to_string(&file).unwrap(), edited, "edit reverted");
+
+    // `--yes` waives the gate, and then the reshape does revert the copy.
+    let (out, ok) = akit(
+        &project,
+        &catalog,
+        &["uninstall", "-H", "codex", "--yes", "demo"],
+    );
+    assert!(ok, "uninstall --yes failed:\n{out}");
+    assert_ne!(fs::read_to_string(&file).unwrap(), edited);
+    let (listed, _) = akit(&project, &catalog, &["installed"]);
+    assert!(listed.contains("copilot"), "still installed:\n{listed}");
+}
+
+#[test]
+fn uninstall_scoped_previews_a_full_removal_when_nothing_remains_servable() {
+    let (_tmp, catalog, project) = setup();
+    assert!(
+        akit(
+            &project,
+            &catalog,
+            &["install", "-H", "copilot", "-H", "codex", "demo"],
+        )
+        .1
+    );
+    // The catalog now declares the skill codex-only: dropping codex leaves a
+    // harness the re-plan cannot serve, so the whole install goes.
+    fs::write(
+        catalog.join("skills/demo/skill.yml"),
+        "harnesses: [codex]\n",
+    )
+    .unwrap();
+
+    let (out, ok) = akit(
+        &project,
+        &catalog,
+        &["uninstall", "-H", "codex", "--dry-run", "demo"],
+    );
+    assert!(ok, "dry-run failed:\n{out}");
+    assert!(out.contains("(full removal)"), "not a full removal:\n{out}");
+    assert!(
+        !out.contains("would stay installed for"),
+        "claims a reshape with nothing left:\n{out}"
+    );
+    assert!(out.contains(".agents/skills/demo"), "{out}");
+
+    // The real command matches the preview: everything goes.
+    let (out, ok) = akit(&project, &catalog, &["uninstall", "-H", "codex", "demo"]);
+    assert!(ok, "uninstall failed:\n{out}");
+    assert!(!project.join(".agents/skills/demo").exists());
+    let (listed, _) = akit(&project, &catalog, &["installed"]);
+    assert!(listed.contains("No harness-aware installs"), "{listed}");
 }
 
 #[test]

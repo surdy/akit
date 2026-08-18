@@ -129,9 +129,15 @@ install::remove_with(&fs, &project, ItemType::Skill, "deploy", RemoveScope::All)
 install::remove_with(&fs, &project, ItemType::Skill, "deploy",
     RemoveScope::Harnesses(vec![HarnessId::Claude]))?;
 
-// Preview an uninstall: the paths it would delete, each hash-checked for drift.
-// `preview.drifted()` counts locally modified copies — the host's cue to confirm
-// before calling `remove_with` (what `uninstall --dry-run` / its gate use).
+// Preview an uninstall: the paths it would delete (`remove`) plus, for a scoped
+// one, the paths its reshape keeps (`keep`) and adds (`create`) — every owned
+// copy hash-checked for drift. `preview.drifted()` counts the locally modified
+// ones the operation would discard: deleted outright, or reverted to catalog
+// content because the reshape rewrites the path it keeps. That count is the
+// host's cue to confirm before calling `remove_with` (it is what
+// `uninstall --dry-run` and its gate use). `preview.reshape()` is derived from
+// `remaining_harnesses`: when none of them is servable, nothing stays installed
+// and the preview is a full removal.
 let preview = install::plan_remove_with(&fs, &project, ItemType::Skill, "deploy",
     RemoveScope::All)?;
 
@@ -150,7 +156,7 @@ Each function has a plain wrapper (`install`, `plan_install`, `remove`, `plan_re
 transport.
 
 Key types (all `Serialize`): `install::{HarnessContext, RemoveScope, InstallReport, InstallPreview,
-RemoveReport, RemovePreview, RemovalPath, ResetReport}`, `reconcile::{HealthReport, ItemHealth, MaterializationHealth}`,
+RemoveReport, RemovePreview, RemovalPath, KeptPath, ResetReport}`, `reconcile::{HealthReport, ItemHealth, MaterializationHealth}`,
 `plan::{PlannedMaterialization, PlanIssue}`, `harness::HarnessId`, `ownership::{Installation,
 MaterializationRecord}`, and `materialize::Drift`. `HarnessContext` and `RemoveScope` are inputs
 (not `Serialize`); everything else round-trips to the same JSON the `--json` CLI emits.
