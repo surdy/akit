@@ -1251,8 +1251,8 @@ single-item shape documented above.
 ### `uninstall` — remove a harness-aware install
 
 ```bash
-akit uninstall [--agent] [-H <id>]... <id>
-akit uninstall [-H <id>]... --bundle <name>
+akit uninstall [--agent] [-H <id>]... [--dry-run] [--yes] <id>
+akit uninstall [-H <id>]... [--dry-run] [--yes] --bundle <name>
 ```
 
 - With **no** `-H`, fully uninstalls `<id>`: removes every materialization and drops the
@@ -1272,6 +1272,108 @@ Removed skill 'deploy-to-vercel' from selected harness(es); still installed for 
 With `--json`, `uninstall` emits the `RemoveReport` object: `id`, `item_type`, `removed_paths`,
 `remaining_harnesses` (empty on a full uninstall), and `not_installed`.
 
+#### `--dry-run` — preview the removal plan
+
+`--dry-run` prints exactly what would be deleted and changes nothing. A full uninstall lists the
+owned paths that go; a scoped one also shows the reshape — the paths the remaining harnesses
+**keep** (which the reshape rewrites from the catalog) and any path the re-plan would newly
+create. On something that isn't installed there is nothing to apply, so the dry run says so and
+stops.
+
+```bash
+$ akit uninstall --dry-run deploy-to-vercel
+Plan: uninstall skill 'deploy-to-vercel' (full removal)
+  remove:
+    .claude/skills/deploy-to-vercel  (locally modified)
+(dry run — nothing removed; re-run without --dry-run to apply)
+
+$ akit uninstall -H claude --dry-run deploy-to-vercel
+Plan: uninstall skill 'deploy-to-vercel' from selected harness(es); would stay installed for copilot
+  remove:
+    .claude/skills/deploy-to-vercel
+  create (reshape):
+    .agents/skills/deploy-to-vercel  (copilot)  [copy]
+(dry run — nothing removed; re-run without --dry-run to apply)
+```
+
+A scoped uninstall whose *remaining* harnesses all turn out to be unservable (the catalog now
+declares the skill incompatible with them, an agent lost its variant) leaves nothing installed —
+the reshape collapses into a full removal, and the plan says `(full removal)` and lists every
+owned path, exactly as the command then behaves.
+
+With `--json`, `--dry-run` emits a `RemovePreview` object, mirroring `InstallPreview`'s
+conventions:
+
+```json
+{
+  "id": "deploy-to-vercel",
+  "item_type": "skill",
+  "remove": [{ "path": ".claude/skills/deploy-to-vercel", "drift": "modified" }],
+  "keep": [],
+  "create": [],
+  "remaining_harnesses": [],
+  "not_installed": false
+}
+```
+
+Each `remove` entry pairs the project-relative path with the `drift` of the owned copy —
+`"clean"` (matches what akit recorded), `"modified"` (locally edited), or `"missing"` (already
+gone). `keep` pairs the same `drift` with the materialization the reshape would write at a path it
+keeps (`{ "materialization": {…}, "drift": "clean" }`), and `create` carries the materialization
+objects `install --dry-run` emits; both are empty on a full uninstall. A non-empty
+`remaining_harnesses` is what makes it a reshape rather than a full removal — there is no separate
+flag, because an empty one always means the whole installation goes.
+
+#### The drift gate — locally modified copies are never deleted silently
+
+`uninstall` hash-checks every owned copy it would touch. A copy that still matches what akit
+recorded goes without ceremony. A copy you edited by hand is **local work**: `uninstall` prints
+the removal plan, flags the modified paths, and asks before discarding them.
+
+"Touch" is wider than "delete". A scoped uninstall re-materializes every path its reshape keeps,
+so a kept copy with local edits is reverted to catalog content — lost just as surely as a deleted
+one. The plan marks both, and both are counted by the gate:
+
+```bash
+$ akit uninstall deploy-to-vercel
+Plan: uninstall skill 'deploy-to-vercel' (full removal)
+  remove:
+    .claude/skills/deploy-to-vercel  (locally modified)
+Discard local edits to 1 akit-owned file(s)? [y/N]
+
+$ akit uninstall -H codex deploy-to-vercel
+Plan: uninstall skill 'deploy-to-vercel' from selected harness(es); would stay installed for copilot
+  keep (rewritten by the reshape):
+    .agents/skills/deploy-to-vercel  (copilot)  (locally modified — will be reverted)
+Discard local edits to 1 akit-owned file(s)? [y/N]
+```
+
+The plan goes to stdout; the prompt goes to **stderr**, so `akit uninstall demo > plan.log` still
+shows you what it is asking about.
+
+`--yes` skips the prompt (and skips the hash check with it), and is **required** when there is
+nobody to ask — a non-interactive shell (CI) or `--json`, where a prompt would corrupt the output.
+Without it the uninstall refuses and exits non-zero, having changed nothing:
+
+```
+error: refusing to discard local edits to 1 akit-owned file(s) without confirmation; re-run with
+--yes to delete/revert them anyway, or `akit detach deploy-to-vercel` to keep them and stop
+managing the install
+```
+
+Under `--json` the refusal is structured: the same `RemovePreview` / `BundleRemovePreview` object
+`--dry-run` emits goes to **stdout** (so a consumer can see exactly what drifted and tell a
+refusal apart from an infrastructure failure) while the message above goes to stderr, and the exit
+status is non-zero.
+
+`detach` is the non-destructive alternative the message points at — named with the drifted item's
+real id, so it can be pasted: it drops the ownership record and leaves the edited files on disk,
+git-visible.
+
+A copy akit cannot hash at all (unreadable, a broken symlink inside an edited directory) fails the
+uninstall before anything is removed rather than guessing; the error says so, and `--yes` skips
+the check entirely.
+
 #### `--bundle <name>` — uninstall a whole bundle
 
 With `--bundle <name>` (in place of an `<id>`), `uninstall` removes every install **tagged** with
@@ -1288,8 +1390,27 @@ Uninstalled bundle 'web' (2 item(s), 3 file(s) removed)
   skill 'lint' — removed (1 file(s))
 ```
 
+`--dry-run` prints the aggregated per-member removal plan and changes nothing. The drift gate is
+aggregated too: the whole bundle's locally modified copies are counted and confirmed **once**, and
+declining (or refusing non-interactively) removes no member at all. The refusal names the drifted
+members, so the `detach` suggestion applies to the right ones.
+
+```bash
+$ akit uninstall --bundle web --dry-run
+Plan: uninstall bundle 'web' (2 item(s))
+  skill 'deploy':
+    remove:
+      .agents/skills/deploy
+  skill 'lint':
+    remove:
+      .agents/skills/lint  (locally modified)
+(1 locally modified file(s) would be deleted or reverted)
+(dry run — nothing removed; re-run without --dry-run to apply)
+```
+
 With `--json`, it emits a `BundleRemoveReport` (`{ "bundle", "items": [RemoveReport…] }`), each
-member being the single-item `RemoveReport` shape above.
+member being the single-item `RemoveReport` shape above; `--dry-run --bundle` emits a
+`BundleRemovePreview` (`{ "bundle", "items": [RemovePreview…] }`).
 
 ### `installed` — list harness-aware installs and their health
 
