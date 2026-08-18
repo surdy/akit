@@ -26,6 +26,7 @@
 //! *remote project root*; the index is host-local state about the machine akit
 //! runs on (like the catalog itself and the remote cache), so it is always local.
 
+use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -36,7 +37,7 @@ use crate::catalog::Catalog;
 use crate::install::{self, InstallOptions};
 use crate::lockfile::{ItemType, Mode};
 use crate::materialize::{Drift, MaterializeItem, check_drift, content_hash, materialize_one};
-use crate::ownership::AkitLockfile;
+use crate::ownership::{AkitLockfile, Installation};
 use crate::project::Project;
 use crate::reconcile::{self, ItemHealth};
 use crate::transport::LocalFs;
@@ -243,6 +244,14 @@ pub struct WhereReport {
     pub projects: Vec<WhereProject>,
     /// Projects whose lockfile could not be read.
     pub skipped: Vec<SkippedProject>,
+    /// Distinct on-disk contents of this item's **copy** installs across the
+    /// projects above, one group per content (issue #41).
+    #[serde(default)]
+    pub variants: Vec<ContentVariant>,
+    /// True when `variants` holds more than one group: the same catalog id is
+    /// installed with different bytes in different projects.
+    #[serde(default)]
+    pub diverged: bool,
 }
 
 /// Find every known project whose `.akit` lockfile records `(item_type, id)`,
@@ -263,17 +272,17 @@ pub fn locate_at(
 ) -> Result<WhereReport> {
     let mut projects = Vec::new();
     let mut skipped = Vec::new();
+    let mut variants: BTreeMap<String, Vec<String>> = BTreeMap::new();
 
     for root in known_projects_at(index) {
         let project = Project::at(&root);
         // Cheap filter first: only projects that actually record the item pay
         // for a health pass (which hashes every materialization).
         match AkitLockfile::load(&project.akit_lockfile_path()) {
-            Ok(lock) => {
-                if lock.get(item_type, id).is_none() {
-                    continue;
-                }
-            }
+            Ok(lock) => match lock.get(item_type, id) {
+                Some(inst) => collect_variants(&root, inst, &mut variants),
+                None => continue,
+            },
             Err(e) => {
                 skipped.push(SkippedProject {
                     project: root.display().to_string(),
@@ -304,12 +313,125 @@ pub fn locate_at(
 
     projects.sort_by(|a, b| a.project.cmp(&b.project));
     skipped.sort_by(|a, b| a.project.cmp(&b.project));
+    let variants = into_variants(variants);
     Ok(WhereReport {
         id: id.to_string(),
         item_type,
         projects,
         skipped,
+        diverged: variants.len() > 1,
+        variants,
     })
+}
+
+// ── cross-project divergence ─────────────────────────────────────────────────
+
+/// One distinct on-disk content of a copy install, and every path holding it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ContentVariant {
+    /// The content hash — the same sha256 `drift` compares a copy against.
+    pub hash: String,
+    /// Absolute paths whose content hashes to `hash`, sorted.
+    pub paths: Vec<String>,
+}
+
+/// One catalog id whose copy installs differ across known projects (issue #41).
+///
+/// Divergence is a *conflict report*, not drift: each project may be perfectly
+/// clean against its own recorded hash and still hold different bytes from the
+/// next one (a copy installed before a catalog update, or edited in place). akit
+/// never resolves this for you — `update --propagate` refreshes clean copies,
+/// and an edited copy stays the user's.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Divergence {
+    pub id: String,
+    #[serde(rename = "type")]
+    pub item_type: ItemType,
+    /// The distinct contents, always two or more.
+    pub variants: Vec<ContentVariant>,
+}
+
+/// Every catalog id installed as a **copy** in more than one distinct content
+/// across the known projects, sorted by type then id.
+pub fn divergences() -> Result<Vec<Divergence>> {
+    Ok(divergences_at(&index_path()?))
+}
+
+/// [`divergences`] against an explicit index file.
+///
+/// Read-only and lockfile-driven: an unreadable project contributes nothing
+/// rather than failing the scan, exactly as it is skipped by `where`.
+pub fn divergences_at(index: &Path) -> Vec<Divergence> {
+    let mut by_item: HashMap<(ItemType, String), BTreeMap<String, Vec<String>>> = HashMap::new();
+    for root in known_projects_at(index) {
+        let project = Project::at(&root);
+        let Ok(lock) = AkitLockfile::load(&project.akit_lockfile_path()) else {
+            continue;
+        };
+        for inst in &lock.items {
+            let slot = by_item
+                .entry((inst.item_type, inst.id.clone()))
+                .or_default();
+            collect_variants(&root, inst, slot);
+        }
+    }
+
+    let mut out: Vec<Divergence> = by_item
+        .into_iter()
+        .filter(|(_, contents)| contents.len() > 1)
+        .map(|((item_type, id), contents)| Divergence {
+            id,
+            item_type,
+            variants: into_variants(contents),
+        })
+        .collect();
+    out.sort_by(|a, b| {
+        type_key(a.item_type)
+            .cmp(type_key(b.item_type))
+            .then_with(|| a.id.cmp(&b.id))
+    });
+    out
+}
+
+/// Hash every **copy** materialization of `inst` that is present on disk into
+/// `into`, keyed by content.
+///
+/// Symlink installs are deliberately excluded: they resolve to the catalog, so
+/// they always hold whatever the catalog holds and cannot diverge from it or
+/// from each other. A materialization that is gone (or otherwise unhashable)
+/// contributes nothing — that is `repair`'s concern, reported as `missing` drift.
+fn collect_variants(root: &Path, inst: &Installation, into: &mut BTreeMap<String, Vec<String>>) {
+    for m in &inst.materializations {
+        if m.mode != Mode::Copy {
+            continue;
+        }
+        let abs = root.join(&m.path);
+        if let Ok(hash) = content_hash(&LocalFs, &abs) {
+            into.entry(hash)
+                .or_default()
+                .push(abs.display().to_string());
+        }
+    }
+}
+
+/// Freeze a content map into sorted, deterministic groups.
+fn into_variants(contents: BTreeMap<String, Vec<String>>) -> Vec<ContentVariant> {
+    contents
+        .into_iter()
+        .map(|(hash, mut paths)| {
+            paths.sort();
+            paths.dedup();
+            ContentVariant { hash, paths }
+        })
+        .collect()
+}
+
+/// Stable sort key for an item type (`ItemType` is not `Ord`).
+fn type_key(item_type: ItemType) -> &'static str {
+    match item_type {
+        ItemType::Skill => "skill",
+        ItemType::Agent => "agent",
+    }
 }
 
 // ── propagate ────────────────────────────────────────────────────────────────

@@ -252,6 +252,166 @@ fn where_lists_known_projects_holding_the_item_with_health() {
     assert!(out.contains("not installed in any known project"), "{out}");
 }
 
+// ── cross-project divergence (issue #41) ─────────────────────────────────────
+
+/// The same catalog id can be perfectly `clean` in two projects and still hold
+/// different bytes in each — that is the conflict class `drift` cannot see.
+/// Copies are grouped by content; symlink installs resolve to the catalog and so
+/// are never part of a divergence.
+#[test]
+fn divergence_groups_copy_installs_by_content_and_ignores_symlinks() {
+    let tmp = tempfile::tempdir().unwrap();
+    let catalog = Catalog::with_root(tmp.path().join("catalog"));
+    make_skill(&catalog.root, "demo", "v1");
+
+    let a = make_project(tmp.path(), "a");
+    install_skill(&a, &catalog, "demo", &[HarnessId::Copilot], false);
+    let b = make_project(tmp.path(), "b");
+    install_skill(&b, &catalog, "demo", &[HarnessId::Copilot], false);
+    let link = make_project(tmp.path(), "link");
+    install_skill(&link, &catalog, "demo", &[HarnessId::Claude], true);
+
+    let index_file = tmp.path().join("state").join("installs.json");
+    write_index(&index_file, &[&a, &b, &link]);
+
+    // Every copy holds the same catalog content: one variant, no divergence.
+    let report = index::locate_at(&index_file, &catalog, ItemType::Skill, "demo").unwrap();
+    assert_eq!(report.projects.len(), 3, "{report:?}");
+    assert!(!report.diverged, "{report:?}");
+    assert_eq!(report.variants.len(), 1);
+    assert!(index::divergences_at(&index_file).is_empty());
+
+    // One project's copy is hand-edited. Both projects still read `clean`
+    // against their own recorded hashes, but they no longer agree.
+    let edited = b.join(".agents/skills/demo/SKILL.md");
+    fs::write(&edited, "hand-edited").unwrap();
+
+    let report = index::locate_at(&index_file, &catalog, ItemType::Skill, "demo").unwrap();
+    assert!(report.diverged, "{report:?}");
+    assert_eq!(report.variants.len(), 2);
+    let paths: Vec<&str> = report
+        .variants
+        .iter()
+        .flat_map(|v| v.paths.iter().map(String::as_str))
+        .collect();
+    let holds = |root: &Path| paths.iter().any(|p| p.starts_with(root.to_str().unwrap()));
+    assert!(holds(&a), "{paths:?}");
+    assert!(holds(&b), "{paths:?}");
+    // A symlink tracks the catalog live and cannot diverge, so it is not listed.
+    assert!(!holds(&link), "{paths:?}");
+    // Each group names exactly the paths that share its content.
+    assert!(report.variants.iter().all(|v| v.paths.len() == 1));
+
+    // The index-wide sweep finds the same id without being told which to check.
+    let diverged = index::divergences_at(&index_file);
+    assert_eq!(diverged.len(), 1, "{diverged:?}");
+    assert_eq!(diverged[0].id, "demo");
+    assert_eq!(diverged[0].item_type, ItemType::Skill);
+    assert_eq!(diverged[0].variants.len(), 2);
+
+    // Detection is read-only: the user's edit survives untouched.
+    assert_eq!(fs::read_to_string(&edited).unwrap(), "hand-edited");
+
+    // Bringing the outlier back in line collapses the groups again.
+    fs::write(&edited, "---\nname: demo\ndescription: t\n---\nv1\n").unwrap();
+    assert!(index::divergences_at(&index_file).is_empty());
+}
+
+/// `where --json` gains `variants`/`diverged`, and `doctor` gains `foreign`
+/// always plus `divergences` only under `--all`.
+#[test]
+fn doctor_and_where_json_gain_the_new_conflict_states() {
+    let tmp = tempfile::tempdir().unwrap();
+    let catalog = tmp.path().join("catalog");
+    let state = tmp.path().join("state");
+    make_skill(&catalog, "demo", "v1");
+
+    let a = make_git_project(tmp.path(), "a");
+    let b = make_git_project(tmp.path(), "b");
+    for project in [&a, &b] {
+        let (out, ok) = akit(
+            &["install", "-H", "copilot", "demo"],
+            Some(project),
+            &catalog,
+            &state,
+        );
+        assert!(ok, "install failed: {out}");
+    }
+
+    // Baseline: `foreign` is present and empty, `divergences` absent without --all.
+    let (out, ok) = akit(&["--json", "doctor"], Some(&a), &catalog, &state);
+    assert!(ok, "doctor failed: {out}");
+    let json: serde_json::Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(json["healthy"], true, "{out}");
+    assert!(json["foreign"].as_array().unwrap().is_empty(), "{out}");
+    assert!(json.get("divergences").is_none(), "{out}");
+
+    // A hand-written skill in a managed target path is reported, not touched…
+    let foreign = a.join(".github/skills/handmade");
+    fs::create_dir_all(&foreign).unwrap();
+    fs::write(foreign.join("SKILL.md"), "mine").unwrap();
+    let (out, ok) = akit(&["--json", "doctor"], Some(&a), &catalog, &state);
+    assert!(ok, "{out}");
+    let json: serde_json::Value = serde_json::from_str(&out).unwrap();
+    let entries = json["foreign"].as_array().unwrap();
+    assert_eq!(entries.len(), 1, "{out}");
+    assert_eq!(entries[0]["path"], ".github/skills/handmade");
+    assert_eq!(entries[0]["type"], "skill");
+    assert_eq!(entries[0]["harnesses"], serde_json::json!(["copilot"]));
+    // …and it is not akit drift, so the existing verdict is unchanged.
+    assert_eq!(json["healthy"], true, "{out}");
+    assert_eq!(
+        fs::read_to_string(foreign.join("SKILL.md")).unwrap(),
+        "mine"
+    );
+    // Nor is a foreign occupant ever claimed: an install that targets one is
+    // refused and leaves the bytes alone (the #32 guard, seen from the CLI).
+    make_skill(&catalog, "other", "v1");
+    let occupied = a.join(".agents/skills/other");
+    fs::create_dir_all(&occupied).unwrap();
+    fs::write(occupied.join("SKILL.md"), "not akit's").unwrap();
+    let (out, ok) = akit(
+        &["install", "-H", "copilot", "other"],
+        Some(&a),
+        &catalog,
+        &state,
+    );
+    assert!(!ok, "install over a foreign file must fail: {out}");
+    assert_eq!(
+        fs::read_to_string(occupied.join("SKILL.md")).unwrap(),
+        "not akit's"
+    );
+
+    // Diverge the two projects, then ask the index-wide question.
+    fs::write(b.join(".agents/skills/demo/SKILL.md"), "hand-edited").unwrap();
+    let (out, ok) = akit(&["--json", "doctor", "--all"], Some(&a), &catalog, &state);
+    assert!(ok, "doctor --all failed: {out}");
+    let json: serde_json::Value = serde_json::from_str(&out).unwrap();
+    let diverged = json["divergences"].as_array().unwrap();
+    assert_eq!(diverged.len(), 1, "{out}");
+    assert_eq!(diverged[0]["id"], "demo");
+    assert_eq!(diverged[0]["type"], "skill");
+    assert_eq!(diverged[0]["variants"].as_array().unwrap().len(), 2);
+
+    // `where` answers the same question for one id, from any cwd.
+    let (out, ok) = akit(&["--json", "where", "demo"], None, &catalog, &state);
+    assert!(ok, "{out}");
+    let json: serde_json::Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(json["diverged"], true, "{out}");
+    let variants = json["variants"].as_array().unwrap();
+    assert_eq!(variants.len(), 2, "{out}");
+    assert!(
+        variants
+            .iter()
+            .all(|v| !v["hash"].as_str().unwrap().is_empty())
+    );
+
+    let (out, ok) = akit(&["where", "demo"], None, &catalog, &state);
+    assert!(ok, "{out}");
+    assert!(out.contains("Diverged: 2 distinct contents"), "{out}");
+    assert!(out.contains(&canonical(&b)), "{out}");
+}
+
 // ── propagate ────────────────────────────────────────────────────────────────
 
 /// Build one project per propagation outcome, refresh the catalog, and assert

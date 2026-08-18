@@ -145,7 +145,7 @@ Each function has a plain wrapper (`install`, `plan_install`, `remove`, `status`
 Key types (all `Serialize`): `install::{HarnessContext, RemoveScope, InstallReport, InstallPreview,
 RemoveReport, ResetReport}`, `reconcile::{HealthReport, ItemHealth, MaterializationHealth}`,
 `plan::{PlannedMaterialization, PlanIssue}`, `harness::HarnessId`, `ownership::{Installation,
-MaterializationRecord}`, and `materialize::Drift`. `HarnessContext` and `RemoveScope` are inputs
+MaterializationRecord}`, `reconcile::{Diagnosis, ForeignPath}`, and `materialize::Drift`. `HarnessContext` and `RemoveScope` are inputs
 (not `Serialize`); everything else round-trips to the same JSON the `--json` CLI emits.
 
 > `reconcile` also exposes safe recovery operations a host renders behind confirmation UX —
@@ -171,14 +171,27 @@ let hits = index::locate(&catalog, ItemType::Skill, "deploy-to-vercel")?;
 let report = index::propagate(&catalog, &[(ItemType::Skill, "deploy-to-vercel".to_string())])?;
 ```
 
+```rust
+// `akit doctor --all`: catalog ids whose *copy* installs hold different bytes in
+// different projects. Symlink installs track the catalog live and never diverge.
+for d in index::divergences()? {
+    for variant in &d.variants {
+        println!("{} {}: {:?}", d.id, variant.hash, variant.paths);
+    }
+}
+```
+
 Key types (all `Serialize`/`Deserialize`): `index::{InstallIndex, ProjectEntry, WhereReport,
-WhereProject, SkippedProject, PropagationReport, ProjectPropagation, PropagatedItem,
-PropagatedPath, PropagateStatus, PropagateSummary}`. `ops::UpdateReport` gained an optional
-`propagation: Option<PropagationReport>` field, skipped in JSON when absent — additive to the
-existing `update` shape.
+WhereProject, SkippedProject, ContentVariant, Divergence, PropagationReport, ProjectPropagation,
+PropagatedItem, PropagatedPath, PropagateStatus, PropagateSummary}`. `ops::UpdateReport` gained an
+optional `propagation: Option<PropagationReport>` field, skipped in JSON when absent — additive to
+the existing `update` shape. `WhereReport` likewise gained `variants: Vec<ContentVariant>` and
+`diverged: bool` (issue #41), and `reconcile::Diagnosis` gained `foreign: Vec<ForeignPath>` — the
+unmanaged occupants of harness target paths, also available on its own via
+`reconcile::foreign_paths_with`. Divergence and foreign detection are strictly read-only.
 
 Every entry point has an `_at(index_path, …)` variant (`locate_at`, `propagate_at`,
-`known_projects_at`, `record_install_at`) so a host can keep its own state file. Index I/O is
+`divergences_at`, `known_projects_at`, `record_install_at`) so a host can keep its own state file. Index I/O is
 always local `std::fs`, never the `FsTransport` seam — the index is host state about *this*
 machine, while the seam exists to reach a remote project root.
 

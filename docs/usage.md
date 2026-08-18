@@ -703,11 +703,12 @@ or `"modified"`; `mode` is `"copy"` or `"symlink"`. Each bundle's `state` is `"c
 ### `doctor` — read-only harness-aware diagnosis
 
 ```bash
-akit doctor
+akit doctor [--all]
 ```
 
 A read-only diagnosis of the harness-aware `.akit/kit.lock.json` state — item drift, bundle
-completeness, and git-exclude drift — without modifying anything. It is the richer companion to
+completeness, git-exclude drift, and unmanaged files sitting in harness target paths — without
+modifying anything. It is the richer companion to
 [`status`](#status--harness-aware-project-overview) and the read-only counterpart of
 [`sync`](#sync--repair-safe-lockfilefilesystemexclude-drift).
 
@@ -715,9 +716,13 @@ completeness, and git-exclude drift — without modifying anything. It is the ri
   (HEALTH = `ok` / `degraded (uncovered: …)` / `missing-source`).
 - Reports git-exclude drift in **both** directions: `missing` managed lines the lockfile requires
   (restore with `sync`) and `stale` lines with no owner (prune with `sync`).
+- Reports **`foreign`** paths: files nobody's lockfile owns that occupy a place akit installs into
+  (see below).
+- With `--all`, also reports **`diverged`** ids across projects (see below).
 - Verdict `Doctor: ok`, or a summary of what's wrong (`N degraded`, `N missing-source`, missing/stale
-  exclude lines, `N partial bundle(s)`). A `partial` bundle is **informational** and does not by
-  itself make the verdict non-ok.
+  exclude lines, `N partial bundle(s)`, `N foreign`). A `partial` bundle and a `foreign` path are
+  **informational** and do not by themselves make the verdict non-ok — a foreign file is somebody
+  else's, not akit drift — but a foreign count is always named in the verdict line.
 
 Example:
 
@@ -730,6 +735,80 @@ Exclude: ok
 
 Doctor: ok
 ```
+
+#### `foreign` — unmanaged files in a managed target path
+
+If you hand-write `.github/skills/my-skill/` or drop a `.claude/agents/reviewer.md` in yourself,
+akit does not own it, will never edit or delete it, and will **refuse** to install anything over it
+(`refusing to overwrite …: a file akit does not manage already exists there`). `doctor` now tells you
+about it up front instead of at the moment an install fails:
+
+```bash
+$ akit doctor
+BUNDLE  ID             TYPE   HARNESSES  HEALTH
+-       deploy-helper  skill  claude     ok
+
+foreign (not akit-managed, left untouched):
+  .github/agents/legacy.agent.md  [agent]  (copilot)
+  .github/skills/handmade  [skill]  (copilot)
+  Remove them, or run `akit adopt` to claim ones that already match your catalog.
+
+Exclude: ok
+
+Doctor: ok (2 foreign)
+```
+
+- Every **registered** harness discovery directory is scanned, not just the ones the planner writes
+  to — a `.github/skills/<name>` is exactly the case worth reporting even though akit itself installs
+  Copilot skills into `.agents/skills`.
+- Shape rules keep the report honest: a skill target is a directory, an agent target is a file ending
+  in that harness's extension. Dot-prefixed entries (`.DS_Store`, akit's own `.<name>.akit-stage`
+  temps) are ignored.
+- `type` says which kind of *location* is occupied, not what the file actually contains.
+- The remedies are yours: delete it, leave it, or — if its bytes already match a catalog item —
+  [`akit adopt`](#repair--detach--forget--adopt--maintain-akit-ownership) it. `doctor` never
+  modifies or deletes anything.
+
+Note that `detach`ing an install turns its (preserved) files into foreign paths on the next
+`doctor` — that is the correct reading: the bytes are still there and akit no longer owns them.
+
+#### `--all` — cross-project divergence
+
+```bash
+akit doctor --all
+```
+
+Adds one index-wide question to the local diagnosis: **is the same catalog id installed with
+different content in different projects?** This is invisible to per-project drift — each project can
+be perfectly `clean` against its own recorded hash while holding bytes the next project has never
+seen (a copy installed before a catalog `update`, or edited in place).
+
+```bash
+$ akit doctor --all
+BUNDLE  ID             TYPE   HARNESSES  HEALTH
+-       deploy-helper  skill  claude     ok
+
+Exclude: ok
+
+Doctor: ok
+
+Diverged across projects:
+  Skill 'deploy-helper' — 2 distinct contents:
+    9f2c1ab07e41:
+      /Users/me/work/api/.agents/skills/deploy-helper
+    c40d55e9a1b2:
+      /Users/me/work/site/.agents/skills/deploy-helper
+```
+
+- Driven by the [global install index](#the-global-install-index), so it sees every project akit has
+  installed into — but only those. It still needs a local project for the rest of the diagnosis.
+- **Copy installs only.** A `--symlink` install resolves to the catalog and therefore always holds
+  whatever the catalog holds; it cannot diverge and is never listed.
+- Content is compared with the same sha256 `drift` uses; the printed 12-character prefix just
+  distinguishes the groups.
+- Read-only, like everything else in `doctor`. To resolve a divergence, refresh the clean copies with
+  [`update --propagate`](#--propagate--re-sync-copy-installs-in-your-projects) — edited copies are
+  conflicts and stay yours.
 
 With `--json`, `doctor` emits a `reconcile::Diagnosis`:
 
@@ -751,6 +830,9 @@ With `--json`, `doctor` emits a `reconcile::Diagnosis`:
   "bundles": [],
   "stale_excludes": [],
   "missing_excludes": [],
+  "foreign": [
+    { "path": ".github/skills/handmade", "type": "skill", "harnesses": ["copilot"] }
+  ],
   "lockfile_present": true,
   "healthy": true
 }
@@ -758,7 +840,33 @@ With `--json`, `doctor` emits a `reconcile::Diagnosis`:
 
 `items` are the same `ItemHealth` objects [`status`](#status--harness-aware-project-overview) emits;
 `bundles` is its completeness array; `healthy` is true when nothing drifts and the exclude block
-matches the lockfile (partial bundles don't affect it).
+matches the lockfile (partial bundles and foreign paths don't affect it).
+
+`--all` adds a sibling `divergences` array — and only then, so the object is unchanged without the
+flag, exactly like [`update --json`](#--propagate--re-sync-copy-installs-in-your-projects) and its
+`propagation`:
+
+```json
+{
+  "items": [],
+  "bundles": [],
+  "stale_excludes": [],
+  "missing_excludes": [],
+  "foreign": [],
+  "lockfile_present": true,
+  "healthy": true,
+  "divergences": [
+    {
+      "id": "deploy-helper",
+      "type": "skill",
+      "variants": [
+        { "hash": "9f2c1ab07e41…", "paths": ["/Users/me/work/api/.agents/skills/deploy-helper"] },
+        { "hash": "c40d55e9a1b2…", "paths": ["/Users/me/work/site/.agents/skills/deploy-helper"] }
+      ]
+    }
+  ]
+}
+```
 
 > **Breaking change:** `doctor` now diagnoses the harness-aware `.akit/kit.lock.json` (previously the
 > legacy `.copilot` lockfile). The `--json` shape changed from the old
@@ -1382,10 +1490,42 @@ Skill 'deploy-to-vercel' — installed in 2 project(s):
 - A project whose lockfile cannot be read is listed under `Skipped … unreadable project(s)` instead
   of failing the command.
 
-With `--json`, `where` emits `{ "id", "type", "projects", "skipped" }`, where each project is
-`{ "project": "<abs path>", "health": { … } }` and `health` is the same per-item object `installed`
-emits (`harnesses`, `materializations` with `mode`/`covers`/`drift`, `source_present`, `degraded`).
-`skipped` entries are `{ "project", "error" }`.
+#### `diverged` — the same id with different content
+
+`where` also answers whether those projects actually agree. Every **copy** install of the id is
+hashed on disk and grouped by content; more than one group means the id has diverged:
+
+```bash
+$ akit where deploy-to-vercel
+Skill 'deploy-to-vercel' — installed in 2 project(s):
+
+/Users/me/work/api
+  harnesses: copilot   health: ok
+  .agents/skills/deploy-to-vercel  [copy]  (copilot)  clean
+
+/Users/me/work/site
+  harnesses: copilot   health: ok
+  .agents/skills/deploy-to-vercel  [copy]  (copilot)  clean
+
+Diverged: 2 distinct contents across copy installs.
+  9f2c1ab07e41:
+    /Users/me/work/api/.agents/skills/deploy-to-vercel
+  c40d55e9a1b2:
+    /Users/me/work/site/.agents/skills/deploy-to-vercel
+  `akit update --propagate` re-syncs clean copies; edited copies are left as yours.
+```
+
+Both projects read `clean` — each matches its *own* recorded hash — and they still hold different
+bytes. That is the conflict per-project drift cannot see. `--symlink` installs resolve to the catalog
+and are never part of a divergence. Use [`doctor --all`](#--all--cross-project-divergence) to ask the
+same question for every id at once.
+
+With `--json`, `where` emits `{ "id", "type", "projects", "skipped", "variants", "diverged" }`, where
+each project is `{ "project": "<abs path>", "health": { … } }` and `health` is the same per-item
+object `installed` emits (`harnesses`, `materializations` with `mode`/`covers`/`drift`,
+`source_present`, `degraded`). `skipped` entries are `{ "project", "error" }`. `variants` is one
+`{ "hash", "paths" }` group per distinct copy content, and `diverged` is true when there is more than
+one.
 
 #### The global install index
 
@@ -1530,6 +1670,11 @@ Adopted skill 'deploy-to-vercel' for copilot:
 All three of `detach`/`forget`/`adopt` accept `--json` (`detach`/`forget` emit a `DetachReport`
 with `id`, `type`, `paths`, `not_installed`; `adopt` emits an `AdoptReport` with `harnesses`,
 `adopted_paths`, `conflicts`).
+
+`adopt` is the remedy [`doctor`](#foreign--unmanaged-files-in-a-managed-target-path) points at when
+it reports a `foreign` path whose bytes already match your catalog. A `foreign` file that does *not*
+match is not adoptable by design — akit will not come to "own" bytes it cannot reproduce from the
+catalog — so remove it, or keep it and let akit stay out of the way.
 
 ## How it stays out of your repo
 
